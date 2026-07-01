@@ -1,0 +1,52 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ClearWright: compile tools",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "-m", "py_compile",
+        "tools/clearwright_validate.py",
+        "tools/clearwright_claim.py",
+        "tools/clearwright_lifecycle.py"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "ClearWright: run tests",
+      "type": "shell",
+      "command": "python",
+      "args": ["-m", "unittest", "discover", "-s", "tests"],
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "ClearWright: validate example packet",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "tools/clearwright_validate.py",
+        "schema/examples/clearance_packet.example.json"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ClearWright: load schema (sqlite3)",
+      "type": "shell",
+      "command": "sqlite3",
+      "args": [":memory:"],
+      "options": { "shell": { "args": [] } },
+      "problemMatcher": [],
+      "detail": "Loads schema/clearance_packet.sql via stdin redirection in an integrated terminal."
+    },
+    {
+      "label": "ClearWright: queue status",
+      "type": "shell",
+      "command": "python",
+      "args": ["tools/clearwright_lifecycle.py", "status", "examples/queue/"],
+      "problemMatcher": []
+    }
+  ]
+}

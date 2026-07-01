@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+.npm/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.*
+# Allow committing the example template (must come after .env.* above)
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+*.token
+*.secret
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# IDE
+# Ignore local VS Code state, but keep the shared cockpit config in version control.
+.vscode/*
+!.vscode/extensions.json
+!.vscode/tasks.json
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# Clearance queue packets (local runtime data).
+# Keep the four channel directories tracked via .gitkeep, but ignore packet
+# contents so live runtime packets are never committed.
+examples/queue/clearance_outbox/*
+!examples/queue/clearance_outbox/.gitkeep
+examples/queue/clearance_in_progress/*
+!examples/queue/clearance_in_progress/.gitkeep
+examples/queue/clearance_done/*
+!examples/queue/clearance_done/.gitkeep
+examples/queue/clearance_failed/*
+!examples/queue/clearance_failed/.gitkeep
+
+# Temp
+tmp/
+temp/
+*.tmp
+*.bak

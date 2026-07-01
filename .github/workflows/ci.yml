@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    name: Syntax, tests, and naming gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Show Python version
+        run: python --version
+
+      - name: Compile clearwright_validate
+        run: python -m py_compile tools/clearwright_validate.py
+
+      - name: Compile clearwright_claim
+        run: python -m py_compile tools/clearwright_claim.py
+
+      - name: Compile clearwright_lifecycle
+        run: python -m py_compile tools/clearwright_lifecycle.py
+
+      - name: Smoke test, validate help
+        run: python tools/clearwright_validate.py --help
+
+      - name: Smoke test, claim help
+        run: python tools/clearwright_claim.py --help
+
+      - name: Smoke test, lifecycle help
+        run: python tools/clearwright_lifecycle.py --help
+
+      - name: Validate example clearance packet
+        run: python tools/clearwright_validate.py schema/examples/clearance_packet.example.json
+
+      - name: Parse example JSON
+        run: python -m json.tool schema/examples/clearance_packet.example.json
+
+      - name: Load schema into SQLite
+        run: sqlite3 :memory: < schema/clearance_packet.sql
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Naming gate (retired terms must not appear)
+        run: |
+          set -e
+          patterns='writ protocol|writ_protocol|writ-protocol|writ ai protocol|writ packet|writ_packet|writ-packet|voltex|/voltex|VOLTEX_'
+          if grep -rInE "$patterns" \
+               --include='*.md' --include='*.py' --include='*.sql' \
+               --include='*.json' --include='*.yml' --include='*.yaml' \
+               --include='*.txt' . ; then
+            echo "Naming gate failed: a retired term was found above."
+            exit 1
+          fi
+          echo "Naming gate passed: no retired terms found."

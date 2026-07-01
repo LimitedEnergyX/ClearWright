@@ -1,0 +1,16 @@
+{
+  "// note": "Recommended extensions for the ClearWright cockpit. All IDs verified against the marketplace.",
+  "recommendations": [
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "github.vscode-pull-request-github",
+    "github.vscode-github-actions",
+    "davidanson.vscode-markdownlint",
+    "redhat.vscode-yaml",
+    "streetsidesoftware.code-spell-checker",
+    "github.copilot",
+    "github.copilot-chat",
+    "anthropic.claude-code",
+    "openai.chatgpt"
+  ]
+}

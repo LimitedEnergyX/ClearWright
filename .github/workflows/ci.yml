@@ -56,10 +56,12 @@ jobs:
         run: |
           set -e
           patterns='writ protocol|writ_protocol|writ-protocol|writ ai protocol|writ packet|writ_packet|writ-packet|voltex|/voltex|VOLTEX_'
+          # Exclude this workflow file: it necessarily contains the retired terms
+          # as grep patterns, which would otherwise self-trigger the gate.
           if grep -rInE "$patterns" \
                --include='*.md' --include='*.py' --include='*.sql' \
                --include='*.json' --include='*.yml' --include='*.yaml' \
-               --include='*.txt' . ; then
+               --include='*.txt' --exclude='ci.yml' . ; then
             echo "Naming gate failed: a retired term was found above."
             exit 1
           fi

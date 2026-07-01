@@ -15,7 +15,7 @@ This is a manual operator tool, not a background worker. It does not run a
 daemon, schedule work, retry, requeue, arbitrate, or touch Discord. complete and
 fail each act on exactly one named packet and never overwrite a destination.
 
-Doctrine (see docs/QUEUE_MODEL.md and docs/ADR/ADR-0007):
+Doctrine (see docs/QUEUE_MODEL.md and docs/LOCAL_REPO_PROFILE.md):
   DTA is a successful safety/governance outcome and lives in clearance_done/,
   never clearance_failed/. SUPERSEDED is a closed replacement, not a failure.
   clearance_failed/ is for execution or processing failure only. DEFER and FREEZE
@@ -131,7 +131,7 @@ def analyze(path, packet, now, queue_root=None):
         elif dt < now:
             clearance_expired = True
 
-    # Stale definition (docs/QUEUE_MODEL.md, ADR-0007): a present lease that is
+    # Stale definition (docs/QUEUE_MODEL.md, docs/LOCAL_REPO_PROFILE.md): a present lease that is
     # earlier than now. A missing claim_expires_at does not expire. A missing
     # clearance_expires_at for IN_PROGRESS is reported as invalid by the field
     # validator, not treated as stale here.
@@ -248,8 +248,8 @@ def build_transition(packet, filename, new_status, dest_dir, actor, reason=None)
 
     packet_hash is intentionally left unchanged: the repository defines no
     canonical hashing scheme and the validator does not verify the hash, so
-    recomputing it would be inventing doctrine. This mirrors PR #28 and is a
-    documented known limitation.
+    recomputing it would be inventing doctrine. This mirrors the claim tool and is
+    a documented known limitation.
     """
     out = dict(packet)
     now = wpc._utc_now()

@@ -45,7 +45,7 @@ RTA -> IN_REVIEW -> CTA -> IN_PROGRESS -> DONE
    Claim fields (`claimed_by`, `claimed_at`, `claim_expires_at`) are set in the same write.
 5. **Agent-issued clearance.** CTA and DTA may be issued by agents, reviewers, arbiters,
    policy rules, or the operator, depending on authority class and delegated policy.
-   `cleared_by` and `denied_by` record who issued the decision. See ADR-0006.
+   `cleared_by` and `denied_by` record who issued the decision. See [docs/AUTHORITY_MODEL.md](../docs/AUTHORITY_MODEL.md).
 6. **Operator is highest authority.** The operator may override any CTA or DTA at any time.
 
 ## Validation
@@ -97,9 +97,9 @@ This is v0.1. The table schema may gain columns in future PRs. Use
 `ALTER TABLE clearance_packet ADD COLUMN` for additive changes. Destructive changes
 require a new migration file and an ADR update.
 
-## New fields (v0.1, PR #21)
+## New fields (v0.1)
 
-The schema gained authority and coordination fields in PR #21 (see ADR-0006):
+The schema includes authority and coordination fields (see [docs/AUTHORITY_MODEL.md](../docs/AUTHORITY_MODEL.md)):
 
 | Field | Type | Purpose |
 |-------|------|---------|

@@ -322,8 +322,8 @@ If the registry and the filesystem diverge:
 
 ## What this document does not cover
 
-- Python implementation of the queue worker. Deferred to PR #20.
-- Runtime integration with the orchestrator. Deferred to PR #21.
+- Python implementation of the queue worker. Deferred to a later change.
+- Runtime integration with the orchestrator. Deferred to a later change.
 - Multi-agent claim coordination beyond move-first/read-second. Future ADR.
 - Runtime population and movement of packets between queue directories. The
   canonical directories now exist as Git-tracked channels with `.gitkeep` (see

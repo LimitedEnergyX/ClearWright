@@ -47,7 +47,8 @@ jobs:
         run: python -m json.tool schema/examples/clearance_packet.example.json
 
       - name: Load schema into SQLite
-        run: sqlite3 :memory: < schema/clearance_packet.sql
+        run: |
+          sqlite3 :memory: < schema/clearance_packet.sql
 
       - name: Unit tests
         run: python -m unittest discover -s tests

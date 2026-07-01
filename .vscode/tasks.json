@@ -35,11 +35,9 @@
     {
       "label": "ClearWright: load schema (sqlite3)",
       "type": "shell",
-      "command": "sqlite3",
-      "args": [":memory:"],
-      "options": { "shell": { "args": [] } },
+      "command": "sqlite3 :memory: < schema/clearance_packet.sql",
       "problemMatcher": [],
-      "detail": "Loads schema/clearance_packet.sql via stdin redirection in an integrated terminal."
+      "detail": "Loads schema/clearance_packet.sql into an in-memory SQLite database."
     },
     {
       "label": "ClearWright: queue status",

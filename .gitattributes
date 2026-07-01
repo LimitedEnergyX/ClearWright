@@ -1,0 +1,11 @@
+# Normalize all text files to LF in the repository, regardless of contributor OS.
+* text=auto eol=lf
+
+# Treat binary assets as binary so they are never line-ending normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary

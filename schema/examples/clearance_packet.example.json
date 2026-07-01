@@ -7,18 +7,18 @@
   "updated_at": "2026-06-29T14:28:00Z",
   "status": "IN_PROGRESS",
   "risk_level": "low",
-  "scope": "schema/README.md -- additive docs change, no runtime or schema modifications",
-  "intent": "Add a reference table for the new authority and coordination fields introduced in PR #21.",
+  "scope": "schema/README.md: additive docs change, no runtime or schema modifications",
+  "intent": "Add a reference table for the new authority and coordination fields.",
   "proposed_action": "Append a new section to schema/README.md listing the v0.1 authority fields and their allowed values.",
   "inputs_json": {
     "files_changed": ["schema/README.md"],
     "lines_added": 22,
     "lines_removed": 0,
     "test_coverage": "n/a - docs-only change",
-    "branch": "protocol/agent-issued-clearance-semantics"
+    "branch": "docs/schema-authority-fields"
   },
   "review_json": {
-    "reviewer": "agent/claude-orchestrator",
+    "reviewer": "agent/repo-orchestrator",
     "reviewed_at": "2026-06-29T14:20:00Z",
     "verdict": "APPROVE",
     "notes": "Additive docs change. Clearance class DOCS_ONLY. Low risk. No runtime impact. Autonomously cleared per delegated policy."
@@ -26,7 +26,7 @@
   "rfi_json": null,
   "decision_json": {
     "decision": "CTA",
-    "decided_by": "agent/claude-orchestrator",
+    "decided_by": "agent/repo-orchestrator",
     "decided_at": "2026-06-29T14:22:00Z",
     "rationale": "Routine low-risk docs update within DOCS_ONLY clearance class. Cleared autonomously by orchestrator per operator-defined policy. No human approval required for this clearance class.",
     "clearance_class": "DOCS_ONLY",
@@ -36,8 +36,8 @@
   "audit_json": {
     "events": [
       {"at": "2026-06-29T14:00:00Z", "event": "RTA_CREATED",      "actor": "agent/worker-codegen",      "note": "Worker agent requests docs update"},
-      {"at": "2026-06-29T14:05:00Z", "event": "IN_REVIEW",         "actor": "agent/claude-orchestrator", "note": "Orchestrator reviewing RTA"},
-      {"at": "2026-06-29T14:22:00Z", "event": "CTA_ISSUED",        "actor": "agent/claude-orchestrator", "note": "Autonomously cleared: DOCS_ONLY class, low risk, within delegated authority"},
+      {"at": "2026-06-29T14:05:00Z", "event": "IN_REVIEW",         "actor": "agent/repo-orchestrator", "note": "Orchestrator reviewing RTA"},
+      {"at": "2026-06-29T14:22:00Z", "event": "CTA_ISSUED",        "actor": "agent/repo-orchestrator", "note": "Autonomously cleared: DOCS_ONLY class, low risk, within delegated authority"},
       {"at": "2026-06-29T14:28:00Z", "event": "IN_PROGRESS",       "actor": "agent/worker-codegen",      "note": "Worker claimed packet and began work"}
     ]
   },
@@ -49,9 +49,9 @@
   "priority_class": "NORMAL",
   "channel_id": "docs/schema",
   "channel_state": "CLEAR",
-  "cleared_by": "agent/claude-orchestrator",
+  "cleared_by": "agent/repo-orchestrator",
   "denied_by": null,
-  "delegated_by": "operator/shawn",
+  "delegated_by": "OPERATOR-0001",
   "clearance_expires_at": "2026-06-29T16:22:00Z",
   "escalation_required": 0,
   "escalation_reason": null,

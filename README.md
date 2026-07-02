@@ -70,12 +70,13 @@ This repository ships the local, single-machine foundation:
   (`tools/clearwright_claim.py`).
 - A manual lifecycle tool: inspect, complete, fail, stale detection, and status
   (`tools/clearwright_lifecycle.py`).
+- A manual clearance decision tool: clear (CTA), deny (DTA), or request
+  information (RFI) on one outbox packet (`tools/clearwright_decide.py`).
 - A stdlib test suite ([tests/](tests/)).
 
-Documented as direction, not yet implemented here: manual clearance decisions
-(CTA/DTA/RFI tooling), a read-only packet index, a canonical packet hash policy,
-and a unified operator command surface. These are planned steps, described
-honestly as future work.
+Documented as direction, not yet implemented here: a read-only packet index, a
+canonical packet hash policy, and a unified operator command surface. These are
+planned steps, described honestly as future work.
 
 ## Quickstart
 
@@ -89,6 +90,20 @@ python tools/clearwright_lifecycle.py status examples/queue/
 # Inspect one packet (read-only)
 python tools/clearwright_lifecycle.py inspect \
     examples/queue/clearance_in_progress/<packet>.json
+
+# Clear an outbox packet to act (stays in the outbox until claimed)
+python tools/clearwright_decide.py cta \
+    examples/queue/clearance_outbox/<packet>.json --actor OPERATOR-0001
+
+# Deny an outbox packet (a governance outcome; moves to clearance_done/)
+python tools/clearwright_decide.py dta \
+    examples/queue/clearance_outbox/<packet>.json \
+    --actor OPERATOR-0001 --reason "Out of scope for this milestone."
+
+# Request more information (stays in the outbox for follow-up)
+python tools/clearwright_decide.py rfi \
+    examples/queue/clearance_outbox/<packet>.json \
+    --actor OPERATOR-0001 --reason "Which files does this change?"
 ```
 
 Runtime clearance packets are local data and are not committed to the repository.

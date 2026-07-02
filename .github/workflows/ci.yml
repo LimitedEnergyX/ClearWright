@@ -31,6 +31,9 @@ jobs:
       - name: Compile clearwright_lifecycle
         run: python -m py_compile tools/clearwright_lifecycle.py
 
+      - name: Compile clearwright_decide
+        run: python -m py_compile tools/clearwright_decide.py
+
       - name: Smoke test, validate help
         run: python tools/clearwright_validate.py --help
 
@@ -39,6 +42,9 @@ jobs:
 
       - name: Smoke test, lifecycle help
         run: python tools/clearwright_lifecycle.py --help
+
+      - name: Smoke test, decide help
+        run: python tools/clearwright_decide.py --help
 
       - name: Validate example clearance packet
         run: python tools/clearwright_validate.py schema/examples/clearance_packet.example.json

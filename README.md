@@ -128,11 +128,21 @@ The product and platform is ClearWright. The specification is the ClearWright
 Protocol. The record artifact is a clearance packet. See
 [docs/NAMING.md](docs/NAMING.md) for the full naming rules.
 
+## Peer review welcome
+
+ClearWright is public as an early alpha so the protocol, queue lifecycle,
+authority model, and local reference implementation can be reviewed in the open.
+Reviews that challenge lifecycle correctness, authority boundaries, audit
+behavior, and implementation simplicity are especially useful. See
+[docs/PEER_REVIEW.md](docs/PEER_REVIEW.md).
+
 ## Project docs
 
 - [ROADMAP.md](ROADMAP.md): current status, near-term, later, and non-goals.
 - [docs/END_OF_ALPHA_TARGET.md](docs/END_OF_ALPHA_TARGET.md): end-of-alpha target
   workflow (protocol vision, not a current-state implementation claim).
+- [docs/PEER_REVIEW.md](docs/PEER_REVIEW.md): what review is useful and how to
+  offer it.
 - [CHANGELOG.md](CHANGELOG.md): notable changes.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): community expectations.

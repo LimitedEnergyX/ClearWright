@@ -14,6 +14,24 @@ record of decisions.
 - Use the naming rules in [docs/NAMING.md](docs/NAMING.md). Retired terminology is
   rejected by continuous integration.
 
+## Review and collaboration
+
+Protocol review is welcome. ClearWright is early alpha and public so the model can
+be examined in the open, and specific review is the most useful kind.
+
+- Prefer specific feedback tied to a status, queue lane, authority class, or
+  lifecycle transition.
+- For substantial changes, open an issue first. The
+  [protocol review issue template](.github/ISSUE_TEMPLATE/protocol-review.md) is a
+  good starting point.
+- Keep examples generic and free of secrets, customer data, live clearance
+  packets, or personal data.
+- Consensus can improve review quality, but does not replace human-commanded
+  authority. Human or delegated authority remains responsible for CTA / DTA / RFI
+  decisions.
+
+See [docs/PEER_REVIEW.md](docs/PEER_REVIEW.md) for what review is most useful.
+
 ## Naming and public language
 
 - Follow the naming rules in [docs/NAMING.md](docs/NAMING.md), which the

@@ -9,11 +9,14 @@ than opening a public issue.
   if enabled, or contact the maintainer directly.
 - Include a clear description, steps to reproduce, affected files or commands, and
   any suggested mitigation.
+- Do not report secrets publicly. Do not include credentials, tokens, customer
+  data, or live clearance packet contents in a report or a public issue.
 - Please allow reasonable time for a fix before any public disclosure.
 
 ## Scope
 
-This project is local-first and single-machine at present. It does not run a
+The security posture is early alpha and local-reference only. This project is
+local-first and single-machine at present. It does not run a
 network service, a daemon, or a scheduler, and it does not manage secrets. The
 most relevant concerns are:
 

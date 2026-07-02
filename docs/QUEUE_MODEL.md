@@ -1,4 +1,4 @@
-# Writ Clearance Queue Lifecycle
+# ClearWright&trade;: Clearance Queue Lifecycle
 
 This document defines the filesystem queue model for clearance packets in ClearWright&trade;.
 The queue is the durable layer. The SQLite registry (see `schema/clearance_packet.sql`)

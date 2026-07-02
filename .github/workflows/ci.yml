@@ -56,10 +56,13 @@ jobs:
       - name: Naming gate (retired terms must not appear)
         run: |
           set -e
-          patterns='writ protocol|writ_protocol|writ-protocol|writ ai protocol|writ packet|writ_packet|writ-packet|voltex|/voltex|VOLTEX_'
+          # Case-insensitive. '\bwrit\b' catches any standalone "Writ"/"writ",
+          # including a "Writ Protocol" split across a line break (the standalone
+          # token still matches on its own line).
+          patterns='writ protocol|writ_protocol|writ-protocol|writ ai protocol|writ packet|writ_packet|writ-packet|\bwrit\b|voltex|/voltex|VOLTEX_'
           # Exclude this workflow file: it necessarily contains the retired terms
           # as grep patterns, which would otherwise self-trigger the gate.
-          if grep -rInE "$patterns" \
+          if grep -rInEi "$patterns" \
                --include='*.md' --include='*.py' --include='*.sql' \
                --include='*.json' --include='*.yml' --include='*.yaml' \
                --include='*.txt' --exclude='ci.yml' . ; then

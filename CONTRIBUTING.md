@@ -1,7 +1,8 @@
 # Contributing to ClearWright
 
-Thank you for your interest in ClearWright. This project values small, reviewed,
-well-scoped changes and a durable record of decisions.
+Thank you for your interest in ClearWright. Contributions are welcome but
+controlled: this project values small, reviewed, well-scoped changes and a durable
+record of decisions.
 
 ## Ground rules
 
@@ -12,6 +13,21 @@ well-scoped changes and a durable record of decisions.
   Avoid overclaiming.
 - Use the naming rules in [docs/NAMING.md](docs/NAMING.md). Retired terminology is
   rejected by continuous integration.
+
+## Naming and public language
+
+- Follow the naming rules in [docs/NAMING.md](docs/NAMING.md), which the
+  continuous-integration naming gate enforces.
+- Do not reintroduce retired or legacy names and references: the earlier protocol
+  name, the legacy lab codename, retired packet or queue identifiers, or old pull
+  request and decision-record numbers from the previous repository.
+- Keep examples generic. Do not include secrets, tokens, customer data, live
+  clearance packet data, or personal names.
+- Keep public-facing language calm and non-hype. Describe what exists as existing
+  and what is planned as direction.
+- In authority examples, use `OPERATOR-0001` for the top normal human command and
+  `CEO` rather than a personal name. Use `EMERGENCY_ROOT_HALT` / `0000` only for an
+  emergency halt.
 
 ## Local development
 

@@ -35,8 +35,8 @@ the SQLite registry is an index (see [QUEUE_MODEL.md](QUEUE_MODEL.md)).
 
 ## Decision
 
-We define the **ClearWright Local Repo Profile v0.1**, the first enforceable Writ
-Protocol profile. It names what is in scope now, what is out of scope now, the
+We define the **ClearWright Local Repo Profile v0.1**, the first enforceable
+ClearWright Protocol profile. It names what is in scope now, what is out of scope now, the
 default policy rules and which of them are enforced in code today, the priority
 semantics, the channel taxonomy, and the enforcement mechanisms now and later.
 

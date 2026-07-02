@@ -2,7 +2,7 @@
 """
 tools/clearwright_lifecycle.py: ClearWright Protocol v0.1 manual queue lifecycle control.
 
-A safe, manual operator surface for the local Writ clearance queue after a packet
+A safe, manual operator surface for the local ClearWright clearance queue after a packet
 has been claimed into clearance_in_progress/. It offers five subcommands:
 
   inspect   Read one packet and summarize its lifecycle state (read-only).
@@ -608,7 +608,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="clearwright_lifecycle",
         description=(
-            "Manual Writ queue lifecycle control (v0.1). Inspect, complete, or "
+            "Manual ClearWright queue lifecycle control (v0.1). Inspect, complete, or "
             "fail one claimed packet, and run read-only stale and status scans. "
             "This is a manual operator tool: no daemon, scheduler, retry, "
             "requeue, or Discord behavior.\n\n"

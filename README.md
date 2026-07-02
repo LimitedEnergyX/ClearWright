@@ -11,11 +11,15 @@ and every request leaves a durable record.
 
 Operator-controlled means the operator defines policy, authority classes, and
 escalation rules, not that the operator approves every routine action. Agents may
-clear and deny routine actions autonomously within their delegated authority.
+clear and deny routine actions within their delegated authority.
 
 The specification is the **ClearWright Protocol**: Request to Act (RTA), Clear to
 Act (CTA), Denied to Act (DTA), Request for Information (RFI), and durable
 **clearance packets** that move through a four-state **clearance queue**.
+
+> **Status: early alpha.** ClearWright is a local reference implementation of the
+> ClearWright Protocol, human-commanded and operator-controlled, and under active
+> development.
 
 ## Why ClearWright
 
@@ -98,20 +102,31 @@ override, when work should defer or escalate, and what the layer prevented. It i
 not a tool-access framework, an agent-to-agent messaging bus, or a workflow
 orchestrator. It sits above and beside those.
 
+It is early alpha and a local reference implementation. It is not production-ready,
+not an official standard, and not a compliance framework. Consensus may support a
+clearance, but it does not grant authority; the operator remains the final
+override.
+
 ## Naming
 
 The product and platform is ClearWright. The specification is the ClearWright
 Protocol. The record artifact is a clearance packet. See
 [docs/NAMING.md](docs/NAMING.md) for the full naming rules.
 
-## Contributing and security
+## Project docs
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
-and [SECURITY.md](SECURITY.md).
+- [ROADMAP.md](ROADMAP.md): current status, near-term, later, and non-goals.
+- [CHANGELOG.md](CHANGELOG.md): notable changes.
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): community expectations.
+- [SECURITY.md](SECURITY.md): how to report security issues.
+- [TRADEMARK.md](TRADEMARK.md): trademark policy.
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE). The
+Apache-2.0 license does not grant rights to the ClearWright name or marks; see
+[TRADEMARK.md](TRADEMARK.md).
 
 ---
 

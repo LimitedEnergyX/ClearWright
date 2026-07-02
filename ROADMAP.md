@@ -11,11 +11,10 @@ dates.
 - Private-to-public readiness in progress.
 - The clearance packet schema and the clearance queue model exist.
 - Continuous integration and a naming gate exist.
-- Manual clearance decisions are planned but not yet implemented.
+- Manual clearance decisions (CTA / DTA / RFI) exist.
 
 ## Near-term
 
-- Manual CTA / DTA / RFI decisions.
 - Queue lifecycle refinement.
 - Packet validation hardening.
 - ClearWright Local Repo Profile refinement.

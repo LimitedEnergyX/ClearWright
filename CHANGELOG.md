@@ -5,6 +5,9 @@ will be added when releases begin.
 
 ## Unreleased
 
+- End-of-alpha target workflow document (`docs/END_OF_ALPHA_TARGET.md`):
+  protocol-vision diagram of the human-command-to-final-output flow, labeled as
+  target state rather than a current-state implementation claim.
 - Manual clearance decision tool (`tools/clearwright_decide.py`): clear (CTA),
   deny (DTA), or request information (RFI) on one outbox packet.
 - Repository baseline hardening.

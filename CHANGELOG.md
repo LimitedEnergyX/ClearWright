@@ -5,6 +5,9 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Added peer-review guidance for protocol, lifecycle, authority, and
+  implementation feedback (`docs/PEER_REVIEW.md`, a protocol review issue
+  template, and README/CONTRIBUTING pointers).
 - End-of-alpha target workflow document (`docs/END_OF_ALPHA_TARGET.md`):
   protocol-vision diagram of the human-command-to-final-output flow, labeled as
   target state rather than a current-state implementation claim.

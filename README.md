@@ -131,6 +131,8 @@ Protocol. The record artifact is a clearance packet. See
 ## Project docs
 
 - [ROADMAP.md](ROADMAP.md): current status, near-term, later, and non-goals.
+- [docs/END_OF_ALPHA_TARGET.md](docs/END_OF_ALPHA_TARGET.md): end-of-alpha target
+  workflow (protocol vision, not a current-state implementation claim).
 - [CHANGELOG.md](CHANGELOG.md): notable changes.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): community expectations.

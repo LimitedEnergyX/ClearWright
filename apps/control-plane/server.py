@@ -90,6 +90,24 @@ def make_queue_root():
     return root
 
 
+def ensure_lanes(root):
+    """Create the four canonical lane directories under root if missing.
+    Never deletes anything; safe on an existing durable queue."""
+    for lane in LANES:
+        os.makedirs(os.path.join(root, lane), exist_ok=True)
+
+
+def queue_has_packets(root):
+    """True if any lane already contains a .json packet."""
+    for lane in LANES:
+        lane_dir = os.path.join(root, lane)
+        if os.path.isdir(lane_dir) and any(
+            n.endswith(".json") for n in os.listdir(lane_dir)
+        ):
+            return True
+    return False
+
+
 def seed_queue(root):
     """Reset the demo queue: clear all lanes, then copy the seed RTA packets
     into clearance_outbox. Only .json files are touched."""
@@ -103,6 +121,39 @@ def seed_queue(root):
     for name in sorted(os.listdir(DEMO_PACKETS)):
         if name.endswith(".json"):
             shutil.copy2(os.path.join(DEMO_PACKETS, name), os.path.join(outbox, name))
+
+
+def resolve_queue_root(queue_root):
+    """Return (root, durable).
+
+    When queue_root is given, use that durable directory: create it and the
+    lane directories if missing, and seed the demo packets ONLY when the queue
+    is empty. An existing durable queue with packets is left exactly as-is,
+    never cleared or overwritten. When queue_root is None, preserve the
+    original behavior: a fresh temporary queue seeded with the demo packets.
+    """
+    if queue_root:
+        root = os.path.abspath(queue_root)
+        os.makedirs(root, exist_ok=True)
+        ensure_lanes(root)
+        if not queue_has_packets(root):
+            seed_queue(root)
+        return root, True
+    root = make_queue_root()
+    seed_queue(root)
+    return root, False
+
+
+def do_reset(root, durable):
+    """Reset the demo queue to the seed packets. Refused on a durable queue so
+    the UI's Reset control can never destroy governed work."""
+    if durable:
+        return {"ok": False,
+                "error": "reset is disabled on a durable --queue-root; the "
+                         "demo queue is only reset when running on the default "
+                         "temporary queue"}
+    seed_queue(root)
+    return {"ok": True}
 
 
 def load_json(path):
@@ -513,6 +564,7 @@ def read_mission():
 # --------------------------------------------------------------------------- #
 
 QUEUE_ROOT = None  # set in main()
+DURABLE = False    # True when running against a persistent --queue-root
 
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -580,8 +632,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/reset":
-            seed_queue(QUEUE_ROOT)
-            self._send_json({"ok": True, "state": build_state(QUEUE_ROOT)})
+            result = do_reset(QUEUE_ROOT, DURABLE)
+            result["state"] = build_state(QUEUE_ROOT)
+            self._send_json(result)
             return
 
         if path == "/api/action":
@@ -612,20 +665,30 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global QUEUE_ROOT
+    global QUEUE_ROOT, DURABLE
     parser = argparse.ArgumentParser(description="ClearWright local control plane demo (early alpha).")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1, local only).")
     parser.add_argument("--port", type=int, default=8787, help="Bind port (default 8787).")
+    parser.add_argument(
+        "--queue-root", default=None, metavar="PATH",
+        help="Run against a durable clearance queue at PATH instead of a fresh "
+             "temporary one. The directory and its lanes are created if missing; "
+             "demo packets are seeded only when the queue is empty; existing "
+             "packets are never cleared or overwritten, and the queue is not "
+             "removed on exit. Omit to preserve the default temporary-queue "
+             "behavior.")
     args = parser.parse_args()
 
-    QUEUE_ROOT = make_queue_root()
-    seed_queue(QUEUE_ROOT)
-    atexit.register(lambda: shutil.rmtree(QUEUE_ROOT, ignore_errors=True))
+    QUEUE_ROOT, DURABLE = resolve_queue_root(args.queue_root)
+    if not DURABLE:
+        # Only a fresh temporary queue is removed on exit; a durable queue
+        # must persist.
+        atexit.register(lambda: shutil.rmtree(QUEUE_ROOT, ignore_errors=True))
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     url = "http://{}:{}/".format(args.host, args.port)
     print("ClearWright control plane demo (local reference implementation, early alpha)")
-    print("Demo queue root: {}".format(QUEUE_ROOT))
+    print("Queue root: {} ({})".format(QUEUE_ROOT, "durable" if DURABLE else "temporary"))
     print("Open: {}".format(url))
     print("Press Ctrl+C to stop.")
     try:

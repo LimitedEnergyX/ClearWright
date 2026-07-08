@@ -5,6 +5,12 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Agent conversation console (simulated): an "Ask ClearWright" panel where the
+  operator asks a question, up to five locally simulated agent turns deliberate
+  (analysis, challenge, code/test impact, revised recommendation, final
+  review), and ClearWright condenses a recommended CTA / DTA / RFI with risks
+  and a proposed next action. No real external model integration; consensus
+  does not grant authority.
 - Control plane operator-console framing: a clearance-workflow panel, an
   incoming-clearance-request card, and a simulated live agent feed; the queue
   board remains visible as the durable record. Packet intake is passive: an

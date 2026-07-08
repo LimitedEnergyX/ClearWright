@@ -542,6 +542,98 @@ async function submitResults(ev) {
 }
 
 // --------------------------------------------------------------------------- //
+// Agent conversation console (SIMULATED — no real external model integration)
+// --------------------------------------------------------------------------- //
+
+const CONVO_ROLE_LABELS = {
+  claude: "claude", gpt: "gpt", codex: "codex", clearwright: "clearwright",
+};
+
+function convoBubble(turn) {
+  const el = document.createElement("div");
+  el.className = "convo-turn convo-" + esc(turn.role);
+  let html = '<span class="convo-role">' +
+    esc(CONVO_ROLE_LABELS[turn.role] || turn.role) + '</span> ' + esc(turn.text);
+  if (turn.code_impact) {
+    html += '<pre class="convo-code">' + esc(turn.code_impact) + "</pre>";
+  }
+  el.innerHTML = html;
+  return el;
+}
+
+function renderConvoSummary(summary) {
+  const holder = document.getElementById("convo-summary");
+  let html = '<div class="convo-card convo-card-' + esc(summary.recommended) + '">';
+  html += '<div class="convo-card-head">ClearWright condensed decision ' +
+    '<span class="badge status-' +
+    esc(summary.recommended === "RFI" ? "RFI_PENDING" : summary.recommended) + '">' +
+    esc(summary.recommended) + "</span></div>";
+  html += '<div class="incoming-row"><span class="k">Decision needed:</span> ' +
+    esc(summary.decision_needed) + "</div>";
+  html += '<div class="incoming-row"><span class="k">Risk level:</span> ' +
+    esc(summary.risk_level) + "</div>";
+  html += '<div class="incoming-row"><span class="k">Risks:</span><ul>' +
+    (summary.risks || []).map((r) => "<li>" + esc(r) + "</li>").join("") + "</ul></div>";
+  html += '<div class="incoming-row"><span class="k">Scope boundary:</span> ' +
+    esc(summary.scope_boundary) + "</div>";
+  html += '<div class="incoming-row"><span class="k">Proposed next action:</span> ' +
+    esc(summary.proposed_next_action) + "</div>";
+  html += "</div>";
+  holder.innerHTML = html;
+
+  if (summary.proposed_rta_title && summary.proposed_rta_action) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-primary convo-draft-btn";
+    btn.textContent = "Draft RTA from this";
+    btn.addEventListener("click", () => {
+      openIntake();
+      document.getElementById("rta-title").value =
+        summary.proposed_rta_title.slice(0, 140);
+      document.getElementById("rta-action").value = summary.proposed_rta_action;
+      document.getElementById("rta-type").value = "docs_change";
+    });
+    holder.firstChild.appendChild(btn);
+  }
+}
+
+async function submitConvo(ev) {
+  ev.preventDefault();
+  const input = document.getElementById("convo-input");
+  const question = input.value.trim();
+  if (!question) return;
+  const transcript = document.getElementById("convo-transcript");
+  const summaryHolder = document.getElementById("convo-summary");
+  transcript.innerHTML = "";
+  summaryHolder.innerHTML = "";
+
+  const operator = document.createElement("div");
+  operator.className = "convo-turn convo-operator";
+  operator.innerHTML = '<span class="convo-role">operator</span> ' + esc(question);
+  transcript.appendChild(operator);
+
+  const result = await postJSON("/api/converse", { question });
+  if (!result.ok) {
+    setActivity("Refused: " + (result.error || ""));
+    return;
+  }
+  // Stagger the simulated turns so the deliberation reads as a conversation.
+  (result.turns || []).forEach((turn, i) => {
+    setTimeout(() => {
+      transcript.appendChild(convoBubble(turn));
+      transcript.scrollTop = transcript.scrollHeight;
+    }, 380 * (i + 1));
+  });
+  setTimeout(() => {
+    renderConvoSummary(result.summary);
+    feedPush("clearwright",
+      "deliberation condensed (max " + result.max_rounds + " rounds); " +
+      "recommendation: " + result.summary.recommended);
+  }, 380 * ((result.turns || []).length + 1));
+  input.value = "";
+}
+
+// --------------------------------------------------------------------------- //
 // Reason modal
 // --------------------------------------------------------------------------- //
 
@@ -656,6 +748,7 @@ function wire() {
   document.getElementById("zoom-in").addEventListener("click", () => zoomCanvas(0.1));
   document.getElementById("zoom-out").addEventListener("click", () => zoomCanvas(-0.1));
   document.getElementById("zoom-fit").addEventListener("click", fitCanvas);
+  document.getElementById("convo-form").addEventListener("submit", submitConvo);
   fitCanvas();
 }
 

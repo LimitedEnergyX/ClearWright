@@ -365,6 +365,67 @@ main { padding: 1rem 1.25rem; max-width: 1600px; margin: 0 auto; }
 .feed-worker .feed-actor { color: #4ade80; }
 .feed-clearwright .feed-actor { color: #e2e8f0; }
 
+/* Agent conversation console (simulated) */
+.convo-panel { border-left: 4px solid var(--teal); }
+.convo-form { display: flex; gap: 0.45rem; margin-top: 0.5rem; }
+.convo-form input {
+  flex: 1;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+}
+.convo {
+  margin-top: 0.6rem;
+  max-height: 320px;
+  overflow-y: auto;
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+}
+.convo-turn {
+  padding: 0.4rem 0.55rem;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+}
+.convo-role { font-weight: 800; font-family: ui-monospace, monospace; font-size: 0.72rem; margin-right: 0.3rem; }
+.convo-operator { border-left-color: #fff; }
+.convo-operator .convo-role { color: #fff; }
+.convo-claude { border-left-color: var(--blue-soft); }
+.convo-claude .convo-role { color: #7ea6f7; }
+.convo-gpt { border-left-color: #a78bfa; }
+.convo-gpt .convo-role { color: #a78bfa; }
+.convo-codex { border-left-color: var(--teal); }
+.convo-codex .convo-role { color: var(--teal); }
+.convo-code {
+  margin: 0.35rem 0 0;
+  padding: 0.4rem 0.5rem;
+  background: #0b0e14;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+}
+.convo-card {
+  margin-top: 0.6rem;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--gray);
+  border-radius: 10px;
+  background: var(--panel-2);
+  padding: 0.6rem 0.75rem;
+  display: grid;
+  gap: 0.45rem;
+}
+.convo-card-CTA { border-left-color: var(--ok); }
+.convo-card-DTA { border-left-color: var(--deny); }
+.convo-card-RFI { border-left-color: var(--pending); }
+.convo-card-head { font-weight: 700; color: #fff; font-size: 0.85rem; display: flex; align-items: center; gap: 0.45rem; }
+.convo-draft-btn { justify-self: start; margin-top: 0.2rem; }
+
 /* Drawer */
 .drawer {
   position: fixed;

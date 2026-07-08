@@ -67,6 +67,20 @@
           </div>
         </section>
 
+        <section class="panel convo-panel" aria-labelledby="convo-h">
+          <div class="panel-head">
+            <h2 id="convo-h">Ask ClearWright <span class="sim-tag">simulated agents</span></h2>
+            <p class="hint">Ask a question about the sample project. Simulated agent roles deliberate (max 5 rounds), then ClearWright condenses a recommendation. Consensus does not grant authority; the operator decides. No real external model integration.</p>
+          </div>
+          <form id="convo-form" class="convo-form">
+            <input id="convo-input" type="text" required maxlength="240"
+                   placeholder="e.g. Should we align the version references in the docs?" />
+            <button id="convo-ask" class="btn btn-primary" type="submit">Ask</button>
+          </form>
+          <div class="convo" id="convo-transcript"></div>
+          <div id="convo-summary"></div>
+        </section>
+
         <section class="panel" aria-labelledby="feed-h">
           <div class="panel-head">
             <h2 id="feed-h">Live agent feed <span class="sim-tag">simulated</span></h2>

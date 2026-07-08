@@ -81,6 +81,38 @@ status cleanly, so the demo does not fabricate that transition.
 
 Command-authority examples use `OPERATOR-0001`. No personal names are used.
 
+## Agent conversation console (simulated)
+
+The console includes an "Ask ClearWright" panel where the operator asks a
+question in plain language instead of filling out packet forms. Up to five
+simulated agent turns deliberate on it:
+
+1. a Claude-style analysis,
+2. a GPT-style challenge and risk critique,
+3. a Codex-style code/test impact note (with a demo test idea),
+4. a Claude-style revised recommendation,
+5. a GPT-style final review.
+
+ClearWright then condenses the deliberation into a single decision card: the
+decision needed, a recommended CTA / DTA / RFI, the risks, a scope boundary,
+and a proposed next action. When the recommendation is a bounded CTA, one
+click drafts an RTA from it, which then travels the normal packet lifecycle.
+
+Honest boundaries:
+
+- **The console is simulated in this local demo.** Every turn is generated
+  locally by the demo server. There is **no real external model integration**,
+  no API call, and no credential anywhere in this repository.
+- The purpose is to show how agent deliberation can be condensed into one
+  human decision.
+- **Authority remains with the operator.** Consensus or agent chatter does not
+  grant authority; a recommendation is input to a human-commanded decision,
+  never a decision itself.
+- Unsafe or destructive wording is never condensed into a CTA recommendation;
+  it condenses to DTA or RFI.
+- The packet queues and audit trail remain the durable record behind the
+  conversation.
+
 ## The three demonstrated paths
 
 **CTA path**: an `RTA` packet starts in `clearance_outbox`. The operator grants a

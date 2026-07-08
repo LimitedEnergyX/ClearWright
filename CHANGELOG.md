@@ -5,6 +5,14 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Control plane operator-console framing: a clearance-workflow panel, an
+  incoming-clearance-request card, and a simulated live agent feed; the queue
+  board remains visible as the durable record. Packet intake is passive: an
+  Inject demo request form (backed by a new manual intake tool,
+  `tools/clearwright_request.py`) simulates what an agent, tool, or integration
+  would submit. Completion results (summary, verification, changed files,
+  findings) are stored as one nested `results` object on the DONE audit event.
+  No schema change.
 - Added peer-review guidance for protocol, lifecycle, authority, and
   implementation feedback (`docs/PEER_REVIEW.md`, a protocol review issue
   template, and README/CONTRIBUTING pointers).

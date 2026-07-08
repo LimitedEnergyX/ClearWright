@@ -40,6 +40,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 TOOLS = os.path.join(REPO_ROOT, "tools")
+
+# Constants only (enum value sets for the intake form). All packet mutation
+# still happens through the tools as subprocesses; the server stays a thin
+# driver and never re-implements clearance logic.
+sys.path.insert(0, TOOLS)
+import clearwright_validate as wpv  # noqa: E402
 STATIC = os.path.join(HERE, "static")
 DEMO_PACKETS = os.path.join(REPO_ROOT, "examples", "demo_packets")
 MISSION_FILE = os.path.join(REPO_ROOT, "examples", "sample_project", "mission.json")
@@ -56,6 +62,20 @@ DEMO_ACTOR = "OPERATOR-0001"
 
 # Actions that require a non-empty reason from the operator.
 REASON_ACTIONS = {"dta", "rfi", "fail"}
+
+# Generic target labels the intake form may use. Keeping intake constrained to
+# these labels is a confidentiality guard: no private product names, paths, or
+# proprietary copy can enter a packet from the UI.
+APPROVED_TARGET_LABELS = [
+    "sample software project",
+    "sample web application",
+    "demo target project",
+    "local test project",
+    "private demo target",
+]
+
+# Required fields for RTA intake; the request tool re-validates authoritatively.
+REQUEST_REQUIRED = ["title", "packet_type", "requesting_agent", "requested_action"]
 
 
 # --------------------------------------------------------------------------- #
@@ -148,7 +168,7 @@ def run_tool(argv):
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
-def tool_argv(action, path, reason):
+def tool_argv(action, path, reason, results=None):
     """Build the tool argument list for an action on a resolved packet path."""
     decide = os.path.join(TOOLS, "clearwright_decide.py")
     claim = os.path.join(TOOLS, "clearwright_claim.py")
@@ -162,13 +182,24 @@ def tool_argv(action, path, reason):
     if action == "claim":
         return [claim, path, "--claimant", DEMO_ACTOR]
     if action == "complete":
-        return [lifecycle, "complete", path, "--actor", DEMO_ACTOR]
+        argv = [lifecycle, "complete", path, "--actor", DEMO_ACTOR]
+        results = results if isinstance(results, dict) else {}
+        if results.get("summary"):
+            argv += ["--summary", str(results["summary"])]
+        if results.get("verification"):
+            argv += ["--verification", str(results["verification"])]
+        for changed in results.get("changed_files") or []:
+            if str(changed).strip():
+                argv += ["--changed-file", str(changed).strip()]
+        if results.get("findings"):
+            argv += ["--findings", str(results["findings"])]
+        return argv
     if action == "fail":
         return [lifecycle, "fail", path, "--reason", reason, "--actor", DEMO_ACTOR]
     return None
 
 
-def do_action(root, action, filename, reason=""):
+def do_action(root, action, filename, reason="", results=None):
     """Perform one operator action, enforcing the demo's allowed-action policy
     before invoking any tool. Returns a result dict."""
     reason = (reason or "").strip()
@@ -190,9 +221,53 @@ def do_action(root, action, filename, reason=""):
     if action in REASON_ACTIONS and not reason:
         return {"ok": False, "error": "a non-empty reason is required for {}".format(action), "output": ""}
 
-    argv = tool_argv(action, path, reason)
+    argv = tool_argv(action, path, reason, results)
     if argv is None:
         return {"ok": False, "error": "unknown action: {}".format(action), "output": ""}
+
+    code, output = run_tool(argv)
+    return {"ok": code == 0, "returncode": code, "output": output}
+
+
+def do_request(root, fields):
+    """Author one new RTA in the demo queue via the request tool.
+
+    The server only checks field presence and the generic-label constraint;
+    the request tool remains the validation authority and performs the
+    exclusive write."""
+    fields = fields if isinstance(fields, dict) else {}
+    missing = [f for f in REQUEST_REQUIRED
+               if not str(fields.get(f) or "").strip()]
+    if missing:
+        return {"ok": False,
+                "error": "missing required field(s): {}".format(", ".join(missing)),
+                "output": ""}
+
+    label = str(fields.get("target_label") or APPROVED_TARGET_LABELS[0]).strip()
+    if label not in APPROVED_TARGET_LABELS:
+        return {"ok": False,
+                "error": "target label must be one of the approved generic labels",
+                "output": ""}
+
+    argv = [
+        os.path.join(TOOLS, "clearwright_request.py"), root,
+        "--title", str(fields["title"]).strip(),
+        "--type", str(fields["packet_type"]).strip(),
+        "--agent", str(fields["requesting_agent"]).strip(),
+        "--action", str(fields["requested_action"]).strip(),
+        "--target-label", label,
+    ]
+    for key, flag in (("allowed_scope", "--scope"), ("test_command", "--test-command"),
+                      ("risk_notes", "--risk")):
+        value = str(fields.get(key) or "").strip()
+        if value:
+            argv += [flag, value]
+    for key, flag in (("authority_class", "--authority"),
+                      ("clearance_class", "--clearance"),
+                      ("priority_class", "--priority")):
+        value = str(fields.get(key) or "").strip()
+        if value:
+            argv += [flag, value]
 
     code, output = run_tool(argv)
     return {"ok": code == 0, "returncode": code, "output": output}
@@ -225,6 +300,7 @@ def packet_summary(path, lane):
         "risk_notes": packet.get("risk_notes"),
         "clearance_expires_at": packet.get("clearance_expires_at"),
         "requested_action": inputs.get("requested_action"),
+        "allowed_scope": inputs.get("allowed_scope"),
         "audit_event_count": len(audit_events(packet)),
         "allowed_actions": allowed_actions(status, lane),
     }
@@ -244,7 +320,19 @@ def build_state(root):
                 lanes[lane].append(packet_summary(os.path.join(lane_dir, name), lane))
             except (OSError, ValueError):
                 lanes[lane].append({"filename": name, "lane": lane, "status": "UNREADABLE"})
-    return {"mission": read_mission(), "lanes": lanes, "actor": DEMO_ACTOR}
+    return {
+        "mission": read_mission(),
+        "lanes": lanes,
+        "actor": DEMO_ACTOR,
+        "intake": {
+            "target_labels": APPROVED_TARGET_LABELS,
+            "packet_types": ["analysis", "code_change", "docs_change",
+                             "config_change", "data_change"],
+            "authority_classes": sorted(wpv.ALLOWED_AUTHORITY_CLASS),
+            "clearance_classes": sorted(wpv.ALLOWED_CLEARANCE_CLASS),
+            "priority_classes": sorted(wpv.ALLOWED_PRIORITY_CLASS),
+        },
+    }
 
 
 def build_audit(root, filename):
@@ -349,7 +437,14 @@ class Handler(BaseHTTPRequestHandler):
             action = payload.get("action")
             filename = payload.get("filename")
             reason = payload.get("reason", "")
-            result = do_action(QUEUE_ROOT, action, filename, reason)
+            results = payload.get("results")
+            result = do_action(QUEUE_ROOT, action, filename, reason, results)
+            result["state"] = build_state(QUEUE_ROOT)
+            self._send_json(result)
+            return
+
+        if path == "/api/request":
+            result = do_request(QUEUE_ROOT, payload)
             result["state"] = build_state(QUEUE_ROOT)
             self._send_json(result)
             return

@@ -225,6 +225,108 @@ class ControlPlaneDemoTests(unittest.TestCase):
                 with self.subTest(file=rel, term=term):
                     self.assertNotIn(term, lower)
 
+    # ------------------------------------------------------------- RTA intake
+
+    REQUEST_FIELDS = {
+        "title": "Add a status endpoint to the sample web application",
+        "packet_type": "code_change",
+        "requesting_agent": "agent/worker",
+        "requested_action": "Add a read-only status endpoint. Findings only.",
+        "target_label": "sample web application",
+    }
+
+    def test_request_creates_valid_rta(self):
+        res = server.do_request(self.root, dict(self.REQUEST_FIELDS))
+        self.assertTrue(res["ok"], res)
+        files = [f for f in os.listdir(os.path.join(self.root, "clearance_outbox"))
+                 if f.startswith("cw-req-")]
+        self.assertEqual(len(files), 1)
+        p = server.load_json(os.path.join(self.root, "clearance_outbox", files[0]))
+        self.assertEqual(p["status"], "RTA")
+        self.assertEqual(p["title"], self.REQUEST_FIELDS["title"])
+        self.assertEqual(p["inputs_json"]["target_project"], "sample web application")
+        # The new RTA is immediately decidable on the board.
+        state = server.build_state(self.root)
+        card = [c for c in state["lanes"]["clearance_outbox"]
+                if c["filename"] == files[0]][0]
+        self.assertEqual(card["allowed_actions"], ["cta", "dta", "rfi"])
+
+    def test_request_missing_required_field_refused(self):
+        for missing in ("title", "packet_type", "requesting_agent", "requested_action"):
+            with self.subTest(missing=missing):
+                fields = dict(self.REQUEST_FIELDS)
+                fields[missing] = "   "
+                res = server.do_request(self.root, fields)
+                self.assertFalse(res["ok"], res)
+        extra = [f for f in os.listdir(os.path.join(self.root, "clearance_outbox"))
+                 if f.startswith("cw-req-")]
+        self.assertEqual(extra, [], "no packet may be created on refusal")
+
+    def test_request_disallowed_label_refused(self):
+        fields = dict(self.REQUEST_FIELDS)
+        fields["target_label"] = "some private product name"
+        res = server.do_request(self.root, fields)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("generic labels", res["error"])
+
+    def test_intake_metadata_matches_validator_sets(self):
+        # The UI is populated from build_state()['intake']; pin it to the
+        # validator's allowed sets and the approved generic labels so drift is
+        # a conscious test change, never an accident.
+        import clearwright_validate as wpv
+        intake = server.build_state(self.root)["intake"]
+        self.assertEqual(intake["authority_classes"],
+                         sorted(wpv.ALLOWED_AUTHORITY_CLASS))
+        self.assertEqual(intake["clearance_classes"],
+                         sorted(wpv.ALLOWED_CLEARANCE_CLASS))
+        self.assertEqual(intake["priority_classes"],
+                         sorted(wpv.ALLOWED_PRIORITY_CLASS))
+        self.assertEqual(intake["target_labels"], [
+            "sample software project",
+            "sample web application",
+            "demo target project",
+            "local test project",
+            "private demo target",
+        ])
+
+    # ------------------------------------------------------ DONE with results
+
+    def test_full_path_from_intake_to_done_with_results(self):
+        res = server.do_request(self.root, dict(self.REQUEST_FIELDS))
+        self.assertTrue(res["ok"], res)
+        fname = [f for f in os.listdir(os.path.join(self.root, "clearance_outbox"))
+                 if f.startswith("cw-req-")][0]
+
+        self.assertTrue(self.act("cta", fname)["ok"])
+        self.assertTrue(self.act("claim", fname)["ok"])
+        results = {
+            "summary": "Added the status endpoint.",
+            "verification": "Test command passed.",
+            "changed_files": ["app/main.html"],
+            "findings": "None beyond the requested change.",
+        }
+        res = server.do_action(self.root, "complete", fname, "", results)
+        self.assertTrue(res["ok"], res)
+
+        p = server.load_json(os.path.join(self.root, "clearance_done", fname))
+        self.assertEqual(p["status"], "DONE")
+        event = p["audit_json"]["events"][-1]
+        self.assertEqual(event["event"], "DONE")
+        self.assertEqual(event["results"], results,
+                         "results must be ONE nested object on the DONE event")
+        self.assertNotIn("results", p)
+        self.assertNotIn("results_json", p)
+
+    def test_complete_without_results_still_works(self):
+        # Backward compatibility through the server path as well.
+        self.assertTrue(self.act("cta", SEED_1)["ok"])
+        self.assertTrue(self.act("claim", SEED_1)["ok"])
+        res = server.do_action(self.root, "complete", SEED_1)
+        self.assertTrue(res["ok"], res)
+        event = server.load_json(os.path.join(self.root, "clearance_done", SEED_1))[
+            "audit_json"]["events"][-1]
+        self.assertNotIn("results", event)
+
 
 if __name__ == "__main__":
     unittest.main()

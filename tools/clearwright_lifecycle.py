@@ -235,7 +235,8 @@ def cmd_inspect(args):
 # complete / fail (single-packet mutating transitions)
 # --------------------------------------------------------------------------- #
 
-def build_transition(packet, filename, new_status, dest_dir, actor, reason=None):
+def build_transition(packet, filename, new_status, dest_dir, actor, reason=None,
+                     results=None):
     """Return a NEW dict for the transitioned packet. Does not mutate the input.
 
     status, source_path, and updated_at are set. A lifecycle audit event is
@@ -245,6 +246,11 @@ def build_transition(packet, filename, new_status, dest_dir, actor, reason=None)
     deliberate, documented divergence from clearwright_claim.py, which skips the
     audit append when no audit shape exists; here the terminal event and any fail
     reason must be recorded.
+
+    results, when provided, is a dict of completion outcomes (summary,
+    verification, changed_files, findings) stored as ONE nested object on the
+    DONE audit event, so the audit trail carries the outcome, not just the
+    transition. No top-level packet field is added and the schema is unchanged.
 
     packet_hash is intentionally left unchanged: the repository defines no
     canonical hashing scheme and the validator does not verify the hash, so
@@ -263,6 +269,8 @@ def build_transition(packet, filename, new_status, dest_dir, actor, reason=None)
         event["note"] = "Failed and moved to {}: {}".format(dest_dir, reason)
     else:
         event["note"] = "Completed and moved to {}".format(dest_dir)
+    if results:
+        event["results"] = results
 
     audit = out.get("audit_json")
     if isinstance(audit, dict) and isinstance(audit.get("events"), list):
@@ -274,7 +282,8 @@ def build_transition(packet, filename, new_status, dest_dir, actor, reason=None)
     return out
 
 
-def transition(packet_file, dest_dir, new_status, actor, dry_run, reason=None):
+def transition(packet_file, dest_dir, new_status, actor, dry_run, reason=None,
+               results=None):
     """Shared safe single-packet transition from clearance_in_progress/.
 
     Mirrors the claim tool's safety model: validate the source, refuse on any
@@ -327,7 +336,8 @@ def transition(packet_file, dest_dir, new_status, actor, dry_run, reason=None):
     dest = os.path.join(queue_root, dest_dir, filename)
 
     # 6. Build and validate the RESULT before touching the filesystem.
-    result = build_transition(packet, filename, new_status, dest_dir, actor, reason)
+    result = build_transition(packet, filename, new_status, dest_dir, actor, reason,
+                              results)
     post = wpv.validate(result) + wpv.validate_queue_path(dest, result.get("status"))
     if post:
         for err in post:
@@ -390,9 +400,29 @@ def transition(packet_file, dest_dir, new_status, actor, dry_run, reason=None):
     return 0
 
 
+def build_results(args):
+    """Assemble the optional nested results object for a DONE audit event from
+    the complete subcommand's flags. Returns None when no result field was
+    given, keeping completion without results byte-for-byte backward
+    compatible."""
+    results = {}
+    if args.summary and args.summary.strip():
+        results["summary"] = args.summary.strip()
+    if args.verification and args.verification.strip():
+        results["verification"] = args.verification.strip()
+    if args.changed_file:
+        files = [f.strip() for f in args.changed_file if f and f.strip()]
+        if files:
+            results["changed_files"] = files
+    if args.findings and args.findings.strip():
+        results["findings"] = args.findings.strip()
+    return results or None
+
+
 def cmd_complete(args):
     return transition(
-        args.packet_file, DONE_DIR, "DONE", args.actor, args.dry_run
+        args.packet_file, DONE_DIR, "DONE", args.actor, args.dry_run,
+        results=build_results(args),
     )
 
 
@@ -649,6 +679,24 @@ def build_parser():
     p_complete.add_argument(
         "--actor", default=None, metavar="ACTOR_ID",
         help="Optional actor id recorded in the DONE audit event.",
+    )
+    p_complete.add_argument(
+        "--summary", default=None, metavar="TEXT",
+        help="Optional. What was done, in one or two sentences. Stored in a nested "
+             "results object on the DONE audit event.",
+    )
+    p_complete.add_argument(
+        "--verification", default=None, metavar="TEXT",
+        help="Optional. How the work was verified and the result.",
+    )
+    p_complete.add_argument(
+        "--changed-file", action="append", default=None, metavar="PATH",
+        help="Optional, repeatable. A file changed by the work (generic or relative "
+             "paths only).",
+    )
+    p_complete.add_argument(
+        "--findings", default=None, metavar="TEXT",
+        help="Optional. Findings note recorded with the completion.",
     )
     p_complete.add_argument(
         "--dry-run", action="store_true",

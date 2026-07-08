@@ -9,20 +9,60 @@ It is human-commanded and operator-controlled. It does not execute the proposed
 actions, connect to any external service, run a background worker, or act on its
 own. Every operator decision is carried out by the existing ClearWright tools.
 
+## How the console is framed
+
+The control plane is an **operator console**, not a packet-authoring surface.
+Packet intake is passive: requests would normally be submitted by an agent,
+tool, or integration, and they arrive for review. The operator's job is to
+review and decide, and the packet queues and audit trail remain the durable
+record behind that work.
+
+- **Passive packet intake**: agents, tools, or integrations author requests;
+  the operator does not normally fill out request forms.
+- **Operator review and decision**: the incoming request card summarizes what
+  the agent wants, why clearance is required, the allowed and disallowed scope,
+  and the risk, with the decision actions right there.
+- **Workflow visualization as a demo aid**: a simple clearance-path panel shows
+  the stages a request travels; it is a visual aid, not a workflow editor.
+- **Durable background record**: the four queue lanes and the per-packet audit
+  trail stay visible but secondary. They are the record, not the work surface.
+
 ## What it shows
 
 1. **Mission intake**: mission name, target project label, allowed scope,
    disallowed scope, a test command, and risk notes (from
    [examples/sample_project/mission.json](../examples/sample_project/mission.json)).
-2. **Clearance queue board**: the four lanes, `clearance_outbox`,
-   `clearance_in_progress`, `clearance_done`, and `clearance_failed`.
-3. **Packet cards**: packet id, requested action, requesting role, current status,
-   authority required, risk notes, the CTA lease when present, and the audit event
-   count.
-4. **Operator decision panel** (per card): Grant CTA, Deny DTA, Request RFI, Claim
-   cleared work, Mark DONE, Mark FAILED. Actions appear only when they are valid
-   for that packet.
-5. **Audit trail viewer**: the packet lifecycle events in readable order.
+2. **Clearance workflow canvas**: the fixed path a request travels, drawn as a
+   vertical node graph on a dark canvas: Mission Start through Planner Review,
+   Scope/Risk Check, Incoming Clearance Request, Operator Decision, a
+   CTA / DTA / RFI branch, Claimed Work, Verification, and DONE, with an RFI
+   edge looping back to the incoming request. Stages light up from the live
+   queue state, and simple zoom controls fit the graph to the panel. The
+   pre-intake stages are drawn dashed as simulated agent context. It is a
+   visual aid with fixed nodes, not a workflow editor.
+3. **Incoming clearance request card**: the operator-facing summary of the next
+   decidable request: what the agent wants to do, why clearance is required,
+   allowed scope, disallowed scope (from the mission), risk, and the requested
+   decision, with Grant CTA / Deny DTA / Request RFI actions in place.
+4. **Live agent feed (simulated)**: a right-side feed of agent-style activity
+   lines (planner, reviewer, worker, clearwright). It is simulated for the demo;
+   there is no real streaming and no agent integration.
+5. **Clearance queues (durable record)**: the four lanes, `clearance_outbox`,
+   `clearance_in_progress`, `clearance_done`, and `clearance_failed`, with one
+   card per packet and per-card actions (Claim cleared work, Mark DONE, Mark
+   FAILED) where valid. Visually secondary by design.
+6. **Audit trail viewer**: the packet lifecycle events in readable order,
+   including completion results when they were recorded.
+7. **Inject demo request**: a form that simulates a packet that would normally
+   be submitted by an agent, tool, or integration. Required fields are enforced,
+   enum dropdowns come from the validator's allowed sets, and the target-project
+   label is constrained to approved generic labels so no private names can enter
+   a packet from the UI. Routine packet authoring is not the operator's job.
+8. **Completion results** (Mark DONE): completion asks for a summary, an optional
+   verification result, changed files, and a findings note. These are stored as
+   one nested `results` object on the DONE audit event, so the audit trail
+   carries the outcome, not just the transition. No new packet field and no
+   schema change.
 
 Supersede is intentionally not offered. No current tool sets the `SUPERSEDED`
 status cleanly, so the demo does not fabricate that transition.
@@ -31,11 +71,12 @@ status cleanly, so the demo does not fabricate that transition.
 
 | Panel action | Tool invoked |
 | --- | --- |
+| Inject demo request | `tools/clearwright_request.py --title ... --type ... --action ...` |
 | Grant CTA | `tools/clearwright_decide.py cta` |
 | Deny DTA | `tools/clearwright_decide.py dta --reason ...` |
 | Request RFI | `tools/clearwright_decide.py rfi --reason ...` |
 | Claim cleared work | `tools/clearwright_claim.py` |
-| Mark DONE | `tools/clearwright_lifecycle.py complete` |
+| Mark DONE | `tools/clearwright_lifecycle.py complete [--summary ... --verification ... --changed-file ... --findings ...]` |
 | Mark FAILED | `tools/clearwright_lifecycle.py fail --reason ...` |
 
 Command-authority examples use `OPERATOR-0001`. No personal names are used.
@@ -75,4 +116,6 @@ not committed.
 
 This phase is the local control plane only. It does not connect to any external
 agent, add a scheduler or daemon, add a policy engine, or analyze a real target
-project. Those are out of scope here by design.
+project. The agent feed is simulated and the workflow panel is a fixed visual
+aid: there is no real streaming, no live agents, no workflow import, and no
+drag-and-drop workflow editing. Those are out of scope here by design.

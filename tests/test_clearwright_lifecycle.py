@@ -136,6 +136,61 @@ class LifecycleTests(unittest.TestCase):
                          "packet_hash is intentionally left unchanged")
         self.assertEqual(moved["audit_json"]["events"][-1]["event"], "DONE")
 
+    def test_complete_without_results_has_no_results_key(self):
+        # Backward compatibility: completion with no result flags must produce
+        # a DONE audit event without any results object.
+        orch = self.make_root()
+        src = self.write_packet(
+            orch, "clearance_in_progress", "p.json", "IN_PROGRESS",
+            clearance_expires_at=FUTURE,
+        )
+        code, out = self.run_tool("complete", src)
+        self.assertEqual(code, 0, out)
+        event = load(os.path.join(orch, "clearance_done", "p.json"))[
+            "audit_json"]["events"][-1]
+        self.assertNotIn("results", event)
+
+    def test_complete_with_results_nested_object(self):
+        # Results are stored as ONE nested object on the DONE audit event, so
+        # the audit trail carries the outcome, not just the transition.
+        orch = self.make_root()
+        src = self.write_packet(
+            orch, "clearance_in_progress", "p.json", "IN_PROGRESS",
+            clearance_expires_at=FUTURE,
+        )
+        code, out = self.run_tool(
+            "complete", src,
+            "--summary", "Synchronized version references.",
+            "--verification", "Consistency check passed.",
+            "--changed-file", "README.md", "--changed-file", "app/main.html",
+            "--findings", "One additional ambiguous reference noted.",
+        )
+        self.assertEqual(code, 0, out)
+        moved = load(os.path.join(orch, "clearance_done", "p.json"))
+        event = moved["audit_json"]["events"][-1]
+        self.assertEqual(event["event"], "DONE")
+        self.assertEqual(event["results"], {
+            "summary": "Synchronized version references.",
+            "verification": "Consistency check passed.",
+            "changed_files": ["README.md", "app/main.html"],
+            "findings": "One additional ambiguous reference noted.",
+        })
+        # No top-level results field is added; the schema is unchanged.
+        self.assertNotIn("results", moved)
+        self.assertNotIn("results_json", moved)
+
+    def test_complete_with_partial_results(self):
+        orch = self.make_root()
+        src = self.write_packet(
+            orch, "clearance_in_progress", "p.json", "IN_PROGRESS",
+            clearance_expires_at=FUTURE,
+        )
+        code, out = self.run_tool("complete", src, "--summary", "Done cleanly.")
+        self.assertEqual(code, 0, out)
+        event = load(os.path.join(orch, "clearance_done", "p.json"))[
+            "audit_json"]["events"][-1]
+        self.assertEqual(event["results"], {"summary": "Done cleanly."})
+
     def test_complete_dry_run_no_op(self):
         orch = self.make_root()
         src = self.write_packet(

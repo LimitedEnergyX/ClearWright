@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -326,6 +327,88 @@ class ControlPlaneDemoTests(unittest.TestCase):
         event = server.load_json(os.path.join(self.root, "clearance_done", SEED_1))[
             "audit_json"]["events"][-1]
         self.assertNotIn("results", event)
+
+
+class QueueRootTests(unittest.TestCase):
+    """Cover --queue-root resolution: default temp behavior vs durable."""
+
+    LANES = ["clearance_outbox", "clearance_in_progress",
+             "clearance_done", "clearance_failed"]
+
+    def _lane_json(self, root, lane):
+        d = os.path.join(root, lane)
+        return [n for n in os.listdir(d) if n.endswith(".json")] if os.path.isdir(d) else []
+
+    def test_default_temp_queue_is_created_and_seeded(self):
+        root, durable = server.resolve_queue_root(None)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self.assertFalse(durable)
+        self.assertTrue(os.path.isdir(root))
+        for lane in self.LANES:
+            self.assertTrue(os.path.isdir(os.path.join(root, lane)))
+        # Seeded with the three demo RTA packets in the outbox.
+        self.assertEqual(len(self._lane_json(root, "clearance_outbox")), 3)
+
+    def test_durable_empty_queue_is_created_lanes_and_seeded(self):
+        base = tempfile.mkdtemp(prefix="qr_durable_")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        target = os.path.join(base, "active")  # does not exist yet
+        root, durable = server.resolve_queue_root(target)
+        self.assertTrue(durable)
+        self.assertEqual(os.path.abspath(target), root)
+        for lane in self.LANES:
+            self.assertTrue(os.path.isdir(os.path.join(root, lane)))
+        # Empty durable queue is seeded so a fresh install still demos.
+        self.assertEqual(len(self._lane_json(root, "clearance_outbox")), 3)
+
+    def test_durable_nonempty_queue_is_not_seeded_or_overwritten(self):
+        base = tempfile.mkdtemp(prefix="qr_nonempty_")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        for lane in self.LANES:
+            os.makedirs(os.path.join(base, lane))
+        # Pre-existing governed packet in the outbox.
+        existing = os.path.join(base, "clearance_outbox", "cw-existing-1.json")
+        with open(existing, "w", encoding="utf-8") as fh:
+            fh.write('{"packet_id": "cw-existing-1", "status": "RTA"}')
+        before = open(existing, encoding="utf-8").read()
+
+        root, durable = server.resolve_queue_root(base)
+        self.assertTrue(durable)
+        outbox = self._lane_json(root, "clearance_outbox")
+        # No demo packets added; the existing packet is untouched.
+        self.assertEqual(outbox, ["cw-existing-1.json"])
+        self.assertEqual(open(existing, encoding="utf-8").read(), before)
+
+    def test_ensure_lanes_is_nondestructive(self):
+        base = tempfile.mkdtemp(prefix="qr_lanes_")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        os.makedirs(os.path.join(base, "clearance_outbox"))
+        keep = os.path.join(base, "clearance_outbox", "keep.json")
+        with open(keep, "w") as fh:
+            fh.write("{}")
+        server.ensure_lanes(base)
+        for lane in self.LANES:
+            self.assertTrue(os.path.isdir(os.path.join(base, lane)))
+        self.assertTrue(os.path.isfile(keep))  # not disturbed
+
+    def test_reset_refused_on_durable_queue(self):
+        base = tempfile.mkdtemp(prefix="qr_reset_")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        root, durable = server.resolve_queue_root(base)
+        # Add a governed packet after seeding, then attempt reset.
+        gov = os.path.join(root, "clearance_in_progress", "cw-gov-1.json")
+        with open(gov, "w") as fh:
+            fh.write('{"packet_id":"cw-gov-1","status":"IN_PROGRESS"}')
+        res = server.do_reset(root, durable)
+        self.assertFalse(res["ok"])
+        self.assertIn("durable", res["error"])
+        self.assertTrue(os.path.isfile(gov), "durable governed work must survive")
+
+    def test_reset_allowed_on_temp_queue(self):
+        root, durable = server.resolve_queue_root(None)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        res = server.do_reset(root, durable)
+        self.assertTrue(res["ok"])
 
 
 if __name__ == "__main__":

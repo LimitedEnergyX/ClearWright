@@ -1,0 +1,31 @@
+{
+  "packet_id": "cw-demo-002",
+  "packet_type": "data_change",
+  "title": "Bulk-delete inactive records from the sample project data store",
+  "requesting_agent": "agent/worker",
+  "created_at": "2026-07-01T00:00:00Z",
+  "updated_at": "2026-07-01T00:00:00Z",
+  "status": "RTA",
+  "source_path": "clearance_outbox/cw-demo-002-bulk-delete.json",
+  "packet_hash": "sha256:demo-placeholder-002",
+  "authority_class": "OPERATOR",
+  "clearance_class": "EXECUTION_CANDIDATE",
+  "priority_class": "HIGH",
+  "risk_notes": "High risk. Irreversible data deletion; requires operator authority.",
+  "inputs_json": {
+    "target_project": "sample web application",
+    "requested_action": "Delete all records marked inactive from the sample data store.",
+    "allowed_scope": "sample data store only",
+    "test_command": "python -m unittest discover -s tests"
+  },
+  "audit_json": {
+    "events": [
+      {
+        "at": "2026-07-01T00:00:00Z",
+        "event": "RTA",
+        "actor": "agent/worker",
+        "note": "Requested clearance to bulk-delete inactive records from the sample project data store."
+      }
+    ]
+  }
+}

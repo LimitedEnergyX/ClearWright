@@ -1,0 +1,31 @@
+{
+  "packet_id": "cw-demo-003",
+  "packet_type": "config_change",
+  "title": "Change authentication settings in the sample web application",
+  "requesting_agent": "agent/worker",
+  "created_at": "2026-07-01T00:00:00Z",
+  "updated_at": "2026-07-01T00:00:00Z",
+  "status": "RTA",
+  "source_path": "clearance_outbox/cw-demo-003-auth-config.json",
+  "packet_hash": "sha256:demo-placeholder-003",
+  "authority_class": "OPERATOR",
+  "clearance_class": "HUMAN_REQUIRED",
+  "priority_class": "NORMAL",
+  "risk_notes": "Medium risk. Scope is unclear: which settings and which environments are in play.",
+  "inputs_json": {
+    "target_project": "sample web application",
+    "requested_action": "Adjust authentication settings for the sample web application.",
+    "allowed_scope": "to be clarified",
+    "test_command": "python -m unittest discover -s tests"
+  },
+  "audit_json": {
+    "events": [
+      {
+        "at": "2026-07-01T00:00:00Z",
+        "event": "RTA",
+        "actor": "agent/worker",
+        "note": "Requested clearance to change authentication settings in the sample web application."
+      }
+    ]
+  }
+}

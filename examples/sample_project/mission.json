@@ -1,0 +1,16 @@
+{
+  "mission_name": "Sample project clearance demonstration",
+  "target_project_label": "sample web application (local test project)",
+  "allowed_scope": [
+    "read the sample project source",
+    "add a read-only health-check endpoint",
+    "propose changes as clearance packets for operator decision"
+  ],
+  "disallowed_scope": [
+    "delete or modify data without operator clearance",
+    "change authentication or access settings without clarified scope",
+    "act outside a granted bounded clearance"
+  ],
+  "test_command": "python -m unittest discover -s tests",
+  "risk_notes": "Generic demonstration only. No real product, data, or credentials are involved. Higher-risk actions require operator authority."
+}

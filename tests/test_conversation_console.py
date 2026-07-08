@@ -143,6 +143,25 @@ class ConversationConsoleTests(unittest.TestCase):
             packet["audit_json"]["events"][-1]["results"]["summary"],
             "Demo improvement completed.")
 
+    # -------------------------------------------------- no form-based flow
+
+    def test_normal_ui_exposes_no_form_based_request_flow(self):
+        # Packets come from agents, tools, scripts, or integrations (or, in the
+        # demo, are derived from the conversation recommendation). The normal
+        # operator UI must not present packet authoring as a form workflow.
+        banned = ["inject demo request", "submit as agent request",
+                  "intake form", "new rta"]
+        for name in ("index.html", "app.js"):
+            text = read(os.path.join(STATIC, name)).lower()
+            for phrase in banned:
+                with self.subTest(file=name, phrase=phrase):
+                    self.assertNotIn(phrase, text)
+        # The path from recommendation to queue is a single action, not a form.
+        html = read(os.path.join(STATIC, "index.html"))
+        self.assertNotIn("intake-modal", html)
+        app_js = read(os.path.join(STATIC, "app.js"))
+        self.assertIn("Send to clearance queue", app_js)
+
     # -------------------------------------------------------------- naming
 
     def test_no_retired_naming_in_console_code(self):

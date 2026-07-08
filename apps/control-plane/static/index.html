@@ -58,9 +58,9 @@
 
       <aside class="console-side">
         <section class="panel operator-panel" aria-labelledby="incoming-h">
-          <div class="panel-head panel-head-row">
+          <div class="panel-head">
             <h2 id="incoming-h">Incoming clearance request</h2>
-            <button id="inject-btn" class="btn btn-primary" type="button">Inject demo request</button>
+            <p class="hint">Clearance packets arrive from agents, tools, scripts, or integrations. The operator reviews and decides; nobody fills out packet paperwork here.</p>
           </div>
           <div id="operator-card">
             <p class="muted">Loading...</p>
@@ -69,8 +69,8 @@
 
         <section class="panel convo-panel" aria-labelledby="convo-h">
           <div class="panel-head">
-            <h2 id="convo-h">Ask ClearWright <span class="sim-tag">simulated agents</span></h2>
-            <p class="hint">Ask a question about the sample project. Simulated agent roles deliberate (max 5 rounds), then ClearWright condenses a recommendation. Consensus does not grant authority; the operator decides. No real external model integration.</p>
+            <h2 id="convo-h">Agent conversation <span class="sim-tag">simulated agents</span></h2>
+            <p class="hint">Ask agents a question about the sample project. Simulated agent roles deliberate (max 5 rounds), then ClearWright condenses a recommendation the operator can send to the clearance queue. Consensus does not grant authority; the operator decides. No real external model integration.</p>
           </div>
           <form id="convo-form" class="convo-form">
             <input id="convo-input" type="text" required maxlength="240"
@@ -108,54 +108,6 @@
         <button id="reason-cancel" class="btn btn-quiet" type="button">Cancel</button>
         <button id="reason-confirm" class="btn btn-primary" type="button">Confirm</button>
       </div>
-    </div>
-  </div>
-
-  <div class="modal-backdrop" id="intake-modal" aria-hidden="true">
-    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="intake-title">
-      <h2 id="intake-title">Inject demo request</h2>
-      <p class="muted">This simulates a packet that would normally be submitted by an agent, tool, or integration. The operator reviews and decides; routine packet authoring is not the operator's job.</p>
-      <form id="intake-form">
-        <div class="form-grid">
-          <label class="form-field form-span">Title *
-            <input id="rta-title" type="text" required maxlength="140" placeholder="Short title of the requested action" />
-          </label>
-          <label class="form-field">Packet type *
-            <select id="rta-type" required></select>
-          </label>
-          <label class="form-field">Requesting agent *
-            <input id="rta-agent" type="text" required value="agent/worker" />
-          </label>
-          <label class="form-field form-span">Requested action *
-            <textarea id="rta-action" rows="3" required placeholder="What the agent is requesting, stated plainly"></textarea>
-          </label>
-          <label class="form-field">Target project label
-            <select id="rta-label"></select>
-          </label>
-          <label class="form-field">Priority
-            <select id="rta-priority"></select>
-          </label>
-          <label class="form-field">Authority class
-            <select id="rta-authority"></select>
-          </label>
-          <label class="form-field">Clearance class
-            <select id="rta-clearance"></select>
-          </label>
-          <label class="form-field form-span">Allowed scope
-            <input id="rta-scope" type="text" placeholder="Optional. What the work may touch" />
-          </label>
-          <label class="form-field">Test command
-            <input id="rta-test" type="text" placeholder="Optional" />
-          </label>
-          <label class="form-field">Risk notes
-            <input id="rta-risk" type="text" placeholder="Optional" />
-          </label>
-        </div>
-        <div class="modal-actions">
-          <button id="intake-cancel" class="btn btn-quiet" type="button">Cancel</button>
-          <button id="intake-submit" class="btn btn-primary" type="submit">Submit as agent request</button>
-        </div>
-      </form>
     </div>
   </div>
 

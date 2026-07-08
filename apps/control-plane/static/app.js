@@ -224,8 +224,9 @@ function renderOperatorCard(state) {
 
   if (!card) {
     holder.innerHTML =
-      '<p class="muted">No incoming requests. Agents, tools, or integrations would ' +
-      "normally submit packets here. Use Inject demo request to simulate one.</p>";
+      '<p class="muted">No incoming requests. Packets arrive here from agents, ' +
+      "tools, scripts, or integrations. In this demo, ask the agents a question " +
+      "below and send the condensed recommendation to the clearance queue.</p>";
     return;
   }
 
@@ -435,72 +436,36 @@ async function resetDemo() {
 }
 
 // --------------------------------------------------------------------------- //
-// Intake modal (New RTA)
+// Background packet creation
+//
+// Packets normally arrive from agents, tools, scripts, or integrations via
+// the request tool and POST /api/request. Nobody fills out packet paperwork
+// in this console: the demo derives a packet from the condensed conversation
+// recommendation and sends it to the clearance queue directly.
 // --------------------------------------------------------------------------- //
 
-let intakeOptionsLoaded = false;
-
-function fillSelect(id, options, selected) {
-  const el = document.getElementById(id);
-  el.innerHTML = "";
-  (options || []).forEach((opt) => {
-    const o = document.createElement("option");
-    o.value = opt;
-    o.textContent = opt;
-    // defaultSelected (not just selected) so form.reset() returns to this
-    // option rather than the first one.
-    if (opt === selected) o.defaultSelected = true;
-    el.appendChild(o);
-  });
-}
-
-function loadIntakeOptions(intake) {
-  if (intakeOptionsLoaded || !intake) return;
-  fillSelect("rta-type", intake.packet_types, "analysis");
-  fillSelect("rta-label", intake.target_labels, intake.target_labels[0]);
-  fillSelect("rta-authority", intake.authority_classes, "WORKER");
-  fillSelect("rta-clearance", intake.clearance_classes, "READ_ONLY");
-  fillSelect("rta-priority", intake.priority_classes, "NORMAL");
-  intakeOptionsLoaded = true;
-}
-
-function openIntake() {
-  document.getElementById("intake-form").reset();
-  document.getElementById("rta-agent").value = "agent/worker";
-  document.getElementById("intake-modal").setAttribute("aria-hidden", "false");
-  document.getElementById("rta-title").focus();
-}
-
-function closeIntake() {
-  document.getElementById("intake-modal").setAttribute("aria-hidden", "true");
-}
-
-async function submitIntake(ev) {
-  ev.preventDefault();
+async function sendRecommendationToQueue(summary) {
   const body = {
-    title: document.getElementById("rta-title").value.trim(),
-    packet_type: document.getElementById("rta-type").value,
-    requesting_agent: document.getElementById("rta-agent").value.trim(),
-    requested_action: document.getElementById("rta-action").value.trim(),
-    target_label: document.getElementById("rta-label").value,
-    allowed_scope: document.getElementById("rta-scope").value.trim(),
-    test_command: document.getElementById("rta-test").value.trim(),
-    risk_notes: document.getElementById("rta-risk").value.trim(),
-    authority_class: document.getElementById("rta-authority").value,
-    clearance_class: document.getElementById("rta-clearance").value,
-    priority_class: document.getElementById("rta-priority").value,
+    title: (summary.proposed_rta_title || "").slice(0, 140),
+    packet_type: "docs_change",
+    requesting_agent: "agent/worker",
+    requested_action: summary.proposed_rta_action || "",
+    target_label: "sample software project",
+    allowed_scope: summary.scope_boundary || "",
+    risk_notes: "Risk level " + (summary.risk_level || "unknown") +
+      " (from simulated deliberation).",
   };
-  if (!body.title || !body.requesting_agent || !body.requested_action) return;
   const result = await postJSON("/api/request", body);
   if (result.state) renderState(result.state);
   if (result.ok) {
-    closeIntake();
-    setActivity("Simulated agent request submitted\n" + (result.output || "").trim());
-    feedPush("worker", "submitted a clearance request (simulated)");
-    feedPush("clearwright", "operator decision required");
+    setActivity("Clearance request created from the recommendation\n" +
+      (result.output || "").trim());
+    feedPush("clearwright",
+      "clearance request created from the recommendation; operator decision required");
   } else {
     setActivity("Refused: " + (result.error || "") + "\n" + (result.output || "").trim());
   }
+  return result;
 }
 
 // --------------------------------------------------------------------------- //
@@ -585,13 +550,12 @@ function renderConvoSummary(summary) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "btn btn-primary convo-draft-btn";
-    btn.textContent = "Draft RTA from this";
-    btn.addEventListener("click", () => {
-      openIntake();
-      document.getElementById("rta-title").value =
-        summary.proposed_rta_title.slice(0, 140);
-      document.getElementById("rta-action").value = summary.proposed_rta_action;
-      document.getElementById("rta-type").value = "docs_change";
+    btn.textContent = "Send to clearance queue";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const result = await sendRecommendationToQueue(summary);
+      if (result.ok) btn.textContent = "Sent — awaiting operator decision";
+      else btn.disabled = false;
     });
     holder.firstChild.appendChild(btn);
   }
@@ -722,7 +686,6 @@ function renderState(state) {
   renderWorkflow(state);
   renderOperatorCard(state);
   renderBoard(state);
-  loadIntakeOptions(state.intake);
   feedStart(state);
 }
 
@@ -740,9 +703,6 @@ function wire() {
     if (!value) return;
     closeReason(value);
   });
-  document.getElementById("inject-btn").addEventListener("click", openIntake);
-  document.getElementById("intake-cancel").addEventListener("click", closeIntake);
-  document.getElementById("intake-form").addEventListener("submit", submitIntake);
   document.getElementById("results-cancel").addEventListener("click", closeResults);
   document.getElementById("results-form").addEventListener("submit", submitResults);
   document.getElementById("zoom-in").addEventListener("click", () => zoomCanvas(0.1));

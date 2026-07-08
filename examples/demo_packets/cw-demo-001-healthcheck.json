@@ -1,0 +1,31 @@
+{
+  "packet_id": "cw-demo-001",
+  "packet_type": "code_change",
+  "title": "Add a health-check endpoint to the sample web application",
+  "requesting_agent": "agent/worker",
+  "created_at": "2026-07-01T00:00:00Z",
+  "updated_at": "2026-07-01T00:00:00Z",
+  "status": "RTA",
+  "source_path": "clearance_outbox/cw-demo-001-healthcheck.json",
+  "packet_hash": "sha256:demo-placeholder-001",
+  "authority_class": "WORKER",
+  "clearance_class": "BRANCH_CODE",
+  "priority_class": "NORMAL",
+  "risk_notes": "Low risk. Adds a read-only status endpoint; no data changes.",
+  "inputs_json": {
+    "target_project": "sample web application",
+    "requested_action": "Add a GET /healthz endpoint that returns service status.",
+    "allowed_scope": "application source only",
+    "test_command": "python -m unittest discover -s tests"
+  },
+  "audit_json": {
+    "events": [
+      {
+        "at": "2026-07-01T00:00:00Z",
+        "event": "RTA",
+        "actor": "agent/worker",
+        "note": "Requested clearance to add a health-check endpoint to the sample web application."
+      }
+    ]
+  }
+}

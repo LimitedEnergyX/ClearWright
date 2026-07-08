@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ClearWright Control Plane Demo</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">CW</span>
+      <div>
+        <h1>ClearWright Control Plane</h1>
+        <p class="posture">Local reference implementation &middot; early alpha &middot; human-commanded, operator-controlled</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span class="actor" id="actor-label">operator</span>
+      <button id="reset-btn" class="btn btn-quiet" type="button">Reset demo</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel mission" aria-labelledby="mission-h">
+      <h2 id="mission-h">1. Mission intake</h2>
+      <div class="mission-grid" id="mission-grid">
+        <p class="muted">Loading mission...</p>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="board-h">
+      <div class="panel-head">
+        <h2 id="board-h">2. Clearance queue board</h2>
+        <p class="hint">Cards show one clearance packet each. Actions run the real ClearWright tools against a local demo queue.</p>
+      </div>
+      <div class="board" id="board">
+        <p class="muted">Loading board...</p>
+      </div>
+    </section>
+  </main>
+
+  <aside class="drawer" id="audit-drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <h2>Audit trail</h2>
+      <button id="audit-close" class="btn btn-quiet" type="button">Close</button>
+    </div>
+    <div class="drawer-body" id="audit-body"></div>
+  </aside>
+
+  <div class="modal-backdrop" id="reason-modal" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="reason-title">
+      <h2 id="reason-title">Reason required</h2>
+      <p class="muted" id="reason-context"></p>
+      <textarea id="reason-input" rows="3" placeholder="State the reason. Keep it generic; no secrets or private data."></textarea>
+      <div class="modal-actions">
+        <button id="reason-cancel" class="btn btn-quiet" type="button">Cancel</button>
+        <button id="reason-confirm" class="btn btn-primary" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="activity">
+    <span class="activity-label">Last tool result</span>
+    <pre id="activity-log" class="activity-log">Ready.</pre>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

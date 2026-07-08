@@ -68,10 +68,12 @@ This repository ships the local, single-machine foundation:
   (`tools/clearwright_validate.py`).
 - A single-packet claim tool that moves a packet from the outbox to in-progress
   (`tools/clearwright_claim.py`).
-- A manual lifecycle tool: inspect, complete, fail, stale detection, and status
-  (`tools/clearwright_lifecycle.py`).
+- A manual lifecycle tool: inspect, complete (optionally with nested completion
+  results), fail, stale detection, and status (`tools/clearwright_lifecycle.py`).
 - A manual clearance decision tool: clear (CTA), deny (DTA), or request
   information (RFI) on one outbox packet (`tools/clearwright_decide.py`).
+- A manual RTA intake tool: author one new request into the outbox
+  (`tools/clearwright_request.py`).
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

@@ -22,22 +22,59 @@
   </header>
 
   <main>
-    <section class="panel mission" aria-labelledby="mission-h">
-      <h2 id="mission-h">1. Mission intake</h2>
+    <details class="panel mission">
+      <summary>Mission intake</summary>
       <div class="mission-grid" id="mission-grid">
         <p class="muted">Loading mission...</p>
       </div>
-    </section>
+    </details>
 
-    <section class="panel" aria-labelledby="board-h">
-      <div class="panel-head">
-        <h2 id="board-h">2. Clearance queue board</h2>
-        <p class="hint">Cards show one clearance packet each. Actions run the real ClearWright tools against a local demo queue.</p>
+    <div class="console-grid">
+      <div class="console-main">
+        <section class="panel canvas-panel" aria-labelledby="flow-h">
+          <div class="panel-head">
+            <h2 id="flow-h">Clearance workflow</h2>
+            <p class="hint">The path every request travels. Stages light up as packets move through the live queue. Visual aid only; not a workflow editor.</p>
+          </div>
+          <div class="canvas-wrap" id="canvas-wrap">
+            <div class="gcanvas" id="gcanvas">
+              <svg class="gedges" id="gedges" xmlns="http://www.w3.org/2000/svg"></svg>
+            </div>
+            <div class="canvas-zoom">
+              <button class="btn" id="zoom-in" type="button" title="Zoom in">+</button>
+              <button class="btn" id="zoom-out" type="button" title="Zoom out">&minus;</button>
+              <button class="btn" id="zoom-fit" type="button" title="Fit">&#8862;</button>
+            </div>
+          </div>
+        </section>
+
+        <details class="panel panel-secondary record" open>
+          <summary>Durable record <span class="hint-inline">clearance queues and audit; every card is one packet, actions run the real ClearWright tools</span></summary>
+          <div class="board" id="board">
+            <p class="muted">Loading board...</p>
+          </div>
+        </details>
       </div>
-      <div class="board" id="board">
-        <p class="muted">Loading board...</p>
-      </div>
-    </section>
+
+      <aside class="console-side">
+        <section class="panel operator-panel" aria-labelledby="incoming-h">
+          <div class="panel-head panel-head-row">
+            <h2 id="incoming-h">Incoming clearance request</h2>
+            <button id="inject-btn" class="btn btn-primary" type="button">Inject demo request</button>
+          </div>
+          <div id="operator-card">
+            <p class="muted">Loading...</p>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="feed-h">
+          <div class="panel-head">
+            <h2 id="feed-h">Live agent feed <span class="sim-tag">simulated</span></h2>
+          </div>
+          <div class="feed" id="feed"></div>
+        </section>
+      </aside>
+    </div>
   </main>
 
   <aside class="drawer" id="audit-drawer" aria-hidden="true">
@@ -60,9 +97,86 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="intake-modal" aria-hidden="true">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="intake-title">
+      <h2 id="intake-title">Inject demo request</h2>
+      <p class="muted">This simulates a packet that would normally be submitted by an agent, tool, or integration. The operator reviews and decides; routine packet authoring is not the operator's job.</p>
+      <form id="intake-form">
+        <div class="form-grid">
+          <label class="form-field form-span">Title *
+            <input id="rta-title" type="text" required maxlength="140" placeholder="Short title of the requested action" />
+          </label>
+          <label class="form-field">Packet type *
+            <select id="rta-type" required></select>
+          </label>
+          <label class="form-field">Requesting agent *
+            <input id="rta-agent" type="text" required value="agent/worker" />
+          </label>
+          <label class="form-field form-span">Requested action *
+            <textarea id="rta-action" rows="3" required placeholder="What the agent is requesting, stated plainly"></textarea>
+          </label>
+          <label class="form-field">Target project label
+            <select id="rta-label"></select>
+          </label>
+          <label class="form-field">Priority
+            <select id="rta-priority"></select>
+          </label>
+          <label class="form-field">Authority class
+            <select id="rta-authority"></select>
+          </label>
+          <label class="form-field">Clearance class
+            <select id="rta-clearance"></select>
+          </label>
+          <label class="form-field form-span">Allowed scope
+            <input id="rta-scope" type="text" placeholder="Optional. What the work may touch" />
+          </label>
+          <label class="form-field">Test command
+            <input id="rta-test" type="text" placeholder="Optional" />
+          </label>
+          <label class="form-field">Risk notes
+            <input id="rta-risk" type="text" placeholder="Optional" />
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button id="intake-cancel" class="btn btn-quiet" type="button">Cancel</button>
+          <button id="intake-submit" class="btn btn-primary" type="submit">Submit as agent request</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="results-modal" aria-hidden="true">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="results-title">
+      <h2 id="results-title">Complete with results</h2>
+      <p class="muted" id="results-context"></p>
+      <form id="results-form">
+        <div class="form-grid">
+          <label class="form-field form-span">Summary *
+            <textarea id="res-summary" rows="2" required placeholder="What was done, in one or two sentences"></textarea>
+          </label>
+          <label class="form-field form-span">Verification result
+            <input id="res-verification" type="text" placeholder="How it was verified and the outcome" />
+          </label>
+          <label class="form-field form-span">Changed files (one per line)
+            <textarea id="res-files" rows="2" placeholder="Optional. Generic or relative paths only"></textarea>
+          </label>
+          <label class="form-field form-span">Findings note
+            <input id="res-findings" type="text" placeholder="Optional" />
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button id="results-cancel" class="btn btn-quiet" type="button">Cancel</button>
+          <button id="results-submit" class="btn btn-ok" type="submit">Mark DONE</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <footer class="activity">
-    <span class="activity-label">Last tool result</span>
-    <pre id="activity-log" class="activity-log">Ready.</pre>
+    <details class="activity-details">
+      <summary><span class="activity-label">Tool log</span></summary>
+      <pre id="activity-log" class="activity-log">Ready.</pre>
+    </details>
   </footer>
 
   <script src="/app.js"></script>

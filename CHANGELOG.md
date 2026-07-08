@@ -5,14 +5,22 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Agent conversation console (simulated): the operator asks agents a question,
+  up to five locally simulated agent turns deliberate (analysis, challenge,
+  code/test impact, revised recommendation, final review), and ClearWright
+  condenses a recommended CTA / DTA / RFI with risks and a proposed next
+  action. A bounded CTA recommendation can be sent to the clearance queue with
+  one click: the packet is derived in the background, with no packet paperwork
+  in the operator flow. No real external model integration; consensus does not
+  grant authority.
 - Control plane operator-console framing: a clearance-workflow panel, an
   incoming-clearance-request card, and a simulated live agent feed; the queue
-  board remains visible as the durable record. Packet intake is passive: an
-  Inject demo request form (backed by a new manual intake tool,
-  `tools/clearwright_request.py`) simulates what an agent, tool, or integration
-  would submit. Completion results (summary, verification, changed files,
-  findings) are stored as one nested `results` object on the DONE audit event.
-  No schema change.
+  board remains visible as the durable record. Packet intake is passive: RTA
+  packets come from agents, tools, scripts, or integrations through a new
+  manual request tool (`tools/clearwright_request.py`) and its API, which are
+  backend plumbing rather than a human form. Completion results (summary,
+  verification, changed files, findings) are stored as one nested `results`
+  object on the DONE audit event. No schema change.
 - Added peer-review guidance for protocol, lifecycle, authority, and
   implementation feedback (`docs/PEER_REVIEW.md`, a protocol review issue
   template, and README/CONTRIBUTING pointers).

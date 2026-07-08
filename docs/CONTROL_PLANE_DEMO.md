@@ -17,11 +17,14 @@ tool, or integration, and they arrive for review. The operator's job is to
 review and decide, and the packet queues and audit trail remain the durable
 record behind that work.
 
-- **Passive packet intake**: agents, tools, or integrations author requests;
-  the operator does not normally fill out request forms.
+- **Passive packet intake**: RTA packets normally come from agents, tools,
+  scripts, or integrations. The request tool and its API are backend plumbing
+  for those integrations, not the normal human UI. In the demo, ClearWright
+  derives a packet from the simulated conversation recommendation.
 - **Operator review and decision**: the incoming request card summarizes what
   the agent wants, why clearance is required, the allowed and disallowed scope,
-  and the risk, with the decision actions right there.
+  and the risk, with the decision actions right there. The operator reviews
+  and decides; nobody fills out packet paperwork.
 - **Workflow visualization as a demo aid**: a simple clearance-path panel shows
   the stages a request travels; it is a visual aid, not a workflow editor.
 - **Durable background record**: the four queue lanes and the per-packet audit
@@ -53,11 +56,13 @@ record behind that work.
    FAILED) where valid. Visually secondary by design.
 6. **Audit trail viewer**: the packet lifecycle events in readable order,
    including completion results when they were recorded.
-7. **Inject demo request**: a form that simulates a packet that would normally
-   be submitted by an agent, tool, or integration. Required fields are enforced,
-   enum dropdowns come from the validator's allowed sets, and the target-project
-   label is constrained to approved generic labels so no private names can enter
-   a packet from the UI. Routine packet authoring is not the operator's job.
+7. **Background packet creation**: RTA packets normally come from agents,
+   tools, scripts, or integrations through the request tool and its API. In the
+   demo, ClearWright derives a packet from the simulated conversation
+   recommendation when the operator clicks "Send to clearance queue". There is
+   no packet paperwork in the operator flow: required fields are enforced by
+   the request tool, and the target-project label is constrained to approved
+   generic labels so no private names can enter a packet from the console.
 8. **Completion results** (Mark DONE): completion asks for a summary, an optional
    verification result, changed files, and a findings note. These are stored as
    one nested `results` object on the DONE audit event, so the audit trail
@@ -71,7 +76,7 @@ status cleanly, so the demo does not fabricate that transition.
 
 | Panel action | Tool invoked |
 | --- | --- |
-| Inject demo request | `tools/clearwright_request.py --title ... --type ... --action ...` |
+| Send to clearance queue | `tools/clearwright_request.py --title ... --type ... --action ...` |
 | Grant CTA | `tools/clearwright_decide.py cta` |
 | Deny DTA | `tools/clearwright_decide.py dta --reason ...` |
 | Request RFI | `tools/clearwright_decide.py rfi --reason ...` |
@@ -80,6 +85,41 @@ status cleanly, so the demo does not fabricate that transition.
 | Mark FAILED | `tools/clearwright_lifecycle.py fail --reason ...` |
 
 Command-authority examples use `OPERATOR-0001`. No personal names are used.
+
+## Agent conversation console (simulated)
+
+The console includes an "Ask ClearWright" panel where the operator asks a
+question in plain language instead of filling out packet forms. Up to five
+simulated agent turns deliberate on it:
+
+1. a Claude-style analysis,
+2. a GPT-style challenge and risk critique,
+3. a Codex-style code/test impact note (with a demo test idea),
+4. a Claude-style revised recommendation,
+5. a GPT-style final review.
+
+ClearWright then condenses the deliberation into a single decision card: the
+decision needed, a recommended CTA / DTA / RFI, the risks, a scope boundary,
+and a proposed next action. When the recommendation is a bounded CTA, one
+"Send to clearance queue" click derives the RTA packet in the background and
+places it in the clearance queue; it then appears as an incoming clearance
+request for the operator to clear, deny, or send to RFI, and travels the
+normal packet lifecycle. The operator never fills out packet fields.
+
+Honest boundaries:
+
+- **The console is simulated in this local demo.** Every turn is generated
+  locally by the demo server. There is **no real external model integration**,
+  no API call, and no credential anywhere in this repository.
+- The purpose is to show how agent deliberation can be condensed into one
+  human decision.
+- **Authority remains with the operator.** Consensus or agent chatter does not
+  grant authority; a recommendation is input to a human-commanded decision,
+  never a decision itself.
+- Unsafe or destructive wording is never condensed into a CTA recommendation;
+  it condenses to DTA or RFI.
+- The packet queues and audit trail remain the durable record behind the
+  conversation.
 
 ## The three demonstrated paths
 

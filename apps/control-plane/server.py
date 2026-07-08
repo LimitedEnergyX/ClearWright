@@ -274,6 +274,157 @@ def do_request(root, fields):
 
 
 # --------------------------------------------------------------------------- #
+# Agent conversation console (SIMULATED)
+#
+# The console demonstrates how bounded multi-agent deliberation can be
+# condensed into a single human decision. Every turn below is generated
+# locally by this demo server: there is NO real external model integration,
+# no API call, and no credential anywhere in this repository. Consensus or
+# chatter never grants authority; the operator decides.
+# --------------------------------------------------------------------------- #
+
+MAX_ROUNDS = 5
+
+# Simulated risk classification for the demo. Deliberately simple keyword
+# heuristics: enough to demonstrate that unsafe wording must never condense
+# into a CTA recommendation.
+DESTRUCTIVE_TERMS = [
+    "delete", "drop", "wipe", "erase", "destroy", "remove all", "truncate",
+    "purge", "force push", "bypass", "disable auth", "disable security",
+    "override safety",
+]
+CAUTION_TERMS = [
+    "auth", "authentication", "credential", "secret", "token", "permission",
+    "access control", "security", "migrate", "everything", "all files",
+    "not sure", "unclear", "somehow",
+]
+SAFE_HINT_TERMS = [
+    "docs", "readme", "typo", "comment", "label", "version reference",
+    "test", "health check", "rename", "documentation", "consistency",
+]
+
+
+def classify_question(question):
+    """Return (recommended, risk_level, rationale) for a question.
+
+    Simulated policy: destructive wording is denied (DTA), ambiguous or
+    security-adjacent wording needs information (RFI), and clearly bounded
+    low-risk improvement wording may be cleared (CTA). Unsafe wording must
+    never produce a CTA recommendation.
+    """
+    q = question.lower()
+    for term in DESTRUCTIVE_TERMS:
+        if term in q:
+            return ("DTA", "high",
+                    "destructive wording ({!r}) cannot be cleared".format(term))
+    for term in CAUTION_TERMS:
+        if term in q:
+            return ("RFI", "medium",
+                    "wording touches {!r}; scope must be clarified first".format(term))
+    for term in SAFE_HINT_TERMS:
+        if term in q:
+            return ("CTA", "low",
+                    "bounded, low-risk improvement wording ({!r})".format(term))
+    return ("RFI", "medium", "scope is not explicit enough to clear directly")
+
+
+def build_conversation(question):
+    """Build one bounded, simulated multi-agent deliberation (max 5 turns)
+    plus a condensed ClearWright decision summary. Pure function: no packet
+    is written and nothing external is called."""
+    question = (question or "").strip()
+    if not question:
+        return {"ok": False, "error": "a non-empty question is required"}
+
+    recommended, risk_level, rationale = classify_question(question)
+    short = question if len(question) <= 120 else question[:117] + "..."
+
+    turns = [
+        {
+            "role": "claude", "kind": "analysis",
+            "text": "Analysis: the operator is asking: {!r}. Framed against the "
+                    "mission scope, this is a {} risk request; the deciding factor "
+                    "is {}.".format(short, risk_level, rationale),
+        },
+        {
+            "role": "gpt", "kind": "challenge",
+            "text": "Challenge: before any clearance, confirm the blast radius. "
+                    "Risk read: {}. {} Watch for scope creep beyond the sample "
+                    "project boundary.".format(
+                        risk_level,
+                        "This should not be cleared as asked." if recommended != "CTA"
+                        else "Bounded as stated, no blocking objection."),
+        },
+        {
+            "role": "codex", "kind": "code_impact",
+            "text": "Code/test impact: {} A regression check should accompany any "
+                    "change.".format(
+                        "no code path should be touched until scope is settled."
+                        if recommended != "CTA" else
+                        "the change is small and testable."),
+            "code_impact": (
+                "def test_change_is_bounded():\n"
+                "    # demo test idea (simulated): assert the change touches only\n"
+                "    # the approved files and the suite still passes\n"
+                "    ..."),
+        },
+        {
+            "role": "claude", "kind": "revised_recommendation",
+            "text": "Revised recommendation: {} — {}.".format(recommended, rationale),
+        },
+        {
+            "role": "gpt", "kind": "final_review",
+            "text": "Final review: concur with {} at {} risk. The operator holds "
+                    "the decision; this deliberation only informs it.".format(
+                        recommended, risk_level),
+        },
+    ][:MAX_ROUNDS]
+
+    if recommended == "CTA":
+        proposed_action = ("Draft an RTA for the bounded improvement and submit it "
+                           "for operator decision.")
+        rta_title = "Bounded improvement: {}".format(short)
+        rta_action = ("{} Documentation/config-level change only. No functional "
+                      "behavior changes without a separate clearance.".format(question))
+        scope_boundary = "only the files named in the RTA; verify before DONE"
+    elif recommended == "DTA":
+        proposed_action = ("Deny as asked. If a safe subset exists, restate it as a "
+                           "new, narrower question.")
+        rta_title = None
+        rta_action = None
+        scope_boundary = "no action is in scope as worded"
+    else:
+        proposed_action = ("Request information: restate the question with explicit "
+                           "scope, affected files, and rollback expectations.")
+        rta_title = None
+        rta_action = None
+        scope_boundary = "undetermined until the RFI is answered"
+
+    summary = {
+        "role": "clearwright",
+        "decision_needed": "Operator decision on: {}".format(short),
+        "recommended": recommended,
+        "risk_level": risk_level,
+        "risks": [rationale,
+                  "consensus or agent agreement does not grant authority",
+                  "any work requires a granted, bounded clearance"],
+        "scope_boundary": scope_boundary,
+        "proposed_next_action": proposed_action,
+        "proposed_rta_title": rta_title,
+        "proposed_rta_action": rta_action,
+    }
+
+    return {
+        "ok": True,
+        "simulated": True,
+        "max_rounds": MAX_ROUNDS,
+        "question": question,
+        "turns": turns,
+        "summary": summary,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Board / audit state
 # --------------------------------------------------------------------------- #
 
@@ -447,6 +598,10 @@ class Handler(BaseHTTPRequestHandler):
             result = do_request(QUEUE_ROOT, payload)
             result["state"] = build_state(QUEUE_ROOT)
             self._send_json(result)
+            return
+
+        if path == "/api/converse":
+            self._send_json(build_conversation(payload.get("question", "")))
             return
 
         self._send_json({"ok": False, "error": "not found"}, code=404)

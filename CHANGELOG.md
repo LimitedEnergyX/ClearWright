@@ -5,6 +5,23 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Worker command bridge and runbook: `tools/clearwright_worker.py` makes "use
+  CW" / "review with CW" a real, repeatable worker behavior over CLI or local
+  HTTP, with `next`, `claim`, `progress`, `respond`, and `status` commands. It is
+  thin orchestration over the existing work-item and message functions (shared
+  `progress_work_item`, `find_work_item`, and `worker_status` helpers), so the
+  CLI and HTTP agree on ids, claim semantics, thread and packet preservation, and
+  durable files. Adds a small read-only `GET /api/worker-status`, small work-item
+  and communications UI hints, and `docs/WORKER_RUNBOOK.md` (what Claude should
+  and must not do, command examples, how to verify in the UI/history, how to
+  avoid ChromeMCP, how to handle unavailable GPT/Codex, and the hard gates).
+  No schema or validator change, no new dependency, no browser automation, no
+  Discord, no model API.
+- Fixed durable message and agent-event ordering: ids and timestamps are now
+  strictly monotonic, so messages and events built within the same microsecond
+  (a burst or a tight loop) keep their write order and stay uniquely identified.
+  This makes thread order (post progress, then respond) reliable for the worker
+  loop. Message log only; no schema or validator change.
 - Live dispatch console and history: the control plane is now a working local
   dispatch loop. An operator chat in the console posts real inbound
   `OPERATOR-0001` messages (no fake replies); agents, tools, and scripts pick up

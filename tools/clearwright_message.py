@@ -28,7 +28,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 COMMS_DIR = "communications"
 DEFAULT_ROLE = "agent"
@@ -39,13 +39,28 @@ DIRECTIONS = ("inbound", "outbound", "internal")
 STATUSES = ("posted", "read", "claimed", "responded")
 
 
+_last_dt = None
+
+
+def _monotonic_dt():
+    """Return a strictly increasing UTC datetime so message ids and timestamps
+    stay unique and correctly ordered even when several are built within the
+    same microsecond (a tight loop, or one process handling a burst)."""
+    global _last_dt
+    now = datetime.now(timezone.utc)
+    if _last_dt is not None and now <= _last_dt:
+        now = _last_dt + timedelta(microseconds=1)
+    _last_dt = now
+    return now
+
+
 def _now_iso():
-    # Microsecond precision so each message_id is unique per writer.
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    # Microsecond precision, monotonic, so each message_id is unique per writer.
+    return _monotonic_dt().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _stamp():
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    return _monotonic_dt().strftime("%Y%m%dT%H%M%S%f")
 
 
 def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,

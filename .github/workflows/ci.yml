@@ -46,6 +46,9 @@ jobs:
       - name: Compile clearwright_work
         run: python -m py_compile tools/clearwright_work.py
 
+      - name: Compile clearwright_worker
+        run: python -m py_compile tools/clearwright_worker.py
+
       - name: Compile control plane server
         run: python -m py_compile apps/control-plane/server.py
 
@@ -72,6 +75,9 @@ jobs:
 
       - name: Smoke test, work help
         run: python tools/clearwright_work.py --help
+
+      - name: Smoke test, worker help
+        run: python tools/clearwright_worker.py --help
 
       - name: Smoke test, control plane help
         run: python apps/control-plane/server.py --help

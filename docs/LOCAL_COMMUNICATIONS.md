@@ -162,6 +162,13 @@ polling, no WebSockets), and the workflow graph pulses from real queue and
 message state. A read-only **History** view lists every packet, message, and
 agent event with basic filters. None of this edits or deletes the record.
 
+For the "use CW" worker behavior (find work, claim, post progress, respond),
+`tools/clearwright_worker.py` is a thin bridge over these same functions with
+`next`, `claim`, `progress`, `respond`, and `status` commands, and
+`GET /api/worker-status` gives the same summary over HTTP. See
+[WORKER_RUNBOOK.md](WORKER_RUNBOOK.md) for exactly what Claude should do when the
+operator says "use CW" or "review with CW".
+
 ## Discord and other transports (future)
 
 Discord is **not connected** in ClearWright yet. The local communications loop

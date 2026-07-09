@@ -84,6 +84,9 @@ This repository ships the local, single-machine foundation:
   to over CLI or local HTTP (`tools/clearwright_work.py`, `/api/work-items`), an
   operator chat in the console, a live-polling UI with a pulsing workflow graph,
   and a read-only History view.
+- A worker command bridge (`tools/clearwright_worker.py`: `next`, `claim`,
+  `progress`, `respond`, `status`) and a runbook that make "use CW" a real,
+  repeatable worker behavior over CLI or local HTTP, no browser required.
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a
@@ -160,7 +163,10 @@ behavior, and implementation simplicity are especially useful. See
 - [docs/OPERATOR_MODE.md](docs/OPERATOR_MODE.md): operator mode (live local use)
   vs demo mode for the local control plane, and how agents and tools drive it.
 - [docs/LOCAL_COMMUNICATIONS.md](docs/LOCAL_COMMUNICATIONS.md): the local
-  communications loop (CLI and local HTTP messages, threads, packet links).
+  communications and dispatch loop (CLI and local HTTP messages, threads, packet
+  links, work items).
+- [docs/WORKER_RUNBOOK.md](docs/WORKER_RUNBOOK.md): what a worker (Claude, Codex,
+  or a script) should do when the operator says "use CW".
 - [CHANGELOG.md](CHANGELOG.md): notable changes.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): community expectations.

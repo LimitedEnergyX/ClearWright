@@ -790,20 +790,34 @@ def parse_codex_telemetry(text):
     }
 
 
-def build_active_run(root):
-    """The most recently active message thread, grouped and ready to render for
-    the Active Run view: thread_id, work_item_id, packet_id, the ordered
-    messages, and any parsed Codex telemetry. Read-only; simulated messages are
-    excluded so operator mode stays real-only."""
-    messages = [m for m in cwm.read_messages(root) if not m.get("simulated")]
+def _real_threads(root):
+    """Real (non-simulated) messages grouped by thread_id, preserving order."""
+    threads = {}
+    for m in cwm.read_messages(root):
+        if m.get("simulated"):
+            continue
+        threads.setdefault(m.get("thread_id"), []).append(m)
+    return threads
+
+
+def build_active_run(root, thread_id=None):
+    """One message thread, grouped and ready to render for the Active Run view:
+    thread_id, work_item_id, packet_id, the ordered messages, and any parsed
+    Codex telemetry. Without thread_id the most recently active thread is
+    returned (the PR #19 behavior); with thread_id that specific run is
+    returned. Read-only; simulated messages are excluded so operator mode stays
+    real-only."""
+    threads = _real_threads(root)
     empty = {"thread_id": None, "work_item_id": None, "packet_id": None,
              "messages": [], "codex_telemetry": None}
-    if not messages:
-        return empty
-    threads = {}
-    for m in messages:
-        threads.setdefault(m.get("thread_id"), []).append(m)
-    active_tid = max(threads, key=lambda t: max((mm.get("at", "") for mm in threads[t]), default=""))
+    if thread_id is not None:
+        if thread_id not in threads:
+            return empty
+        active_tid = thread_id
+    else:
+        if not threads:
+            return empty
+        active_tid = max(threads, key=lambda t: max((mm.get("at", "") for mm in threads[t]), default=""))
     msgs = threads[active_tid]
     work_item_id = next((m.get("work_item_id") for m in msgs if m.get("work_item_id")), None)
     packet_id = next((m.get("packet_id") for m in msgs if m.get("packet_id")), None)
@@ -811,6 +825,60 @@ def build_active_run(root):
     telemetry = parse_codex_telemetry(codex["message"]) if codex else None
     return {"thread_id": active_tid, "work_item_id": work_item_id,
             "packet_id": packet_id, "messages": msgs, "codex_telemetry": telemetry}
+
+
+def _run_status(msgs):
+    """Derive a run's status from its messages: responded when a final
+    outbound/responded message exists, claimed when a claim was recorded,
+    otherwise open."""
+    if any(m.get("direction") == "outbound" or m.get("status") == "responded" for m in msgs):
+        return "responded"
+    if any(m.get("status") == "claimed" for m in msgs):
+        return "claimed"
+    return "open"
+
+
+def build_runs(root, limit=None, status=None, actor=None, source=None,
+               has_codex=None, packet_id=None):
+    """Run registry: summaries of every real message thread, newest-last-
+    activity first, derived from the durable message log (no new store).
+    Simple filters only; History remains the full ledger."""
+    runs = []
+    for tid, msgs in _real_threads(root).items():
+        first = msgs[0]
+        inbound = next((m for m in msgs if m.get("direction") == "inbound"), first)
+        codex = next((m for m in msgs if m.get("actor") == "codex"), None)
+        run = {
+            "thread_id": tid,
+            "work_item_id": next((m.get("work_item_id") for m in msgs if m.get("work_item_id")), None),
+            "packet_id": next((m.get("packet_id") for m in msgs if m.get("packet_id")), None),
+            "title": (inbound.get("message") or "")[:140],
+            "first_timestamp": first.get("at"),
+            "last_timestamp": msgs[-1].get("at"),
+            "message_count": len(msgs),
+            "actors": sorted({m.get("actor") for m in msgs if m.get("actor")}),
+            "sources": sorted({m.get("source") for m in msgs if m.get("source")}),
+            "status": _run_status(msgs),
+            "has_codex_review": codex is not None,
+            "codex_telemetry": parse_codex_telemetry(codex["message"]) if codex else None,
+            "latest_message_preview": (msgs[-1].get("message") or "")[:140],
+        }
+        runs.append(run)
+    runs.sort(key=lambda r: r.get("last_timestamp") or "", reverse=True)
+
+    if status:
+        runs = [r for r in runs if r["status"] == status]
+    if actor:
+        runs = [r for r in runs if actor in r["actors"]]
+    if source:
+        runs = [r for r in runs if source in r["sources"]]
+    if has_codex is not None:
+        runs = [r for r in runs if r["has_codex_review"] == has_codex]
+    if packet_id:
+        runs = [r for r in runs if r["packet_id"] == packet_id]
+    if limit is not None and limit >= 0:
+        runs = runs[:limit]
+    return runs
 
 
 # --------------------------------------------------------------------------- #
@@ -899,7 +967,27 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(cww.worker_status(QUEUE_ROOT))
             return
         if path == "/api/active-run":
-            self._send_json(build_active_run(QUEUE_ROOT))
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            thread_id = urllib.parse.unquote(params.get("thread_id", "")) or None
+            self._send_json(build_active_run(QUEUE_ROOT, thread_id=thread_id))
+            return
+        if path == "/api/runs":
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            def q(name):
+                return urllib.parse.unquote(params.get(name, "")) or None
+            limit_raw = params.get("limit", "")
+            limit = int(limit_raw) if limit_raw.isdigit() else None
+            has_codex_raw = q("has_codex")
+            has_codex = None
+            if has_codex_raw is not None:
+                has_codex = has_codex_raw.lower() in ("1", "true", "yes")
+            self._send_json({"runs": build_runs(
+                QUEUE_ROOT, limit=limit, status=q("status"), actor=q("actor"),
+                source=q("source"), has_codex=has_codex, packet_id=q("packet_id"))})
             return
         if path == "/api/history":
             import urllib.parse

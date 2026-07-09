@@ -494,6 +494,19 @@ body.history-open .console-grid, body.history-open .mission { display: none !imp
 /* Active Run view */
 .active-run-view { margin-top: 1rem; }
 .active-run-view[hidden] { display: none; }
+.run-layout { display: grid; grid-template-columns: 300px 1fr; gap: 0.8rem; align-items: start; }
+@media (max-width: 900px) { .run-layout { grid-template-columns: 1fr; } }
+.run-list { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0.4rem; max-height: 70vh; overflow-y: auto; display: flex; flex-direction: column; gap: 0.3rem; }
+.run-item { border: 1px solid transparent; border-radius: 8px; padding: 0.4rem 0.5rem; cursor: pointer; }
+.run-item:hover { background: var(--panel-2); }
+.run-item.is-selected { background: var(--panel-2); border-color: var(--blue-soft); }
+.run-item-title { font-size: 0.78rem; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.run-item-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; margin-top: 0.25rem; }
+.run-status-open { background: var(--pending); }
+.run-status-claimed { background: var(--blue-soft); }
+.run-status-responded { background: var(--ok); }
+.run-count { font-size: 0.62rem; color: var(--gray); }
+.run-last { font-size: 0.62rem; color: var(--gray); margin-left: auto; font-family: ui-monospace, monospace; }
 body.run-open .console-grid, body.run-open .mission { display: none !important; }
 .active-run-controls { display: flex; align-items: center; gap: 0.6rem; }
 .run-filter { display: inline-flex; gap: 0.25rem; }

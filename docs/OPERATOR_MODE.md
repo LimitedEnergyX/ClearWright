@@ -96,8 +96,9 @@ not permanent packet lifecycle, so a stale completed packet does not keep DONE
 pulsing), and a real Codex review is only recorded when the local Codex CLI
 actually ran and produced substantive output (telemetry-backed); GPT / ChatGPT
 are never claimed. A read-only History view lists every packet, message, and
-event, and a focused Active Run view shows the current run as one readable thread
-with copy buttons and Codex telemetry as fields. See
+event, and a focused Active Run view shows a run as one readable thread with a
+click-to-select list of recent runs (derived from the durable message threads,
+no new database), copy buttons, and Codex telemetry as fields. See
 [LOCAL_COMMUNICATIONS.md](LOCAL_COMMUNICATIONS.md) and
 [WORKER_RUNBOOK.md](WORKER_RUNBOOK.md).
 

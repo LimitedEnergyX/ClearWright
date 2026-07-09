@@ -5,6 +5,16 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Run registry and Active Run selector. New read-only `GET /api/runs` derives
+  one summary per durable message thread (thread id, work item and packet ids,
+  title, first/last timestamps, message count, actors, sources,
+  open/claimed/responded status, Codex flag and parsed telemetry, latest-message
+  preview) with simple filters (`limit`, `status`, `actor`, `source`,
+  `has_codex`, `packet_id`); no new database. `GET /api/active-run` now accepts
+  `?thread_id=<id>` to load a specific run (default behavior unchanged). The
+  Active Run view gains a click-to-select run list with status/Codex/count
+  badges; copy buttons and filters kept; History remains the full ledger. No
+  schema or validator change, no new dependency, no Discord, no model API.
 - Active run view and proof ergonomics. `clearwright_proof.py` and
   `clearwright_codex_review.py` now take an absolute `--repo` path and run
   git/tests/Codex with that as the subprocess working directory, so they work

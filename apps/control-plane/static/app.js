@@ -650,45 +650,56 @@ function runSummaryText(run) {
   return lines.join("\n");
 }
 
-function lastAt(t) {
-  return (t.messages || []).reduce((mx, m) => (m.at > mx ? m.at : mx), "");
-}
-
-function groupThreads(messages) {
-  const map = {}, order = [];
-  messages.forEach((m) => {
-    const t = m.thread_id || "thr-unknown";
-    if (!map[t]) {
-      map[t] = { thread_id: t, work_item_id: null, packet_id: null, messages: [], codex_telemetry: null };
-      order.push(t);
-    }
-    map[t].messages.push(m);
-    if (!map[t].work_item_id && m.work_item_id) map[t].work_item_id = m.work_item_id;
-    if (!map[t].packet_id && m.packet_id) map[t].packet_id = m.packet_id;
-  });
-  const arr = order.map((t) => map[t]);
-  arr.sort((a, b) => (lastAt(b) < lastAt(a) ? -1 : 1));
-  return arr;
-}
-
+// Run registry: /api/runs derives one summary per durable message thread (no
+// new store). The filter narrows the run list; clicking a run loads it.
 let currentRunFilter = "active";
+let selectedRunThread = null;
+
+function filterRuns(runs) {
+  if (currentRunFilter === "active") {
+    const open = runs.filter((r) => r.status !== "responded");
+    return open.length ? open : runs.slice(0, 5);
+  }
+  if (currentRunFilter === "recent") return runs.slice(0, 10);
+  return runs;
+}
+
+function shortTime(iso) {
+  return iso ? String(iso).replace("T", " ").slice(5, 16) : "";
+}
+
+function renderRunList(runs, activeTid) {
+  const el = document.getElementById("run-list");
+  if (!el) return;
+  if (!runs.length) {
+    el.innerHTML = '<p class="muted">No runs yet.</p>';
+    return;
+  }
+  el.innerHTML = runs.map((r) => {
+    const badges = ['<span class="work-badge run-status-' + esc(r.status) + '">' + esc(r.status) + "</span>"];
+    if (r.has_codex_review) badges.push('<span class="feed-badge local">codex</span>');
+    badges.push('<span class="run-count">' + esc(r.message_count) + " msg</span>");
+    return '<div class="run-item' + (r.thread_id === activeTid ? " is-selected" : "") +
+      '" data-thread="' + esc(r.thread_id) + '">' +
+      '<div class="run-item-title">' + esc(r.title || r.thread_id) + "</div>" +
+      '<div class="run-item-badges">' + badges.join("") +
+      '<span class="run-last">' + esc(shortTime(r.last_timestamp)) + "</span></div></div>";
+  }).join("");
+}
 
 async function loadActiveRun() {
   const body = document.getElementById("active-run-body");
   try {
-    if (currentRunFilter === "active") {
-      const run = await getJSON("/api/active-run");
-      body.innerHTML = renderRunThread(run) +
-        '<button class="copy-btn copy-summary" type="button" data-copy-summary="1">copy summary</button>';
-      body._run = run;
-    } else {
-      const data = await getJSON("/api/history");
-      const threads = groupThreads(data.messages || []);
-      const shown = currentRunFilter === "recent" ? threads.slice(0, 5) : threads;
-      body.innerHTML = shown.length ? shown.map(renderRunThread).join("")
-        : '<p class="muted">No runs yet.</p>';
-      body._run = null;
-    }
+    const data = await getJSON("/api/runs");
+    const runs = filterRuns(data.runs || []);
+    const url = selectedRunThread
+      ? "/api/active-run?thread_id=" + encodeURIComponent(selectedRunThread)
+      : "/api/active-run";
+    const run = await getJSON(url);
+    renderRunList(runs, run.thread_id);
+    body.innerHTML = renderRunThread(run) +
+      '<button class="copy-btn copy-summary" type="button" data-copy-summary="1">copy summary</button>';
+    body._run = run;
   } catch (e) {
     body.innerHTML = '<p class="muted">Could not load the active run.</p>';
   }
@@ -1243,6 +1254,12 @@ function wire() {
     const body = document.getElementById("active-run-body");
     if (btn.hasAttribute("data-copy")) copyText(btn.getAttribute("data-copy"), btn);
     else copyText(runSummaryText(body._run), btn);
+  });
+  document.getElementById("run-list").addEventListener("click", (e) => {
+    const item = e.target.closest(".run-item");
+    if (!item) return;
+    selectedRunThread = item.getAttribute("data-thread");
+    loadActiveRun();
   });
   fitCanvas();
   // Live console: fast polling (every 2s) of all real sources. No WebSockets.

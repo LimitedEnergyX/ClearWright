@@ -128,8 +128,11 @@
           <button id="active-run-close" class="btn btn-quiet" type="button">Back to console</button>
         </div>
       </div>
-      <p class="hint">The current or most recent run as one readable thread: operator request, claim, progress, reviewer notes, and the final response, with Codex telemetry shown as fields when present. Read-only.</p>
-      <div id="active-run-body"><p class="muted">Loading...</p></div>
+      <p class="hint">Recent runs derived from the durable message threads. Pick a run on the left to read its full sequence: operator request, claim, progress, reviewer notes, and the final response, with Codex telemetry shown as fields when present. Read-only; History remains the full ledger.</p>
+      <div class="run-layout">
+        <div class="run-list" id="run-list"><p class="muted">Loading runs...</p></div>
+        <div id="active-run-body"><p class="muted">Loading...</p></div>
+      </div>
     </section>
 
     <section class="history-view" id="history-view" hidden aria-labelledby="history-h">

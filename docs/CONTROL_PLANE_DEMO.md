@@ -186,25 +186,32 @@ from [examples/demo_packets/](../examples/demo_packets/), and removed on exit. U
 **Reset demo** in the UI to return to the seed packets. Runtime clearance packets
 are local demo data and are not committed.
 
-### Durable queue (`--queue-root`)
+### Operator mode and the durable queue (`--queue-root`, `--mode`)
 
-To keep the console pointed at a persistent queue, so active governed work stays
-visible across restarts, pass `--queue-root`:
+Passing `--queue-root` points the console at a persistent queue and selects
+**operator mode** by default: the live local operator console, where active
+governed work stays visible across restarts.
 
     python apps/control-plane/server.py --port 8787 --queue-root path/to/queue
 
-Behavior with `--queue-root`:
+Behavior with `--queue-root` (operator mode):
 
 - The directory and the four lanes (`clearance_outbox`,
   `clearance_in_progress`, `clearance_done`, `clearance_failed`) are created if
   missing.
-- Demo packets are seeded only when the queue is empty; a queue that already
-  holds packets is left exactly as-is and never cleared or overwritten.
+- Operator mode **never seeds demo packets**: a fresh operator queue starts
+  empty and stays a real local workspace. An existing queue is left exactly
+  as-is and never cleared or overwritten.
 - The queue is not removed on exit (it is durable).
-- **Reset demo** is disabled on a durable queue, so the UI can never destroy
-  governed work; reset applies only to the default temporary queue.
+- **Reset demo** is disabled in operator mode, so the UI can never destroy
+  governed work.
 
-Omitting `--queue-root` preserves the original temporary-queue behavior.
+Omitting `--queue-root` selects **demo mode** on a temporary queue, seeded from
+[examples/demo_packets/](../examples/demo_packets/) and removed on exit. Use
+`--mode operator|demo` to override the default either way (for example, run a
+demo walkthrough against a durable queue with `--mode demo`, or an empty live
+console on a temporary queue with `--mode operator`). See
+[OPERATOR_MODE.md](OPERATOR_MODE.md) for the full explanation of the two modes.
 
 ## Scope
 

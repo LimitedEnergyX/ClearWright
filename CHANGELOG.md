@@ -5,6 +5,15 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Operator mode for live local use: the control plane now runs as an operator
+  console by default whenever a durable `--queue-root` is given, with an
+  explicit `--mode operator|demo` override. Operator mode never seeds demo
+  packets, disables Reset demo, hides the demo mission, and treats real local
+  agent events as the primary feed; demo mode keeps the seeded walkthrough and a
+  clearly labeled simulated feed. `/api/state` now reports `mode`, `queue_root`,
+  `durable`, and `demo_seeded`, and the UI shows a mode badge with operator
+  empty-states ("No active clearance requests."). New `docs/OPERATOR_MODE.md`
+  explains the two modes. No schema or validator change.
 - Local agent event adapter: a durable agent-event log under the queue root
   (`agent_events/`), a `POST`/`GET /api/agent-events` local HTTP API, and a
   `tools/clearwright_agent_event.py` CLI so Claude Desktop, Codex, scripts, or

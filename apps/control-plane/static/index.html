@@ -11,8 +11,8 @@
     <div class="brand">
       <span class="mark" aria-hidden="true">CW</span>
       <div>
-        <h1>ClearWright Control Plane</h1>
-        <p class="posture">Local reference implementation &middot; early alpha &middot; human-commanded, operator-controlled</p>
+        <h1>ClearWright Control Plane <span class="mode-badge" id="mode-badge" hidden></span></h1>
+        <p class="posture" id="posture">Local reference implementation &middot; early alpha &middot; human-commanded, operator-controlled</p>
       </div>
     </div>
     <div class="topbar-actions">
@@ -22,7 +22,7 @@
   </header>
 
   <main>
-    <details class="panel mission">
+    <details class="panel mission" id="mission-panel">
       <summary>Mission intake</summary>
       <div class="mission-grid" id="mission-grid">
         <p class="muted">Loading mission...</p>
@@ -90,7 +90,7 @@
             <div class="feed-grouplabel">Local events <span class="feed-badge local">real</span></div>
             <div class="feed" id="feed-real"><p class="muted feed-empty">No local events yet. Send one with tools/clearwright_agent_event.py or POST /api/agent-events.</p></div>
           </div>
-          <div class="feed-group">
+          <div class="feed-group" id="feed-sim-group">
             <div class="feed-grouplabel">Simulated demo <span class="sim-tag">simulated</span></div>
             <div class="feed" id="feed"></div>
           </div>

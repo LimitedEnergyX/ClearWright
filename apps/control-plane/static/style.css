@@ -67,6 +67,22 @@ h1, h2 { margin: 0; }
   border-radius: 999px;
 }
 
+/* Mode badge: operator (live local) vs demo (walkthrough) */
+.mode-badge {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 0.5rem;
+  font-size: 0.6rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+}
+.mode-badge[hidden] { display: none; }
+.mode-badge-operator { color: #08111e; background: var(--ok); }
+.mode-badge-demo { color: #08111e; background: var(--pending); }
+
 main { padding: 1rem 1.25rem; max-width: 1600px; margin: 0 auto; }
 
 .panel {

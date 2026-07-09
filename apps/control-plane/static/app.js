@@ -31,6 +31,13 @@ const ACTION_CLASS = {
 
 const REASON_ACTIONS = new Set(["dta", "rfi", "fail"]);
 
+// Operator mode is the live local console: no demo seeding, no reset, real
+// local agent events as the primary feed. Demo mode is the walkthrough.
+const OPERATOR_EMPTY_REQUESTS = "No active clearance requests.";
+const OPERATOR_EMPTY_EVENTS =
+  "No local agent events yet. Agents and tools can submit events through the local adapter.";
+let currentMode = "demo";
+
 function esc(value) {
   if (value === null || value === undefined) return "";
   return String(value)
@@ -223,10 +230,17 @@ function renderOperatorCard(state) {
   const waiting = outbox.filter((c) => (c.allowed_actions || []).includes("cta")).length;
 
   if (!card) {
-    holder.innerHTML =
-      '<p class="muted">No incoming requests. Packets arrive here from agents, ' +
-      "tools, scripts, or integrations. In this demo, ask the agents a question " +
-      "below and send the condensed recommendation to the clearance queue.</p>";
+    if (currentMode === "operator") {
+      holder.innerHTML =
+        '<p class="muted">' + esc(OPERATOR_EMPTY_REQUESTS) +
+        " Clearance packets arrive from agents, tools, scripts, or integrations " +
+        "through the request tool or POST /api/request.</p>";
+    } else {
+      holder.innerHTML =
+        '<p class="muted">No incoming requests. Packets arrive here from agents, ' +
+        "tools, scripts, or integrations. In this demo, ask the agents a question " +
+        "below and send the condensed recommendation to the clearance queue.</p>";
+    }
     return;
   }
 
@@ -296,8 +310,11 @@ function renderRealEvents(events) {
   const el = document.getElementById("feed-real");
   if (!el) return;
   if (!events || !events.length) {
-    el.innerHTML = '<p class="muted feed-empty">No local events yet. Send one ' +
-      'with tools/clearwright_agent_event.py or POST /api/agent-events.</p>';
+    const empty = currentMode === "operator"
+      ? OPERATOR_EMPTY_EVENTS
+      : "No local events yet. Send one with tools/clearwright_agent_event.py " +
+        "or POST /api/agent-events.";
+    el.innerHTML = '<p class="muted feed-empty">' + esc(empty) + "</p>";
     return;
   }
   el.innerHTML = "";
@@ -317,10 +334,13 @@ function renderRealEvents(events) {
   el.scrollTop = el.scrollHeight;
 }
 
+let lastEvents = [];
+
 async function refreshAgentEvents() {
   try {
     const data = await getJSON("/api/agent-events");
-    renderRealEvents(data.events || []);
+    lastEvents = data.events || [];
+    renderRealEvents(lastEvents);
   } catch (e) {
     // Leave the prior content in place on a transient fetch error.
   }
@@ -726,12 +746,51 @@ function closeAudit() {
 // State plumbing
 // --------------------------------------------------------------------------- //
 
+// Switch the console between live operator mode and the demo walkthrough based
+// on state.mode from /api/state. Operator mode hides the demo-only affordances
+// (Reset demo, the demo mission panel, and the simulated feed as a primary
+// live feed) and leans on real local agent events.
+function applyMode(state) {
+  currentMode = state.mode === "operator" ? "operator" : "demo";
+  const operator = currentMode === "operator";
+  document.body.classList.toggle("mode-operator", operator);
+  document.body.classList.toggle("mode-demo", !operator);
+
+  const badge = document.getElementById("mode-badge");
+  if (badge) {
+    badge.textContent = operator ? "Operator mode" : "Demo mode";
+    badge.hidden = false;
+    badge.classList.toggle("mode-badge-operator", operator);
+    badge.classList.toggle("mode-badge-demo", !operator);
+  }
+  const posture = document.getElementById("posture");
+  if (posture) {
+    posture.textContent = operator
+      ? "Live local operator console · durable queue · early alpha · human-commanded, operator-controlled"
+      : "Demo walkthrough · local reference implementation · early alpha · human-commanded, operator-controlled";
+  }
+  // Reset demo is only meaningful in demo mode; operator runs a live durable queue.
+  const reset = document.getElementById("reset-btn");
+  if (reset) reset.hidden = operator;
+  const mission = document.getElementById("mission-panel");
+  if (mission) mission.hidden = operator;
+  // No simulated feed as the primary live feed in operator mode.
+  const simGroup = document.getElementById("feed-sim-group");
+  if (simGroup) simGroup.hidden = operator;
+
+  // Re-render the real-events empty-state with the correct wording for the mode.
+  renderRealEvents(lastEvents);
+}
+
 function renderState(state) {
+  applyMode(state);
   renderMission(state.mission);
   renderWorkflow(state);
   renderOperatorCard(state);
   renderBoard(state);
-  feedStart(state);
+  // The simulated demo feed is a walkthrough aid only, never the primary live
+  // feed; in operator mode the real local agent events stand alone.
+  if (currentMode !== "operator") feedStart(state);
 }
 
 async function refresh() {

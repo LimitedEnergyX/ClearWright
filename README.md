@@ -147,6 +147,10 @@ behavior, and implementation simplicity are especially useful. See
   workflow (protocol vision, not a current-state implementation claim).
 - [docs/PEER_REVIEW.md](docs/PEER_REVIEW.md): what review is useful and how to
   offer it.
+- [docs/CONTROL_PLANE_DEMO.md](docs/CONTROL_PLANE_DEMO.md): the local control
+  plane console tour (the operator display).
+- [docs/OPERATOR_MODE.md](docs/OPERATOR_MODE.md): operator mode (live local use)
+  vs demo mode for the local control plane, and how agents and tools drive it.
 - [CHANGELOG.md](CHANGELOG.md): notable changes.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): community expectations.

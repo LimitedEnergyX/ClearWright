@@ -124,35 +124,50 @@ def seed_queue(root):
             shutil.copy2(os.path.join(DEMO_PACKETS, name), os.path.join(outbox, name))
 
 
-def resolve_queue_root(queue_root):
-    """Return (root, durable).
+OPERATOR_MODE = "operator"
+DEMO_MODE = "demo"
 
-    When queue_root is given, use that durable directory: create it and the
-    lane directories if missing, and seed the demo packets ONLY when the queue
-    is empty. An existing durable queue with packets is left exactly as-is,
-    never cleared or overwritten. When queue_root is None, preserve the
-    original behavior: a fresh temporary queue seeded with the demo packets.
+
+def resolve_mode(queue_root, mode):
+    """Decide the effective mode. Explicit --mode wins. Otherwise a
+    --queue-root defaults to operator mode (live local use) and the default
+    temporary queue stays in demo mode (local walkthrough)."""
+    if mode in (OPERATOR_MODE, DEMO_MODE):
+        return mode
+    return OPERATOR_MODE if queue_root else DEMO_MODE
+
+
+def resolve_queue(queue_root, mode=None):
+    """Return (root, durable, mode, demo_seeded).
+
+    Demo mode seeds the demo packets into an empty queue (temporary or durable).
+    Operator mode NEVER seeds: a fresh operator queue starts empty and stays a
+    real local workspace. An existing queue that already holds packets is left
+    exactly as-is in either mode, never cleared or overwritten.
     """
+    mode = resolve_mode(queue_root, mode)
     if queue_root:
         root = os.path.abspath(queue_root)
         os.makedirs(root, exist_ok=True)
         ensure_lanes(root)
-        if not queue_has_packets(root):
-            seed_queue(root)
-        return root, True
-    root = make_queue_root()
-    seed_queue(root)
-    return root, False
+        durable = True
+    else:
+        root = make_queue_root()
+        durable = False
+    demo_seeded = False
+    if mode == DEMO_MODE and not queue_has_packets(root):
+        seed_queue(root)
+        demo_seeded = True
+    return root, durable, mode, demo_seeded
 
 
-def do_reset(root, durable):
-    """Reset the demo queue to the seed packets. Refused on a durable queue so
-    the UI's Reset control can never destroy governed work."""
-    if durable:
+def do_reset(root, mode):
+    """Reset the queue to the demo seed packets. Allowed only in demo mode, so
+    operator mode's live governed work can never be destroyed by a reset."""
+    if mode != DEMO_MODE:
         return {"ok": False,
-                "error": "reset is disabled on a durable --queue-root; the "
-                         "demo queue is only reset when running on the default "
-                         "temporary queue"}
+                "error": "reset is only available in demo mode; operator mode "
+                         "runs a live durable queue and is never reset"}
     seed_queue(root)
     return {"ok": True}
 
@@ -532,8 +547,12 @@ def packet_summary(path, lane):
     }
 
 
-def build_state(root):
-    """Return the full board: mission plus packets grouped by lane."""
+def build_state(root, mode=None, durable=None, demo_seeded=None):
+    """Return the full board: mode metadata, mission, and packets grouped by
+    lane. Mode/durable/demo_seeded fall back to the running server's globals."""
+    mode = mode if mode is not None else MODE
+    durable = durable if durable is not None else DURABLE
+    demo_seeded = demo_seeded if demo_seeded is not None else DEMO_SEEDED
     lanes = {lane: [] for lane in LANES}
     for lane in LANES:
         lane_dir = os.path.join(root, lane)
@@ -547,7 +566,11 @@ def build_state(root):
             except (OSError, ValueError):
                 lanes[lane].append({"filename": name, "lane": lane, "status": "UNREADABLE"})
     return {
-        "mission": read_mission(),
+        "mode": mode,
+        "durable": bool(durable),
+        "demo_seeded": bool(demo_seeded),
+        "queue_root": root,
+        "mission": read_mission() if mode == DEMO_MODE else {},
         "lanes": lanes,
         "actor": DEMO_ACTOR,
         "intake": {
@@ -589,6 +612,8 @@ def read_mission():
 
 QUEUE_ROOT = None  # set in main()
 DURABLE = False    # True when running against a persistent --queue-root
+MODE = DEMO_MODE   # "operator" (live local) or "demo" (walkthrough); set in main()
+DEMO_SEEDED = False  # True when demo packets were seeded into this queue
 
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -665,7 +690,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/reset":
-            result = do_reset(QUEUE_ROOT, DURABLE)
+            result = do_reset(QUEUE_ROOT, MODE)
             result["state"] = build_state(QUEUE_ROOT)
             self._send_json(result)
             return
@@ -703,21 +728,25 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global QUEUE_ROOT, DURABLE
-    parser = argparse.ArgumentParser(description="ClearWright local control plane demo (early alpha).")
+    global QUEUE_ROOT, DURABLE, MODE, DEMO_SEEDED
+    parser = argparse.ArgumentParser(description="ClearWright local control plane (early alpha).")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1, local only).")
     parser.add_argument("--port", type=int, default=8787, help="Bind port (default 8787).")
     parser.add_argument(
         "--queue-root", default=None, metavar="PATH",
         help="Run against a durable clearance queue at PATH instead of a fresh "
              "temporary one. The directory and its lanes are created if missing; "
-             "demo packets are seeded only when the queue is empty; existing "
-             "packets are never cleared or overwritten, and the queue is not "
-             "removed on exit. Omit to preserve the default temporary-queue "
-             "behavior.")
+             "existing packets are never cleared or overwritten, and the queue is "
+             "not removed on exit. A --queue-root defaults to operator mode.")
+    parser.add_argument(
+        "--mode", default=None, choices=[OPERATOR_MODE, DEMO_MODE],
+        help="operator = live local operator workspace (no demo seeding, no "
+             "reset). demo = local walkthrough (seeds demo packets into an empty "
+             "queue, simulated feed, reset enabled). Default: operator when "
+             "--queue-root is given, otherwise demo.")
     args = parser.parse_args()
 
-    QUEUE_ROOT, DURABLE = resolve_queue_root(args.queue_root)
+    QUEUE_ROOT, DURABLE, MODE, DEMO_SEEDED = resolve_queue(args.queue_root, args.mode)
     if not DURABLE:
         # Only a fresh temporary queue is removed on exit; a durable queue
         # must persist.
@@ -725,8 +754,10 @@ def main():
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     url = "http://{}:{}/".format(args.host, args.port)
-    print("ClearWright control plane demo (local reference implementation, early alpha)")
-    print("Queue root: {} ({})".format(QUEUE_ROOT, "durable" if DURABLE else "temporary"))
+    print("ClearWright control plane ({} mode, local reference implementation, early alpha)".format(MODE))
+    print("Queue root: {} ({}{})".format(
+        QUEUE_ROOT, "durable" if DURABLE else "temporary",
+        ", demo-seeded" if DEMO_SEEDED else ""))
     print("Open: {}".format(url))
     print("Press Ctrl+C to stop.")
     try:

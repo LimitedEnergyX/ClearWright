@@ -83,6 +83,47 @@ h1, h2 { margin: 0; }
 .mode-badge-operator { color: #08111e; background: var(--ok); }
 .mode-badge-demo { color: #08111e; background: var(--pending); }
 
+/* System health chip + read-only details panel */
+.health-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font: inherit;
+  font-size: 0.76rem;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--line);
+  padding: 0.22rem 0.6rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.health-chip:hover { border-color: var(--blue-soft); }
+.health-dot { width: 9px; height: 9px; border-radius: 999px; background: var(--gray); }
+.health-green .health-dot { background: var(--ok); }
+.health-yellow .health-dot { background: var(--pending); }
+.health-red .health-dot { background: var(--deny); }
+.health-panel {
+  position: absolute;
+  top: 56px;
+  right: 1.25rem;
+  z-index: 40;
+  width: 340px;
+  max-width: calc(100vw - 2rem);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.7rem 0.85rem;
+  box-shadow: var(--shadow);
+}
+.health-panel[hidden] { display: none; }
+.health-panel-head { font-size: 0.85rem; font-weight: 700; display: flex; align-items: center; gap: 0.4rem; }
+.health-row { font-size: 0.78rem; padding: 0.18rem 0; border-top: 1px solid rgba(255, 255, 255, 0.05); }
+.health-row:first-of-type { border-top: none; margin-top: 0.4rem; }
+.health-row .k { color: var(--gray); }
+.health-note { font-size: 0.74rem; border-radius: 6px; padding: 0.3rem 0.45rem; margin-top: 0.35rem; }
+.health-note-warn { color: var(--pending); border: 1px solid var(--pending); }
+.health-note-error { color: var(--deny); border: 1px solid var(--deny); }
+
 /* ? help tooltip: keeps long panel copy out of the way, keyboard-focusable */
 .help {
   position: relative;

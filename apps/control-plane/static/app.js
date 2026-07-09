@@ -717,6 +717,68 @@ function closeActiveRun() {
   document.getElementById("active-run-view").hidden = true;
 }
 
+// --------------------------------------------------------------------------- //
+// System health (read-only readiness: /api/health)
+// --------------------------------------------------------------------------- //
+
+const HEALTH_LABELS = { green: "Healthy", yellow: "Attention", red: "Problem" };
+let lastHealth = null;
+
+function healthRow(label, value) {
+  return '<div class="health-row"><span class="k">' + esc(label) + ":</span> " +
+    esc(value) + "</div>";
+}
+
+function renderHealthDetails(h) {
+  const el = document.getElementById("health-details");
+  if (!el || !h) return;
+  const counts = h.packet_counts || {};
+  const caps = h.capabilities || {};
+  let codex = "not checked";
+  if (caps.codex_cli_on_path === true) codex = "CLI on PATH (capability only)";
+  else if (caps.codex_cli_on_path === false) codex = "CLI not on PATH";
+  let html = "";
+  html += healthRow("Mode", h.mode + (h.durable ? " · durable" : " · temporary"));
+  html += healthRow("Queue root", h.queue_root || "unknown");
+  html += healthRow("Packets", Object.keys(counts).map(
+    (l) => l.replace("clearance_", "") + " " + counts[l]).join(" · "));
+  html += healthRow("Work items", "open " + (h.work_items_open || 0) +
+    " · claimed " + (h.work_items_claimed || 0) + " · total " + (h.work_items_total || 0));
+  html += healthRow("Messages / events / runs",
+    (h.message_count || 0) + " / " + (h.agent_event_count || 0) + " / " + (h.run_count || 0));
+  if (h.latest_run_timestamp) html += healthRow("Latest run", h.latest_run_timestamp);
+  html += healthRow("Codex", codex);
+  (h.warnings || []).forEach((w) => {
+    html += '<div class="health-note health-note-warn">' + esc(w) + "</div>";
+  });
+  (h.errors || []).forEach((w) => {
+    html += '<div class="health-note health-note-error">' + esc(w) + "</div>";
+  });
+  el.innerHTML = html;
+}
+
+async function refreshHealth() {
+  try {
+    const h = await getJSON("/api/health");
+    lastHealth = h;
+    const chip = document.getElementById("health-chip");
+    if (!chip) return;
+    chip.classList.remove("health-green", "health-yellow", "health-red");
+    chip.classList.add("health-" + (h.status || "red"));
+    document.getElementById("health-label").textContent = HEALTH_LABELS[h.status] || "Unknown";
+    const panel = document.getElementById("health-panel");
+    if (panel && !panel.hidden) renderHealthDetails(h);
+  } catch (e) {
+    // Leave the prior chip state on a transient fetch error.
+  }
+}
+
+function toggleHealthPanel() {
+  const panel = document.getElementById("health-panel");
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) renderHealthDetails(lastHealth);
+}
+
 let feedStarted = false;
 
 function feedPush(actor, text) {
@@ -1261,16 +1323,19 @@ function wire() {
     selectedRunThread = item.getAttribute("data-thread");
     loadActiveRun();
   });
+  document.getElementById("health-chip").addEventListener("click", toggleHealthPanel);
   fitCanvas();
   // Live console: fast polling (every 2s) of all real sources. No WebSockets.
   const LIVE_MS = 2000;
   refreshAgentEvents();
   refreshMessages();
   refreshWorkItems();
+  refreshHealth();
   setInterval(refresh, LIVE_MS);
   setInterval(refreshAgentEvents, LIVE_MS);
   setInterval(refreshMessages, LIVE_MS);
   setInterval(refreshWorkItems, LIVE_MS);
+  setInterval(refreshHealth, LIVE_MS * 2);
   // Keep the Active Run view live while it is open.
   setInterval(() => {
     if (document.body.classList.contains("run-open")) loadActiveRun();

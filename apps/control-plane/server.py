@@ -881,6 +881,96 @@ def build_runs(root, limit=None, status=None, actor=None, source=None,
     return runs
 
 
+def _codex_cli_on_path():
+    """Cheap capability probe only: is a `codex` executable on PATH? Never
+    invokes Codex and never proves participation."""
+    try:
+        return shutil.which("codex") is not None
+    except Exception:  # noqa: BLE001 - a probe failure is "unknown", not an error
+        return None
+
+
+def build_health(root, mode=None, durable=None, codex_check=_codex_cli_on_path):
+    """Read-only health/readiness snapshot: is ClearWright ready to use right
+    now? Derives everything from existing durable state and cheap filesystem
+    checks. Never mutates the queue, never runs Codex or tests. Status is
+    readiness guidance, not compliance: red = problem, yellow = attention,
+    green = ready."""
+    mode = mode if mode is not None else MODE
+    durable = durable if durable is not None else DURABLE
+    warnings, errors = [], []
+    health = {
+        "ok": False,
+        "status": "red",
+        "server_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "mode": mode,
+        "durable": bool(durable),
+        "queue_root": root,
+        "warnings": warnings,
+        "errors": errors,
+    }
+    try:
+        health["queue_root_exists"] = bool(root) and os.path.isdir(root)
+        if not health["queue_root_exists"]:
+            errors.append("Queue root is missing or unreadable.")
+
+        packet_counts = {}
+        for lane in LANES:
+            lane_dir = os.path.join(root, lane) if root else ""
+            if not os.path.isdir(lane_dir):
+                packet_counts[lane] = 0
+                if health["queue_root_exists"]:
+                    errors.append("Queue lane {} is missing.".format(lane))
+                continue
+            packet_counts[lane] = len([n for n in os.listdir(lane_dir) if n.endswith(".json")])
+        health["packet_counts"] = packet_counts
+        if packet_counts.get("clearance_failed", 0) > 0:
+            errors.append("{} failed packet(s) in clearance_failed.".format(
+                packet_counts["clearance_failed"]))
+
+        health["message_count"] = len(cwm.read_messages(root)) if health["queue_root_exists"] else 0
+        health["agent_event_count"] = len(cwae.read_events(root)) if health["queue_root_exists"] else 0
+
+        items = cww.derive_work_items(root) if health["queue_root_exists"] else []
+        health["work_items_total"] = len(items)
+        health["work_items_open"] = len([i for i in items if i.get("status") == "open"])
+        health["work_items_claimed"] = len([i for i in items if i.get("status") == "claimed"])
+        if health["work_items_open"]:
+            warnings.append("{} open work item(s) waiting for a worker.".format(
+                health["work_items_open"]))
+        if health["work_items_claimed"]:
+            warnings.append("{} claimed work item(s) in progress.".format(
+                health["work_items_claimed"]))
+
+        runs = build_runs(root) if health["queue_root_exists"] else []
+        health["run_count"] = len(runs)
+        health["latest_run_timestamp"] = runs[0]["last_timestamp"] if runs else None
+
+        health["pulse"] = compute_pulse(root) if health["queue_root_exists"] else {}
+
+        capabilities = {
+            "worker_bridge": os.path.isfile(os.path.join(TOOLS, "clearwright_worker.py")),
+            "proof_tool": os.path.isfile(os.path.join(TOOLS, "clearwright_proof.py")),
+            "codex_helper": os.path.isfile(os.path.join(TOOLS, "clearwright_codex_review.py")),
+        }
+        capabilities["codex_cli_on_path"] = codex_check() if codex_check else None
+        health["capabilities"] = capabilities
+        if not capabilities["worker_bridge"] or not capabilities["proof_tool"]:
+            errors.append("Worker bridge or proof tool is missing from tools/.")
+        if capabilities["codex_helper"] and capabilities["codex_cli_on_path"] is False:
+            warnings.append("Codex CLI is not on PATH; Codex reviews are unavailable "
+                            "(capability check only, not participation).")
+
+        if mode != OPERATOR_MODE:
+            warnings.append("Running in demo mode, not the live operator workspace.")
+    except Exception as exc:  # noqa: BLE001 - health must degrade, not crash
+        errors.append("Health check failed: {}".format(exc))
+
+    health["status"] = "red" if errors else ("yellow" if warnings else "green")
+    health["ok"] = health["status"] != "red"
+    return health
+
+
 # --------------------------------------------------------------------------- #
 # HTTP handler
 # --------------------------------------------------------------------------- #
@@ -965,6 +1055,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/worker-status":
             self._send_json(cww.worker_status(QUEUE_ROOT))
+            return
+        if path == "/api/health":
+            self._send_json(build_health(QUEUE_ROOT))
             return
         if path == "/api/active-run":
             import urllib.parse

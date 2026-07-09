@@ -97,6 +97,9 @@ This repository ships the local, single-machine foundation:
   with a run registry (`/api/runs`, one derived summary per durable message
   thread) so the operator can browse and review recent runs; copy buttons and
   Codex telemetry as fields.
+- A read-only system health endpoint (`/api/health`: green/yellow/red readiness
+  with counts, capabilities, and plain-language warnings) and a compact health
+  chip in the console.
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

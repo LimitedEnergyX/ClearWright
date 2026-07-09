@@ -5,6 +5,18 @@ will be added when releases begin.
 
 ## Unreleased
 
+- System health and readiness panel. New read-only `GET /api/health` answers
+  "is ClearWright ready to use right now?": mode, durable flag, queue root and
+  lane checks, packet counts by lane, message/event/run/work-item counts, latest
+  run timestamp, pulse, cheap capability checks (worker bridge, proof tool,
+  Codex helper, `codex` on PATH), and plain-language warnings/errors with a
+  green/yellow/red status (green = ready; yellow = attention such as open work
+  items, demo mode, or Codex CLI missing; red = problem such as a missing queue
+  root/lane or failed packets). The health check never runs Codex or tests and
+  never mutates the queue; Codex availability is a capability probe only, never
+  proof of participation. The console gains a compact topbar health chip
+  (Healthy / Attention / Problem) that opens a read-only details panel. No
+  schema or validator change, no new dependency, no Discord, no model API.
 - Run registry and Active Run selector. New read-only `GET /api/runs` derives
   one summary per durable message thread (thread id, work item and packet ids,
   title, first/last timestamps, message count, actors, sources,

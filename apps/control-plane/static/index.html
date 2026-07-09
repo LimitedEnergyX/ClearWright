@@ -17,11 +17,18 @@
     </div>
     <div class="topbar-actions">
       <span class="actor" id="actor-label">operator</span>
+      <button id="health-chip" class="health-chip" type="button" aria-label="System health details"><span class="health-dot" aria-hidden="true"></span><span id="health-label">Checking</span></button>
       <button id="active-run-btn" class="btn btn-quiet" type="button">Active Run</button>
       <button id="history-btn" class="btn btn-quiet" type="button">History</button>
       <button id="reset-btn" class="btn btn-quiet" type="button">Reset demo</button>
     </div>
   </header>
+
+  <div class="health-panel" id="health-panel" hidden>
+    <div class="health-panel-head">System health <span class="feed-badge local">read-only</span></div>
+    <p class="hint">Readiness guidance, not compliance: green = ready, yellow = attention, red = problem. Codex availability is a cheap capability check only, never proof of participation.</p>
+    <div id="health-details"><p class="muted">Loading...</p></div>
+  </div>
 
   <main>
     <details class="panel mission" id="mission-panel">

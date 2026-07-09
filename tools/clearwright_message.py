@@ -36,7 +36,7 @@ DEFAULT_SOURCE = "local-adapter"
 DEFAULT_DIRECTION = "inbound"
 DEFAULT_STATUS = "posted"
 DIRECTIONS = ("inbound", "outbound", "internal")
-STATUSES = ("posted", "read", "responded")
+STATUSES = ("posted", "read", "claimed", "responded")
 
 
 def _now_iso():
@@ -50,11 +50,12 @@ def _stamp():
 
 def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
                   thread_id=None, direction=DEFAULT_DIRECTION,
-                  status=DEFAULT_STATUS, source=DEFAULT_SOURCE, simulated=False):
+                  status=DEFAULT_STATUS, source=DEFAULT_SOURCE, simulated=False,
+                  work_item_id=None):
     """Return a new message dict. Raises ValueError if actor or message is
     missing/empty, or if direction/status is not one of the allowed values.
     A new thread_id is generated when one is not supplied. Only a non-empty
-    packet_id is included."""
+    packet_id and work_item_id are included."""
     if not actor or not str(actor).strip():
         raise ValueError("actor is required and must be non-empty")
     if not message or not str(message).strip():
@@ -81,6 +82,8 @@ def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
     }
     if packet_id and str(packet_id).strip():
         msg["packet_id"] = str(packet_id).strip()
+    if work_item_id and str(work_item_id).strip():
+        msg["work_item_id"] = str(work_item_id).strip()
     return msg
 
 

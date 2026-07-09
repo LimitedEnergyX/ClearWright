@@ -80,6 +80,10 @@ This repository ships the local, single-machine foundation:
   packet-linked messages over CLI or local HTTP (`tools/clearwright_message.py`,
   `/api/messages`), so agents and tools converse with ClearWright without a
   browser.
+- A live dispatch loop: derived work items agents can list, claim, and respond
+  to over CLI or local HTTP (`tools/clearwright_work.py`, `/api/work-items`), an
+  operator chat in the console, a live-polling UI with a pulsing workflow graph,
+  and a read-only History view.
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

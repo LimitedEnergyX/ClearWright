@@ -5,6 +5,21 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Live dispatch console and history: the control plane is now a working local
+  dispatch loop. An operator chat in the console posts real inbound
+  `OPERATOR-0001` messages (no fake replies); agents, tools, and scripts pick up
+  **work items** derived from existing durable state (unanswered messages, CTA
+  packets ready to claim, `IN_PROGRESS` packets needing an update,
+  `RFI_PENDING` packets needing clarification) over `tools/clearwright_work.py`
+  or `GET /api/work-items`, `POST /api/work-items/claim`, and
+  `POST /api/work-items/respond`. Claiming a CTA packet uses the existing claim
+  lifecycle; every claim and response is a durable message, so the original
+  request is never lost. The UI polls live (every 2s, no WebSockets), the
+  workflow graph pulses from real queue and message state, and a read-only
+  History view (`GET /api/history`) lists every packet, message, and agent event
+  with filters. Operator mode stays real-only; simulation remains demo-only.
+  Work items are derived, not a new store; no schema or validator change, no new
+  dependency, and no Discord or model API. See `docs/LOCAL_COMMUNICATIONS.md`.
 - Local communications loop: a durable, threaded, packet-linked message store
   under the queue root (`communications/`), `POST`/`GET /api/messages` and
   `POST /api/messages/respond` local HTTP endpoints, and a

@@ -17,6 +17,7 @@
     </div>
     <div class="topbar-actions">
       <span class="actor" id="actor-label">operator</span>
+      <button id="history-btn" class="btn btn-quiet" type="button">History</button>
       <button id="reset-btn" class="btn btn-quiet" type="button">Reset demo</button>
     </div>
   </header>
@@ -67,11 +68,24 @@
           </div>
         </section>
 
+        <section class="panel work-panel" id="work-panel" aria-labelledby="work-h">
+          <div class="panel-head">
+            <h2 id="work-h">Work items <span class="feed-badge local">live</span></h2>
+            <p class="hint">Open work derived from the live queue and messages: unanswered requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Agents and scripts claim and respond with tools/clearwright_work.py or /api/work-items; the browser is the operator display.</p>
+          </div>
+          <div class="work-items" id="work-items"><p class="muted work-empty">No open work items.</p></div>
+        </section>
+
         <section class="panel comms-panel" id="comms-panel" aria-labelledby="comms-h">
           <div class="panel-head">
             <h2 id="comms-h">Local communications <span class="feed-badge local">real</span></h2>
             <p class="hint">Real, durable, packet-linked messages sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The browser is the operator display; no browser automation is needed. Threads and replies appear as they arrive.</p>
           </div>
+          <form id="operator-chat-form" class="operator-chat">
+            <input id="operator-chat-input" type="text" maxlength="500" autocomplete="off"
+                   placeholder="Send a request as OPERATOR-0001 (real message, no fake replies)" />
+            <button id="operator-chat-send" class="btn btn-primary" type="submit">Send</button>
+          </form>
           <div class="comms" id="comms"><p class="muted comms-empty">No local messages yet. Send one with tools/clearwright_message.py or POST /api/messages.</p></div>
         </section>
 
@@ -105,6 +119,43 @@
         </section>
       </aside>
     </div>
+
+    <section class="history-view" id="history-view" hidden aria-labelledby="history-h">
+      <div class="panel-head history-head">
+        <h2 id="history-h">History <span class="feed-badge local">read-only</span></h2>
+        <button id="history-close" class="btn btn-quiet" type="button">Back to console</button>
+      </div>
+      <p class="hint">A read-only view of the durable record: every clearance packet across the lanes, every local message, and every local agent event. Nothing here edits or deletes; the queue and audit trail stay the record.</p>
+      <form id="history-filters" class="history-filters">
+        <input id="hf-packet" type="text" placeholder="packet_id" autocomplete="off" />
+        <input id="hf-thread" type="text" placeholder="thread_id" autocomplete="off" />
+        <input id="hf-actor" type="text" placeholder="actor" autocomplete="off" />
+        <select id="hf-lane">
+          <option value="">any lane</option>
+          <option value="clearance_outbox">clearance_outbox</option>
+          <option value="clearance_in_progress">clearance_in_progress</option>
+          <option value="clearance_done">clearance_done</option>
+          <option value="clearance_failed">clearance_failed</option>
+        </select>
+        <input id="hf-status" type="text" placeholder="status" autocomplete="off" />
+        <button id="hf-apply" class="btn btn-quiet" type="submit">Apply</button>
+        <button id="hf-clear" class="btn btn-quiet" type="button">Clear</button>
+      </form>
+      <div class="history-grid">
+        <div class="history-col">
+          <h3 class="history-col-h">Packets <span class="history-count" id="hc-packets">0</span></h3>
+          <div id="history-packets"></div>
+        </div>
+        <div class="history-col">
+          <h3 class="history-col-h">Messages <span class="history-count" id="hc-messages">0</span></h3>
+          <div id="history-messages"></div>
+        </div>
+        <div class="history-col">
+          <h3 class="history-col-h">Agent events <span class="history-count" id="hc-events">0</span></h3>
+          <div id="history-events"></div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <aside class="drawer" id="audit-drawer" aria-hidden="true">

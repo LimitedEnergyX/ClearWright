@@ -125,8 +125,11 @@ def _review_body(output, telemetry, limit=1600):
     text = (output or "").strip()
     if len(text) > limit:
         text = text[-limit:]
+    # A stable, machine-parseable footer so the UI can show telemetry as fields
+    # rather than burying it in prose.
     footer = ("Telemetry: exit={exit_code}, elapsed={elapsed_seconds}s, "
-              "bytes={bytes}, lines={lines}.").format(**telemetry)
+              "bytes={bytes}, lines={lines}, timed_out={timed_out}, "
+              "classification=review.").format(**telemetry)
     return ("Codex CLI read-only review (codex-cli). " + footer + "\n\n" + text)
 
 
@@ -189,12 +192,17 @@ def main():
                         help="Required. Work item whose thread receives the result.")
     parser.add_argument("--actor", default="claude", metavar="ID",
                         help="Actor for the unavailable/timeout note (default: claude).")
+    parser.add_argument("--repo", "--repo-root", dest="repo", default=None, metavar="PATH",
+                        help="Absolute repo path; Codex runs with this as subprocess cwd "
+                             "so no shell cd is needed (default: current directory).")
     parser.add_argument("--timeout", type=int, default=90, metavar="SECONDS",
                         help="Hard timeout for the Codex run (default: 90).")
     parser.add_argument("--prompt", default=None, metavar="TEXT",
                         help="Override the review prompt.")
     parser.add_argument("--prompt-file", default=None, metavar="PATH",
                         help="Read the review prompt from a file.")
+    parser.add_argument("--json", action="store_true",
+                        help="Print compact JSON only.")
     args = parser.parse_args()
 
     if not os.path.isdir(args.queue_root):
@@ -210,8 +218,8 @@ def main():
             return 1
 
     result = review(args.queue_root, args.work_item_id, actor=args.actor,
-                    timeout=args.timeout, prompt=prompt, cwd=args.queue_root and os.getcwd())
-    print(json.dumps(result, indent=2))
+                    timeout=args.timeout, prompt=prompt, cwd=args.repo or os.getcwd())
+    print(json.dumps(result) if args.json else json.dumps(result, indent=2))
     return 0 if result.get("ok") else 1
 
 

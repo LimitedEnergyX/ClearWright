@@ -541,6 +541,7 @@ async function loadHistory() {
 }
 
 function openHistory() {
+  closeActiveRun();
   document.body.classList.add("history-open");
   document.getElementById("history-view").hidden = false;
   loadHistory();
@@ -549,6 +550,160 @@ function openHistory() {
 function closeHistory() {
   document.body.classList.remove("history-open");
   document.getElementById("history-view").hidden = true;
+}
+
+// --------------------------------------------------------------------------- //
+// Active Run view (a focused, readable single-thread view of the current run)
+// --------------------------------------------------------------------------- //
+
+function copyText(text, btn) {
+  const done = () => {
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.textContent = "copied";
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => {});
+      return;
+    }
+  } catch (e) { /* fall through */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    if (document.execCommand) document.execCommand("copy");
+    document.body.removeChild(ta);
+    done();
+  } catch (e) { /* no-op fallback */ }
+}
+
+// Client-side telemetry parser (mirrors the server) so Recent/All threads can
+// also show Codex telemetry as fields.
+function parseCodexTelemetry(text) {
+  if (!text || text.indexOf("Telemetry:") === -1) return null;
+  const grab = (k) => {
+    const m = text.match(new RegExp(k + "=([^,\\s]+)"));
+    return m ? m[1] : null;
+  };
+  const elapsed = grab("elapsed"), cls = grab("classification");
+  return {
+    exit_code: grab("exit"),
+    elapsed_seconds: elapsed ? elapsed.replace(/s$/, "") : null,
+    bytes: grab("bytes"),
+    lines: grab("lines"),
+    timed_out: grab("timed_out"),
+    classification: cls ? cls.replace(/\.$/, "") : null,
+  };
+}
+
+function telemetryBadges(t) {
+  if (!t) return "";
+  const parts = [];
+  if (t.exit_code !== null && t.exit_code !== undefined) parts.push("exit " + esc(t.exit_code));
+  if (t.elapsed_seconds) parts.push(esc(t.elapsed_seconds) + "s");
+  if (t.bytes) parts.push(esc(t.bytes) + " bytes");
+  if (t.lines) parts.push(esc(t.lines) + " lines");
+  if (t.timed_out) parts.push("timed_out " + esc(t.timed_out));
+  if (t.classification) parts.push("codex:" + esc(t.classification));
+  return '<div class="codex-telemetry"><span class="tele-label">Codex telemetry</span>' +
+    parts.map((p) => '<span class="tele">' + p + "</span>").join("") + "</div>";
+}
+
+function renderRunThread(run) {
+  if (!run || !run.thread_id || !(run.messages || []).length) {
+    return '<p class="muted">No active run yet. Post a request, or run ' +
+      "tools/clearwright_proof.py.</p>";
+  }
+  const codexMsg = (run.messages.find((m) => m.actor === "codex") || {}).message || "";
+  const tel = run.codex_telemetry || parseCodexTelemetry(codexMsg);
+  let html = '<div class="run-thread">';
+  html += '<div class="run-head"><span class="run-id mono">' + esc(run.thread_id) + "</span>";
+  html += '<button class="copy-btn" type="button" data-copy="' + esc(run.thread_id) + '">copy thread_id</button>';
+  if (run.work_item_id) {
+    html += '<span class="run-wid mono">' + esc(run.work_item_id) + "</span>";
+    html += '<button class="copy-btn" type="button" data-copy="' + esc(run.work_item_id) + '">copy work_item_id</button>';
+  }
+  if (run.packet_id) html += '<span class="run-pkt">[' + esc(run.packet_id) + "]</span>";
+  html += "</div>";
+  html += telemetryBadges(tel);
+  html += '<div class="run-messages">';
+  run.messages.forEach((m) => {
+    const meta = [m.status, m.source, m.at].filter(Boolean).map(esc).join(" · ");
+    html += '<div class="run-msg comm-' + esc(m.direction || "inbound") + '">' +
+      '<span class="feed-badge ' + (m.simulated ? "sim" : "local") + '">' + esc(m.direction || "") +
+      '</span> <span class="comm-actor">' + esc(m.actor) + (m.role ? "/" + esc(m.role) : "") +
+      "</span>: " + esc(m.message) + (meta ? '<div class="run-meta">' + meta + "</div>" : "") + "</div>";
+  });
+  html += "</div></div>";
+  return html;
+}
+
+function runSummaryText(run) {
+  if (!run || !run.thread_id) return "";
+  const lines = ["thread_id=" + run.thread_id];
+  if (run.work_item_id) lines.push("work_item_id=" + run.work_item_id);
+  if (run.packet_id) lines.push("packet_id=" + run.packet_id);
+  (run.messages || []).forEach((m) => lines.push((m.direction || "") + " " + m.actor + ": " + m.message));
+  return lines.join("\n");
+}
+
+function lastAt(t) {
+  return (t.messages || []).reduce((mx, m) => (m.at > mx ? m.at : mx), "");
+}
+
+function groupThreads(messages) {
+  const map = {}, order = [];
+  messages.forEach((m) => {
+    const t = m.thread_id || "thr-unknown";
+    if (!map[t]) {
+      map[t] = { thread_id: t, work_item_id: null, packet_id: null, messages: [], codex_telemetry: null };
+      order.push(t);
+    }
+    map[t].messages.push(m);
+    if (!map[t].work_item_id && m.work_item_id) map[t].work_item_id = m.work_item_id;
+    if (!map[t].packet_id && m.packet_id) map[t].packet_id = m.packet_id;
+  });
+  const arr = order.map((t) => map[t]);
+  arr.sort((a, b) => (lastAt(b) < lastAt(a) ? -1 : 1));
+  return arr;
+}
+
+let currentRunFilter = "active";
+
+async function loadActiveRun() {
+  const body = document.getElementById("active-run-body");
+  try {
+    if (currentRunFilter === "active") {
+      const run = await getJSON("/api/active-run");
+      body.innerHTML = renderRunThread(run) +
+        '<button class="copy-btn copy-summary" type="button" data-copy-summary="1">copy summary</button>';
+      body._run = run;
+    } else {
+      const data = await getJSON("/api/history");
+      const threads = groupThreads(data.messages || []);
+      const shown = currentRunFilter === "recent" ? threads.slice(0, 5) : threads;
+      body.innerHTML = shown.length ? shown.map(renderRunThread).join("")
+        : '<p class="muted">No runs yet.</p>';
+      body._run = null;
+    }
+  } catch (e) {
+    body.innerHTML = '<p class="muted">Could not load the active run.</p>';
+  }
+}
+
+function openActiveRun() {
+  closeHistory();
+  document.body.classList.add("run-open");
+  document.getElementById("active-run-view").hidden = false;
+  loadActiveRun();
+}
+
+function closeActiveRun() {
+  document.body.classList.remove("run-open");
+  document.getElementById("active-run-view").hidden = true;
 }
 
 let feedStarted = false;
@@ -1071,6 +1226,24 @@ function wire() {
     document.getElementById("hf-lane").value = "";
     loadHistory();
   });
+  // Active Run view: open/close, filter, and copy buttons (event-delegated).
+  document.getElementById("active-run-btn").addEventListener("click", openActiveRun);
+  document.getElementById("active-run-close").addEventListener("click", closeActiveRun);
+  document.getElementById("run-filter").addEventListener("click", (e) => {
+    const btn = e.target.closest(".run-filter-btn");
+    if (!btn) return;
+    currentRunFilter = btn.getAttribute("data-filter");
+    document.querySelectorAll("#run-filter .run-filter-btn").forEach(
+      (b) => b.classList.toggle("is-on", b === btn));
+    loadActiveRun();
+  });
+  document.getElementById("active-run-body").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-copy], button[data-copy-summary]");
+    if (!btn) return;
+    const body = document.getElementById("active-run-body");
+    if (btn.hasAttribute("data-copy")) copyText(btn.getAttribute("data-copy"), btn);
+    else copyText(runSummaryText(body._run), btn);
+  });
   fitCanvas();
   // Live console: fast polling (every 2s) of all real sources. No WebSockets.
   const LIVE_MS = 2000;
@@ -1081,6 +1254,10 @@ function wire() {
   setInterval(refreshAgentEvents, LIVE_MS);
   setInterval(refreshMessages, LIVE_MS);
   setInterval(refreshWorkItems, LIVE_MS);
+  // Keep the Active Run view live while it is open.
+  setInterval(() => {
+    if (document.body.classList.contains("run-open")) loadActiveRun();
+  }, LIVE_MS);
 }
 
 wire();

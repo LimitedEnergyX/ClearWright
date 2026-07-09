@@ -167,8 +167,12 @@ Example end-to-end flow (operator asks, an agent picks it up):
 
 The operator console shows the work items and the message threads live (fast
 polling, no WebSockets), and the workflow graph pulses from real queue and
-message state. A read-only **History** view lists every packet, message, and
-agent event with basic filters. None of this edits or deletes the record.
+message state (pulse is recent-activity state, not permanent packet lifecycle,
+so a completed packet does not pulse forever). A read-only **History** view
+lists every packet, message, and agent event with basic filters, and a focused
+**Active Run** view (`GET /api/active-run`) shows the current or most recent
+thread as one readable sequence with copy buttons and Codex telemetry as fields.
+None of this edits or deletes the record.
 
 For the "use CW" worker behavior (find work, claim, post progress, respond),
 `tools/clearwright_worker.py` is a thin bridge over these same functions with

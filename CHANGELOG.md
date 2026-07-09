@@ -5,6 +5,20 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Active run view and proof ergonomics. `clearwright_proof.py` and
+  `clearwright_codex_review.py` now take an absolute `--repo` path and run
+  git/tests/Codex with that as the subprocess working directory, so they work
+  from any directory without `cd` or chained shell; the proof tool adds a
+  `--server-url` preflight (`GET /api/state`) that fails clearly before posting
+  anything if the server is down, and both add `--json`. New read-only
+  `GET /api/active-run` returns the most recent thread grouped with `thread_id`,
+  `work_item_id`, `packet_id`, its messages, and parsed Codex telemetry; a new
+  **Active Run** view renders it as one readable thread with Active/Recent/All
+  filters, copy buttons (thread_id / work_item_id / summary), and Codex telemetry
+  shown as fields. Long panel copy stays behind `?` tooltips; the workflow
+  tooltip now clarifies that pulse is recent activity, not permanent packet
+  state. Docs updated (absolute paths reduce approval prompts). No schema or
+  validator change, no new dependency, no Discord, no model API.
 - Dispatch console cleanup and worker HTTP parity. Cleaned the operator UI: long
   panel descriptions moved behind keyboard-focusable `?` help tooltips, and the
   operator chat placeholder is now "Send Agents a Message". Fixed the workflow

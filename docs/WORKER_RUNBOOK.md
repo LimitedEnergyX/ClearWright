@@ -111,6 +111,18 @@ progress -> optional tests -> optional Codex -> respond) in one command and
 prints the `thread_id` and `work_item_id`, so no follow-up shell chaining is
 needed. It never edits files, branches, commits, or opens a PR.
 
+**Use absolute paths and `--repo` so no `cd` and no `&&` chain is needed.** The
+proof and Codex tools take an absolute repo path and run git/tests/Codex with
+that as the subprocess working directory, and the proof tool takes a
+`--server-url` to preflight the server before posting anything:
+
+    python D:/AI-Agents/ClearWright/ClearWright/tools/clearwright_proof.py D:/AI-Agents/ClearWright/runtime/queues/active --repo D:/AI-Agents/ClearWright/ClearWright --server-url http://127.0.0.1:8787 --actor claude --message "Proof smoke." --run-tests
+
+    python D:/AI-Agents/ClearWright/ClearWright/tools/clearwright_codex_review.py D:/AI-Agents/ClearWright/runtime/queues/active --repo D:/AI-Agents/ClearWright/ClearWright --work-item-id message:msg-example --actor claude --timeout 180
+
+No `cd`, no `&&`, no pipes, no redirects, no inline shell variables. Each is a
+single self-contained command, which keeps approval prompts to a minimum.
+
 ## Verifying in the UI and history
 
 - The operator console (operator mode) shows the message thread and work item

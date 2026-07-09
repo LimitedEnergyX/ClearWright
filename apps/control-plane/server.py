@@ -755,6 +755,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/work-items":
             self._send_json({"work_items": cww.derive_work_items(QUEUE_ROOT)})
             return
+        if path == "/api/worker-status":
+            self._send_json(cww.worker_status(QUEUE_ROOT))
+            return
         if path == "/api/history":
             import urllib.parse
             query = self.path.split("?", 1)[1] if "?" in self.path else ""

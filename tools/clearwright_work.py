@@ -265,6 +265,67 @@ def respond_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE,
             "thread_id": msg["thread_id"]}
 
 
+def progress_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE,
+                       source="local-http"):
+    """Post a progress note on a work item as a durable internal message in the
+    related thread. Progress is working context, not a final answer, so the work
+    item stays open."""
+    if parse_work_item_id(work_item_id)[0] is None:
+        return {"ok": False, "error": "unrecognized work_item_id"}
+    thread_id, packet_id = _resolve_target(root, work_item_id)
+    try:
+        msg = cwm.build_message(
+            actor, message, role=role, packet_id=packet_id, thread_id=thread_id,
+            direction="internal", status="posted", source=source,
+            work_item_id=work_item_id)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        cwm.write_message(root, msg)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "work_item_id": work_item_id, "message": msg,
+            "thread_id": msg["thread_id"]}
+
+
+def find_work_item(root, work_item_id):
+    """Return the derived work item matching work_item_id, or None."""
+    for item in derive_work_items(root):
+        if item.get("work_item_id") == work_item_id:
+            return item
+    return None
+
+
+def worker_status(root):
+    """A small read-only worker view: work-item counts by status and kind,
+    packet counts by lane, and recent message and agent-event counts. Shared by
+    the worker CLI (status) and GET /api/worker-status so both agree."""
+    items = derive_work_items(root)
+    packets = _read_packets(root)
+    lanes = {}
+    for p in packets:
+        lanes[p["lane"]] = lanes.get(p["lane"], 0) + 1
+    kinds = {}
+    for it in items:
+        kinds[it["kind"]] = kinds.get(it["kind"], 0) + 1
+    messages = cwm.read_messages(root)
+    try:
+        import clearwright_agent_event as cwae
+        events = cwae.read_events(root)
+    except Exception:
+        events = []
+    return {
+        "work_items_total": len(items),
+        "work_items_open": len([i for i in items if i.get("status") == "open"]),
+        "work_items_claimed": len([i for i in items if i.get("status") == "claimed"]),
+        "work_items_by_kind": kinds,
+        "packets_by_lane": lanes,
+        "messages_total": len(messages),
+        "agent_events_total": len(events),
+        "next_work_item_id": items[0]["work_item_id"] if items else None,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #

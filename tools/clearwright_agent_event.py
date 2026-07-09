@@ -22,21 +22,35 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 AGENT_EVENTS_DIR = "agent_events"
 DEFAULT_ROLE = "agent"
 DEFAULT_SEVERITY = "info"
 DEFAULT_SOURCE = "local-adapter"
 
+_last_dt = None
+
+
+def _monotonic_dt():
+    """Return a strictly increasing UTC datetime so event ids and timestamps
+    stay unique and correctly ordered even when several are built within the
+    same microsecond."""
+    global _last_dt
+    now = datetime.now(timezone.utc)
+    if _last_dt is not None and now <= _last_dt:
+        now = _last_dt + timedelta(microseconds=1)
+    _last_dt = now
+    return now
+
 
 def _now_iso():
-    # Microsecond precision so each event_id is unique per writer.
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    # Microsecond precision, monotonic, so each event_id is unique per writer.
+    return _monotonic_dt().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _stamp():
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    return _monotonic_dt().strftime("%Y%m%dT%H%M%S%f")
 
 
 def build_event(actor, message, role=DEFAULT_ROLE, packet_id=None,

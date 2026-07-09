@@ -71,7 +71,7 @@
         <section class="panel work-panel" id="work-panel" aria-labelledby="work-h">
           <div class="panel-head">
             <h2 id="work-h">Work items <span class="feed-badge local">live</span></h2>
-            <p class="hint">Open work derived from the live queue and messages: unanswered requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Agents and scripts claim and respond with tools/clearwright_work.py or /api/work-items; the browser is the operator display.</p>
+            <p class="hint">Open work derived from the live queue and messages: unanswered requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display.</p>
           </div>
           <div class="work-items" id="work-items"><p class="muted work-empty">No open work items.</p></div>
         </section>
@@ -79,7 +79,7 @@
         <section class="panel comms-panel" id="comms-panel" aria-labelledby="comms-h">
           <div class="panel-head">
             <h2 id="comms-h">Local communications <span class="feed-badge local">real</span></h2>
-            <p class="hint">Real, durable, packet-linked messages sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The browser is the operator display; no browser automation is needed. Threads and replies appear as they arrive.</p>
+            <p class="hint">Real, durable, packet-linked messages sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The browser is the operator display; no browser automation is needed. Threads and replies appear as they arrive. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</p>
           </div>
           <form id="operator-chat-form" class="operator-chat">
             <input id="operator-chat-input" type="text" maxlength="500" autocomplete="off"

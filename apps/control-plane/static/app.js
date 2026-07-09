@@ -149,8 +149,48 @@ function flowActivity(state) {
 // Which stages should pulse. The server computes this from real durable state
 // (packets + real messages + derived work items) with a recency window, so a
 // stale DONE packet does not keep DONE pulsing. There is no fake activity.
+// Only the boolean node flags feed the graph; the inspector metadata (reason,
+// expiry countdown) ticks every poll and must not restart the animation.
+const PULSE_NODE_KEYS = ["incoming", "decision", "cta", "rfi", "claimed", "verify", "done"];
+
 function flowPulse(state) {
-  return state.pulse || {};
+  const p = state.pulse || {};
+  const out = {};
+  PULSE_NODE_KEYS.forEach((k) => { out[k] = !!p[k]; });
+  return out;
+}
+
+// Read-only pulse inspector: why the graph is pulsing and when the time-based
+// part expires. Standing states (open/claimed items, packet lifecycle) have no
+// expiry - they hold until acted on.
+function fmtRemaining(sec) {
+  if (sec === null || sec === undefined) return null;
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+
+function renderPulseInspector(pulse) {
+  const el = document.getElementById("pulse-inspector");
+  if (!el) return;
+  const p = pulse || {};
+  const idle = !p.active_phase || p.active_phase === "idle";
+  let html = '<span class="pi-phase' + (idle ? "" : " pi-active") + '">Pulse: ' +
+    esc(idle ? "idle" : p.active_phase) + "</span>";
+  html += ' <span class="pi-reason">&middot; ' + esc(p.reason || "no recent activity") + "</span>";
+  if (p.source_thread_id) {
+    html += ' <span class="pi-src mono" title="' + esc(p.source_thread_id) + '">' +
+      esc(p.source_thread_id) + "</span>";
+  }
+  if (p.source_work_item_id) {
+    html += ' <span class="pi-src mono" title="' + esc(p.source_work_item_id) + '">' +
+      esc(p.source_work_item_id) + "</span>";
+  }
+  if (p.source_packet_id) {
+    html += ' <span class="pi-src mono">[' + esc(p.source_packet_id) + "]</span>";
+  }
+  const left = fmtRemaining(p.seconds_remaining);
+  if (left !== null) html += ' <span class="pi-exp">Expires in ' + esc(left) + "</span>";
+  el.innerHTML = html;
 }
 
 function edgePath(from, to, kind) {
@@ -765,7 +805,11 @@ async function refreshHealth() {
     if (!chip) return;
     chip.classList.remove("health-green", "health-yellow", "health-red");
     chip.classList.add("health-" + (h.status || "red"));
-    document.getElementById("health-label").textContent = HEALTH_LABELS[h.status] || "Unknown";
+    const label = HEALTH_LABELS[h.status] || "Unknown";
+    document.getElementById("health-label").textContent = label;
+    // Tooltip reason keeps the topbar clean: "Attention: 1 open work item(s)..."
+    const why = (h.errors && h.errors[0]) || (h.warnings && h.warnings[0]) || "";
+    chip.title = why ? label + ": " + why : label;
     const panel = document.getElementById("health-panel");
     if (panel && !panel.hidden) renderHealthDetails(h);
   } catch (e) {
@@ -821,24 +865,42 @@ const FEED_ACTION_LINES = {
 // Board
 // --------------------------------------------------------------------------- //
 
+// Archive-aware board: terminal packets past the 24h recent-terminal window
+// arrive flagged archived from the server. They are hidden by default (a
+// compact archive line replaces them) so old completed audit history never
+// looks like current work. Files are never touched; History shows everything.
+// Failed packets are never archived.
+let showArchived = false;
+
 function renderBoard(state) {
   const board = document.getElementById("board");
   board.innerHTML = "";
   document.getElementById("actor-label").textContent = state.actor || "operator";
   Object.keys(LANE_TITLES).forEach((lane) => {
     const cards = state.lanes[lane] || [];
+    const archived = cards.filter((c) => c.archived);
+    const visible = showArchived ? cards : cards.filter((c) => !c.archived);
     const laneEl = document.createElement("div");
     laneEl.className = "lane";
     laneEl.innerHTML =
       '<div class="lane-head"><h3>' + esc(LANE_TITLES[lane]) +
       '</h3><span class="lane-count">' + cards.length + "</span></div>";
-    if (!cards.length) {
+    if (!visible.length && !archived.length) {
       const empty = document.createElement("div");
       empty.className = "lane-empty";
       empty.textContent = "empty";
       laneEl.appendChild(empty);
     } else {
-      cards.forEach((c) => laneEl.appendChild(renderCard(c)));
+      visible.forEach((c) => laneEl.appendChild(renderCard(c)));
+    }
+    if (archived.length) {
+      const note = document.createElement("div");
+      note.className = "lane-archived";
+      note.innerHTML = esc(archived.length + " archived completed packet" +
+        (archived.length === 1 ? "" : "s")) +
+        ' <button class="show-completed-btn" type="button">' +
+        (showArchived ? "Hide completed" : "Show completed") + "</button>";
+      laneEl.appendChild(note);
     }
     board.appendChild(laneEl);
   });
@@ -1255,10 +1317,14 @@ function applyMode(state) {
   renderRealEvents(lastEvents);
 }
 
+let lastState = null;
+
 function renderState(state) {
+  lastState = state;
   applyMode(state);
   renderMission(state.mission);
   renderWorkflow(state);
+  renderPulseInspector(state.pulse);
   renderOperatorCard(state);
   renderBoard(state);
   // The simulated demo feed is a walkthrough aid only, never the primary live
@@ -1324,6 +1390,13 @@ function wire() {
     loadActiveRun();
   });
   document.getElementById("health-chip").addEventListener("click", toggleHealthPanel);
+  // Archive toggle: reveal/hide old completed packets in the Durable record.
+  document.getElementById("board").addEventListener("click", (e) => {
+    const btn = e.target.closest(".show-completed-btn");
+    if (!btn) return;
+    showArchived = !showArchived;
+    if (lastState) renderBoard(lastState);
+  });
   fitCanvas();
   // Live console: fast polling (every 2s) of all real sources. No WebSockets.
   const LIVE_MS = 2000;

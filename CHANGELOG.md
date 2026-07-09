@@ -5,6 +5,24 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Archive-aware durable record and pulse inspector. Terminal packets
+  (DONE/DTA/SUPERSEDED) older than a 24-hour recent-terminal window are flagged
+  `archived` in `/api/state` and collapsed in the console behind a compact
+  "N archived completed packets" line with a Show completed toggle - a display
+  flag only (files never moved or deleted; History, runs, and audit unchanged;
+  failed packets never archived and still turn health red). The pulse object now
+  carries inspector metadata (`active_phase`, `reason`, source thread / work
+  item / packet ids, `expires_at` / `seconds_remaining`), reviewer messages
+  (actor codex or role reviewer) now pulse Verification, and a compact pulse
+  inspector under the workflow title shows why the graph is pulsing and when it
+  stops ("Pulse: idle · no recent activity" when nothing is recent). The pulse
+  visual is brighter with a stronger glow and a ~50% longer cycle with a long
+  high-brightness hold (reduced-motion fallback included), and the graph keys on
+  pulse booleans only so the ticking countdown cannot restart the animation.
+  The health chip tooltip now states the top reason (e.g. "Attention: 1 open
+  work item"). Durable-record wording clarifies it is a packet lane/audit
+  snapshot, not the active work list. No schema or validator change, no new
+  dependency, no Discord, no model API.
 - System health and readiness panel. New read-only `GET /api/health` answers
   "is ClearWright ready to use right now?": mode, durable flag, queue root and
   lane checks, packet counts by lane, message/event/run/work-item counts, latest

@@ -100,6 +100,9 @@ This repository ships the local, single-machine foundation:
 - A read-only system health endpoint (`/api/health`: green/yellow/red readiness
   with counts, capabilities, and plain-language warnings) and a compact health
   chip in the console.
+- An archive-aware durable record (old completed packets collapse behind a
+  Show-completed toggle; files never touched) and a pulse inspector that
+  explains why the workflow graph is pulsing and when it stops.
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

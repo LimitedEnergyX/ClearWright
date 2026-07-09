@@ -36,7 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -564,7 +564,9 @@ def packet_summary(path, lane):
     packet = load_json(path)
     inputs = packet.get("inputs_json") if isinstance(packet.get("inputs_json"), dict) else {}
     status = packet.get("status")
+    events = audit_events(packet)
     return {
+        "last_event_at": events[-1].get("at") if events else None,
         "filename": os.path.basename(path),
         "lane": lane,
         "packet_id": packet.get("packet_id"),
@@ -582,7 +584,8 @@ def packet_summary(path, lane):
     }
 
 
-PULSE_RECENCY_SECONDS = 300  # 5 minutes: how recent a completion still pulses.
+PULSE_RECENCY_SECONDS = 300  # 5 minutes: activity/pulse recency window.
+TERMINAL_RECENT_SECONDS = 24 * 3600  # 24 hours: "recent terminal packet" display window.
 
 
 def _within(iso, now, seconds):
@@ -633,29 +636,107 @@ def compute_pulse(root, now=None):
             elif lane == "clearance_done":
                 done_packets.append(pkt)
 
-    open_items = any(i.get("status") == "open" for i in items)
-    claimed_items = any(i.get("status") == "claimed" for i in items)
-    recent_progress = any(_within(m.get("at"), now, PULSE_RECENCY_SECONDS)
-                          for m in messages if m.get("direction") == "internal")
-    recent_response = any(_within(m.get("at"), now, PULSE_RECENCY_SECONDS)
-                          for m in messages
-                          if m.get("direction") == "outbound" or m.get("status") == "responded")
-    recent_done_packet = False
+    open_items = [i for i in items if i.get("status") == "open"]
+    claimed_items = [i for i in items if i.get("status") == "claimed"]
+
+    def is_reviewer(m):
+        return m.get("actor") == "codex" or m.get("role") == "reviewer"
+
+    recent = [m for m in messages if _within(m.get("at"), now, PULSE_RECENCY_SECONDS)]
+    recent_progress = any(m.get("direction") == "internal" for m in recent)
+    recent_reviewer = any(is_reviewer(m) for m in recent)
+    recent_response = any(m.get("direction") == "outbound" or m.get("status") == "responded"
+                          for m in recent)
+    recent_done_packet = None  # (packet_id, last event at) of a recent completion
     for pkt in done_packets:
         evs = audit_events(pkt)
         if evs and _within(evs[-1].get("at"), now, PULSE_RECENCY_SECONDS):
-            recent_done_packet = True
+            recent_done_packet = (pkt.get("packet_id"), evs[-1].get("at"))
             break
 
-    return {
-        "incoming": open_items or any(s in ("RTA", "IN_REVIEW", "RFI_PENDING", "CTA") for s in outbox_status),
+    pulse = {
+        "incoming": bool(open_items) or any(s in ("RTA", "IN_REVIEW", "RFI_PENDING", "CTA") for s in outbox_status),
         "decision": any(s in ("RTA", "IN_REVIEW") for s in outbox_status),
         "cta": any(s == "CTA" for s in outbox_status),
         "rfi": any(s == "RFI_PENDING" for s in outbox_status),
-        "claimed": claimed_items or inprog_count > 0 or recent_progress,
-        "verify": recent_progress,
-        "done": recent_response or recent_done_packet,
+        "claimed": bool(claimed_items) or inprog_count > 0 or recent_progress,
+        "verify": recent_progress or recent_reviewer,
+        "done": recent_response or recent_done_packet is not None,
     }
+
+    # Inspector metadata: why the graph is pulsing and when the time-based part
+    # stops. The most recent qualifying message wins; standing states (open or
+    # claimed work items, packet lifecycle) are the fallback and carry no time
+    # expiry - they hold until acted on.
+    reason, active_phase = "no recent activity", "idle"
+    src_thread = src_item = src_packet = None
+    expires_at = seconds_remaining = None
+
+    def expiry_from(at):
+        try:
+            t = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None, None
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        exp = t + timedelta(seconds=PULSE_RECENCY_SECONDS)
+        return (exp.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                max(0, int((exp - now).total_seconds())))
+
+    candidates = []
+    for m in recent:
+        if m.get("direction") == "outbound" or m.get("status") == "responded":
+            candidates.append((m.get("at", ""), "done", "recent final response", m))
+        elif is_reviewer(m):
+            candidates.append((m.get("at", ""), "verification", "recent reviewer message", m))
+        elif m.get("status") == "claimed":
+            candidates.append((m.get("at", ""), "claimed work", "work item claimed", m))
+        elif m.get("direction") == "internal":
+            candidates.append((m.get("at", ""), "verification", "recent internal progress message", m))
+    if candidates:
+        at, active_phase, reason, m = max(candidates, key=lambda c: c[0])
+        src_thread = m.get("thread_id")
+        src_item = m.get("work_item_id")
+        src_packet = m.get("packet_id")
+        expires_at, seconds_remaining = expiry_from(at)
+    elif claimed_items:
+        it = claimed_items[0]
+        active_phase, reason = "claimed work", "claimed work item in progress (holds until acted on)"
+        src_thread, src_item, src_packet = it.get("thread_id"), it.get("work_item_id"), it.get("packet_id")
+    elif open_items:
+        it = open_items[0]
+        kind_phase = {
+            "packet": ("cleared to act", "CTA packet ready to claim (holds until claimed)"),
+            "rfi": ("rfi", "packet awaiting clarification (RFI_PENDING)"),
+            "in_progress": ("claimed work", "packet IN_PROGRESS (holds until completed)"),
+        }
+        active_phase, reason = kind_phase.get(
+            it.get("kind"),
+            ("incoming request", "open work item waiting for a worker (holds until acted on)"))
+        src_thread, src_item, src_packet = it.get("thread_id"), it.get("work_item_id"), it.get("packet_id")
+    elif "RFI_PENDING" in outbox_status:
+        active_phase, reason = "rfi", "packet awaiting clarification (RFI_PENDING)"
+    elif "CTA" in outbox_status:
+        active_phase, reason = "cleared to act", "CTA packet ready to claim"
+    elif inprog_count:
+        active_phase, reason = "claimed work", "packet IN_PROGRESS"
+    elif any(s in ("RTA", "IN_REVIEW") for s in outbox_status):
+        active_phase, reason = "operator decision", "packet awaiting operator decision"
+    elif recent_done_packet is not None:
+        active_phase, reason = "done", "recent packet completion"
+        src_packet = recent_done_packet[0]
+        expires_at, seconds_remaining = expiry_from(recent_done_packet[1])
+
+    pulse.update({
+        "active_phase": active_phase,
+        "reason": reason,
+        "source_thread_id": src_thread,
+        "source_work_item_id": src_item,
+        "source_packet_id": src_packet,
+        "expires_at": expires_at,
+        "seconds_remaining": seconds_remaining,
+    })
+    return pulse
 
 
 def wi_status_code(result):
@@ -672,6 +753,7 @@ def build_state(root, mode=None, durable=None, demo_seeded=None):
     mode = mode if mode is not None else MODE
     durable = durable if durable is not None else DURABLE
     demo_seeded = demo_seeded if demo_seeded is not None else DEMO_SEEDED
+    now = datetime.now(timezone.utc)
     lanes = {lane: [] for lane in LANES}
     for lane in LANES:
         lane_dir = os.path.join(root, lane)
@@ -681,9 +763,18 @@ def build_state(root, mode=None, durable=None, demo_seeded=None):
             if not name.endswith(".json"):
                 continue
             try:
-                lanes[lane].append(packet_summary(os.path.join(lane_dir, name), lane))
+                summary = packet_summary(os.path.join(lane_dir, name), lane)
             except (OSError, ValueError):
-                lanes[lane].append({"filename": name, "lane": lane, "status": "UNREADABLE"})
+                summary = {"filename": name, "lane": lane, "status": "UNREADABLE"}
+            # UI hint only, files are never touched: a terminal packet in
+            # clearance_done older than the 24h recent-terminal window is
+            # "archived" - durable audit history, not current work. Failed
+            # packets are never archived.
+            if (lane == "clearance_done"
+                    and summary.get("status") in ("DONE", "DTA", "SUPERSEDED")):
+                summary["archived"] = not _within(
+                    summary.get("last_event_at"), now, TERMINAL_RECENT_SECONDS)
+            lanes[lane].append(summary)
     return {
         "mode": mode,
         "durable": bool(durable),

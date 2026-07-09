@@ -66,7 +66,40 @@ Status meanings — readiness guidance, not compliance:
 The health check never runs Codex or tests and never mutates the queue. Codex
 availability is a cheap PATH capability check only — never proof of
 participation. The console shows a compact health chip in the top bar
-(Healthy / Attention / Problem) that opens a read-only details panel.
+(Healthy / Attention / Problem) with the top reason as its tooltip; clicking
+opens a read-only details panel.
+
+## Durable record vs active work
+
+The **Durable record** panel is a packet lane/audit snapshot, **not the active
+work list** — active work lives in **Work items** and **Active Run**. Terminal
+packets (DONE / DTA / SUPERSEDED) older than the 24-hour recent-terminal window
+collapse into a compact "N archived completed packets" line with a
+**Show completed** toggle. This is a display flag only: the packet files are
+never moved or deleted, they still count in the lane totals, and History (the
+full ledger), the run registry, and audit trails always show everything.
+Failed packets are never archived and keep health red.
+
+Two windows, two meanings: **5 minutes** is the activity/pulse recency window
+(what counts as "happening now"); **24 hours** is the recent-terminal display
+window (how long a completed packet stays expanded in the Durable record).
+
+## Workflow pulse and the pulse inspector
+
+The workflow graph separates state from activity: a dim outline is an available
+stage, and a bright pulse means **recent activity only** — an open work item
+pulses Incoming, a claim pulses Claimed Work, recent progress or a reviewer
+message pulses Verification, and a final response or fresh packet completion
+pulses DONE briefly. A stale completed packet never pulses.
+
+The pulse object in `/api/state` carries inspector metadata — `active_phase`,
+`reason`, `source_thread_id` / `source_work_item_id` / `source_packet_id`, and
+`expires_at` / `seconds_remaining` — and a compact **pulse inspector** line under
+the workflow title shows why the graph is pulsing and when the time-based part
+expires (standing states such as an unclaimed work item hold until acted on).
+When nothing is recent it reads "Pulse: idle · no recent activity". The
+inspector's source thread id tells you whether graph activity matches the run
+selected in Active Run (the graph pulse itself is global).
 
 ## /api/state metadata
 

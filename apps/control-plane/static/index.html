@@ -43,6 +43,7 @@
         <section class="panel canvas-panel" aria-labelledby="flow-h">
           <div class="panel-head">
             <h2 id="flow-h">Clearance workflow <span class="help" tabindex="0" role="button" aria-label="About the clearance workflow">?<span class="tip">The path every request travels. Stages light up as packets move through the live queue, and the active stage pulses. Pulse shows recent activity, not permanent packet state, so a completed packet does not pulse forever. Visual aid only; not a workflow editor.</span></span></h2>
+            <div class="pulse-inspector" id="pulse-inspector" aria-live="polite">Pulse: idle &middot; no recent activity</div>
           </div>
           <div class="canvas-wrap" id="canvas-wrap">
             <div class="gcanvas" id="gcanvas">
@@ -57,7 +58,7 @@
         </section>
 
         <details class="panel panel-secondary record" open>
-          <summary>Durable record <span class="help" tabindex="0" role="button" aria-label="About the durable record">?<span class="tip">Clearance queues and audit; every card is one packet, and actions run the real ClearWright tools.</span></span></summary>
+          <summary>Durable record <span class="help" tabindex="0" role="button" aria-label="About the durable record">?<span class="tip">A packet lane/audit snapshot, not the active work list. Active work lives in Work items and Active Run. Completed packets collapse into the archive line after they age out (they stay durable and in History, the full ledger). Failed packets always stay visible. Actions run the real ClearWright tools.</span></span></summary>
           <div class="board" id="board">
             <p class="muted">Loading board...</p>
           </div>

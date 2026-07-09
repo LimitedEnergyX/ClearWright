@@ -121,6 +121,40 @@ Honest boundaries:
 - The packet queues and audit trail remain the durable record behind the
   conversation.
 
+## Local agent adapter (integration surface)
+
+The browser UI is the **operator display**. The **integration surface** is the
+server, its local HTTP API, the CLI tools, and the durable queue on disk.
+Agents, tools, and scripts (Claude Desktop, Codex, or a shell script) submit
+events and packets **directly** through that surface. They do not click the web
+page, and no copy/paste into the UI is required.
+
+- **Claude Desktop and other agents should use local HTTP, CLI, or file events**
+  to interact with ClearWright. Browser automation is **not the integration
+  method**; it is only for visual inspection of the operator display or for
+  GitHub authentication when that is genuinely needed.
+- Agent activity is recorded as durable **agent events** under the queue root in
+  `agent_events/`. An agent event is not a clearance packet and grants no
+  authority.
+
+Record an agent event from the CLI:
+
+    python tools/clearwright_agent_event.py D:/path/to/queue \
+        --actor claude --role orchestrator \
+        --message "Reviewed calc harness and found extractor risk." \
+        --packet-id cw-harness-301
+
+Or over local HTTP:
+
+    curl -s -X POST http://127.0.0.1:8787/api/agent-events \
+        -H "Content-Type: application/json" \
+        -d '{"actor":"claude","role":"orchestrator","message":"Sent via local adapter."}'
+
+    curl -s http://127.0.0.1:8787/api/agent-events
+
+In the UI, the Live agent feed shows these as **local** (real) events; the
+simulated demo lines remain only as a clearly labeled fallback.
+
 ## The three demonstrated paths
 
 **CTA path**: an `RTA` packet starts in `clearance_outbox`. The operator grants a

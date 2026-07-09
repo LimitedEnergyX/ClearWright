@@ -5,6 +5,13 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Local agent event adapter: a durable agent-event log under the queue root
+  (`agent_events/`), a `POST`/`GET /api/agent-events` local HTTP API, and a
+  `tools/clearwright_agent_event.py` CLI so Claude Desktop, Codex, scripts, or
+  future workers send real agent events into the control plane over CLI, curl,
+  or local HTTP, without browser automation. The Web UI's live feed shows real
+  local events distinctly from the simulated demo fallback. Agent events are
+  not clearance packets and grant no authority; no schema or validator change.
 - Agent conversation console (simulated): the operator asks agents a question,
   up to five locally simulated agent turns deliberate (analysis, challenge,
   code/test impact, revised recommendation, final review), and ClearWright

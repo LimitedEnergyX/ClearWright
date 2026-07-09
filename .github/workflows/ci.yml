@@ -37,6 +37,9 @@ jobs:
       - name: Compile clearwright_request
         run: python -m py_compile tools/clearwright_request.py
 
+      - name: Compile clearwright_agent_event
+        run: python -m py_compile tools/clearwright_agent_event.py
+
       - name: Smoke test, validate help
         run: python tools/clearwright_validate.py --help
 
@@ -51,6 +54,9 @@ jobs:
 
       - name: Smoke test, request help
         run: python tools/clearwright_request.py --help
+
+      - name: Smoke test, agent-event help
+        run: python tools/clearwright_agent_event.py --help
 
       - name: Validate example clearance packet
         run: python tools/clearwright_validate.py schema/examples/clearance_packet.example.json

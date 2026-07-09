@@ -360,6 +360,13 @@ main { padding: 1rem 1.25rem; max-width: 1600px; margin: 0 auto; }
 }
 .feed-line { padding: 0.3rem 0.5rem; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line); }
 .feed-actor { font-weight: 700; }
+.feed-group { margin-top: 0.5rem; }
+.feed-grouplabel { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray); font-weight: 700; margin-bottom: 0.3rem; display: flex; align-items: center; gap: 0.4rem; }
+.feed-empty { font-size: 0.75rem; font-style: italic; margin: 0.2rem 0; }
+.feed-badge { font-size: 0.6rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; padding: 0.05rem 0.4rem; border-radius: 999px; }
+.feed-badge.local { color: #08111e; background: var(--ok); }
+.feed-badge.sim { color: #08111e; background: var(--pending); }
+.feed-pkt { font-family: ui-monospace, monospace; font-size: 0.68rem; color: var(--blue-soft); }
 .feed-planner .feed-actor { color: #7ea6f7; }
 .feed-reviewer .feed-actor { color: #fbbf24; }
 .feed-worker .feed-actor { color: #4ade80; }

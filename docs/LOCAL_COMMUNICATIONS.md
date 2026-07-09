@@ -143,8 +143,16 @@ CLI:
 Local HTTP:
 
 - `GET /api/work-items` lists the derived work items.
-- `POST /api/work-items/claim` records a claim (input: `work_item_id`, `actor`, optional `role`).
-- `POST /api/work-items/respond` writes a response (input: `work_item_id`, `actor`, `message`, optional `role`).
+- `POST /api/work-items/claim` records a claim (input: `work_item_id`, `actor`, optional `role`, `source`).
+- `POST /api/work-items/progress` posts a durable internal progress note (input: `work_item_id`, `actor`, `message`, optional `role`, `source`).
+- `POST /api/work-items/respond` writes a response (input: `work_item_id`, `actor`, `message`, optional `role`, `source`).
+
+The claim, progress, and respond routes share the CLI's `find_work_item` guard:
+an unknown `work_item_id` returns 404 and writes nothing (no stray message, no
+new thread, no packet change), so the CLI and HTTP agree exactly. The
+`GET /api/state` response also carries a `pulse` object computed from real
+durable state, so the workflow graph pulses the active stage and a stale
+`clearance_done` packet does not keep DONE pulsing.
 
 Example end-to-end flow (operator asks, an agent picks it up):
 

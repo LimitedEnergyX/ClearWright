@@ -34,8 +34,7 @@
       <div class="console-main">
         <section class="panel canvas-panel" aria-labelledby="flow-h">
           <div class="panel-head">
-            <h2 id="flow-h">Clearance workflow</h2>
-            <p class="hint">The path every request travels. Stages light up as packets move through the live queue. Visual aid only; not a workflow editor.</p>
+            <h2 id="flow-h">Clearance workflow <span class="help" tabindex="0" role="button" aria-label="About the clearance workflow">?<span class="tip">The path every request travels. Stages light up as packets move through the live queue, and the active stage pulses. Visual aid only; not a workflow editor.</span></span></h2>
           </div>
           <div class="canvas-wrap" id="canvas-wrap">
             <div class="gcanvas" id="gcanvas">
@@ -50,7 +49,7 @@
         </section>
 
         <details class="panel panel-secondary record" open>
-          <summary>Durable record <span class="hint-inline">clearance queues and audit; every card is one packet, actions run the real ClearWright tools</span></summary>
+          <summary>Durable record <span class="help" tabindex="0" role="button" aria-label="About the durable record">?<span class="tip">Clearance queues and audit; every card is one packet, and actions run the real ClearWright tools.</span></span></summary>
           <div class="board" id="board">
             <p class="muted">Loading board...</p>
           </div>
@@ -60,8 +59,7 @@
       <aside class="console-side">
         <section class="panel operator-panel" aria-labelledby="incoming-h">
           <div class="panel-head">
-            <h2 id="incoming-h">Incoming clearance request</h2>
-            <p class="hint">Clearance packets arrive from agents, tools, scripts, or integrations. The operator reviews and decides; nobody fills out packet paperwork here.</p>
+            <h2 id="incoming-h">Incoming clearance request <span class="help" tabindex="0" role="button" aria-label="About incoming clearance requests">?<span class="tip">Clearance packets arrive from agents, tools, scripts, or integrations. The operator reviews and decides; nobody fills out packet paperwork here.</span></span></h2>
           </div>
           <div id="operator-card">
             <p class="muted">Loading...</p>
@@ -70,20 +68,18 @@
 
         <section class="panel work-panel" id="work-panel" aria-labelledby="work-h">
           <div class="panel-head">
-            <h2 id="work-h">Work items <span class="feed-badge local">live</span></h2>
-            <p class="hint">Open work derived from the live queue and messages: unanswered requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display.</p>
+            <h2 id="work-h">Work items <span class="feed-badge local">live</span> <span class="help" tabindex="0" role="button" aria-label="About work items">?<span class="tip">Open work derived from the live queue and messages: unanswered requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display.</span></span></h2>
           </div>
           <div class="work-items" id="work-items"><p class="muted work-empty">No open work items.</p></div>
         </section>
 
         <section class="panel comms-panel" id="comms-panel" aria-labelledby="comms-h">
           <div class="panel-head">
-            <h2 id="comms-h">Local communications <span class="feed-badge local">real</span></h2>
-            <p class="hint">Real, durable, packet-linked messages sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The browser is the operator display; no browser automation is needed. Threads and replies appear as they arrive. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</p>
+            <h2 id="comms-h">Local communications <span class="feed-badge local">real</span> <span class="help" tabindex="0" role="button" aria-label="About local communications">?<span class="tip">Real, durable, packet-linked messages sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The browser is the operator display; no browser automation is needed. Threads and replies appear as they arrive. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></h2>
           </div>
           <form id="operator-chat-form" class="operator-chat">
             <input id="operator-chat-input" type="text" maxlength="500" autocomplete="off"
-                   placeholder="Send a request as OPERATOR-0001 (real message, no fake replies)" />
+                   placeholder="Send Agents a Message" />
             <button id="operator-chat-send" class="btn btn-primary" type="submit">Send</button>
           </form>
           <div class="comms" id="comms"><p class="muted comms-empty">No local messages yet. Send one with tools/clearwright_message.py or POST /api/messages.</p></div>
@@ -105,8 +101,7 @@
 
         <section class="panel" aria-labelledby="feed-h">
           <div class="panel-head">
-            <h2 id="feed-h">Live agent feed</h2>
-            <p class="hint">Local events are real, sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/agent-events). Simulated lines are a demo fallback only. No copy/paste into this page is required, and no browser automation is needed to drive ClearWright.</p>
+            <h2 id="feed-h">Live agent feed <span class="help" tabindex="0" role="button" aria-label="About the live agent feed">?<span class="tip">Local events are real, sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/agent-events). Simulated lines are a demo fallback only. No copy/paste into this page is required, and no browser automation is needed to drive ClearWright.</span></span></h2>
           </div>
           <div class="feed-group">
             <div class="feed-grouplabel">Local events <span class="feed-badge local">real</span></div>

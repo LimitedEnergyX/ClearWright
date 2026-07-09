@@ -86,7 +86,11 @@ This repository ships the local, single-machine foundation:
   and a read-only History view.
 - A worker command bridge (`tools/clearwright_worker.py`: `next`, `claim`,
   `progress`, `respond`, `status`) and a runbook that make "use CW" a real,
-  repeatable worker behavior over CLI or local HTTP, no browser required.
+  repeatable worker behavior over CLI or local HTTP, no browser required. Worker
+  HTTP routes (`/api/work-items/claim|progress|respond`) share the CLI guard and
+  reject unknown work items.
+- A telemetry-backed Codex review helper (`tools/clearwright_codex_review.py`)
+  and a one-command proof flow (`tools/clearwright_proof.py`).
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

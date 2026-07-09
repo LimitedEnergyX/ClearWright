@@ -40,6 +40,9 @@ jobs:
       - name: Compile clearwright_agent_event
         run: python -m py_compile tools/clearwright_agent_event.py
 
+      - name: Compile clearwright_message
+        run: python -m py_compile tools/clearwright_message.py
+
       - name: Compile control plane server
         run: python -m py_compile apps/control-plane/server.py
 
@@ -60,6 +63,9 @@ jobs:
 
       - name: Smoke test, agent-event help
         run: python tools/clearwright_agent_event.py --help
+
+      - name: Smoke test, message help
+        run: python tools/clearwright_message.py --help
 
       - name: Smoke test, control plane help
         run: python apps/control-plane/server.py --help

@@ -346,6 +346,71 @@ async function refreshAgentEvents() {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// Local communications (real, durable, packet-linked)
+//
+// Threads of real messages posted by agents, tools, or scripts through the
+// local adapter (CLI/curl/HTTP at /api/messages). These are actual local
+// communication, not simulated conversation. Grouped by thread, oldest first.
+// --------------------------------------------------------------------------- //
+
+const COMMS_EMPTY =
+  "No local messages yet. Send one with tools/clearwright_message.py or POST /api/messages.";
+
+function renderMessages(messages) {
+  const el = document.getElementById("comms");
+  if (!el) return;
+  if (!messages || !messages.length) {
+    el.innerHTML = '<p class="muted comms-empty">' + esc(COMMS_EMPTY) + "</p>";
+    return;
+  }
+  // Group by thread, preserving arrival order of threads and messages.
+  const threads = {};
+  const order = [];
+  messages.forEach((m) => {
+    const t = m.thread_id || "thr-unknown";
+    if (!threads[t]) { threads[t] = []; order.push(t); }
+    threads[t].push(m);
+  });
+  el.innerHTML = "";
+  order.forEach((tid) => {
+    const msgs = threads[tid];
+    const wrap = document.createElement("div");
+    wrap.className = "comm-thread";
+    const pkt = msgs.find((m) => m.packet_id);
+    let head = '<div class="comm-thread-head"><span class="comm-tid">' + esc(tid) + "</span>";
+    if (pkt) head += ' <span class="comm-pkt">[' + esc(pkt.packet_id) + "]</span>";
+    head += "</div>";
+    let body = "";
+    msgs.forEach((m) => {
+      const dir = m.direction || "inbound";
+      const badge = m.simulated
+        ? '<span class="feed-badge sim">simulated</span>'
+        : '<span class="feed-badge local">' + esc(dir) + "</span>";
+      const meta = [m.status, m.source, m.at].filter(Boolean).map(esc).join(" · ");
+      body += '<div class="comm-msg comm-' + esc(dir) + '">' + badge +
+        ' <span class="comm-actor">' + esc(m.actor) +
+        (m.role ? "/" + esc(m.role) : "") + ":</span> " + esc(m.message) +
+        (meta ? ' <span class="comm-meta">' + meta + "</span>" : "") + "</div>";
+    });
+    wrap.innerHTML = head + body;
+    el.appendChild(wrap);
+  });
+  el.scrollTop = el.scrollHeight;
+}
+
+let lastMessages = [];
+
+async function refreshMessages() {
+  try {
+    const data = await getJSON("/api/messages");
+    lastMessages = data.messages || [];
+    renderMessages(lastMessages);
+  } catch (e) {
+    // Leave the prior content in place on a transient fetch error.
+  }
+}
+
 let feedStarted = false;
 
 function feedPush(actor, text) {
@@ -733,9 +798,42 @@ async function openAudit(filename) {
         html += "</div>";
       });
     }
+    html += await relatedContextHtml(data.packet_id);
     body.innerHTML = html;
   }
   document.getElementById("audit-drawer").setAttribute("aria-hidden", "false");
+}
+
+// Working context tied to a packet: real (non-simulated) agent events and local
+// messages. The packet stays the authority record; these are the surrounding
+// conversation and activity, shown but clearly secondary.
+async function relatedContextHtml(packetId) {
+  if (!packetId) return "";
+  let html = "";
+  try {
+    const ev = await getJSON("/api/agent-events?packet_id=" + encodeURIComponent(packetId));
+    const evs = (ev.events || []).filter((e) => !e.simulated);
+    if (evs.length) {
+      html += '<h3 class="audit-sub">Related agent events</h3>';
+      evs.forEach((e) => {
+        html += '<div class="ev-actor">' + esc(e.actor) +
+          (e.role ? "/" + esc(e.role) : "") + ": " + esc(e.message) + "</div>";
+      });
+    }
+  } catch (e) { /* omit related events on a transient fetch error */ }
+  try {
+    const mg = await getJSON("/api/messages?packet_id=" + encodeURIComponent(packetId));
+    const msgs = (mg.messages || []).filter((m) => !m.simulated);
+    if (msgs.length) {
+      html += '<h3 class="audit-sub">Related messages</h3>';
+      msgs.forEach((m) => {
+        html += '<div class="ev-actor"><span class="comm-tid">' + esc(m.thread_id) +
+          "</span> " + esc(m.actor) + (m.role ? "/" + esc(m.role) : "") +
+          " (" + esc(m.direction || "inbound") + "): " + esc(m.message) + "</div>";
+      });
+    }
+  } catch (e) { /* omit related messages on a transient fetch error */ }
+  return html;
 }
 
 function closeAudit() {
@@ -777,6 +875,10 @@ function applyMode(state) {
   // No simulated feed as the primary live feed in operator mode.
   const simGroup = document.getElementById("feed-sim-group");
   if (simGroup) simGroup.hidden = operator;
+  // The simulated agent conversation is a demo-only aid; operator mode shows
+  // real local communications instead, never fake agent replies.
+  const convo = document.getElementById("convo-panel");
+  if (convo) convo.hidden = operator;
 
   // Re-render the real-events empty-state with the correct wording for the mode.
   renderRealEvents(lastEvents);
@@ -815,7 +917,9 @@ function wire() {
   document.getElementById("convo-form").addEventListener("submit", submitConvo);
   fitCanvas();
   refreshAgentEvents();
+  refreshMessages();
   setInterval(refreshAgentEvents, 5000);
+  setInterval(refreshMessages, 5000);
 }
 
 wire();

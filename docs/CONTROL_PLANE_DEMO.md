@@ -155,6 +155,15 @@ Or over local HTTP:
 In the UI, the Live agent feed shows these as **local** (real) events; the
 simulated demo lines remain only as a clearly labeled fallback.
 
+Beyond one-shot events, the **local communications loop** carries real,
+threaded, packet-linked messages between local agents, tools, or scripts and
+ClearWright, over `tools/clearwright_message.py` or `POST`/`GET /api/messages`
+(and `POST /api/messages/respond`). The operator console shows the real message
+threads in a Local communications panel, and the packet audit drawer surfaces
+the related messages and agent events as working context. Messages are stored
+durably under the queue root in `communications/`. See
+[LOCAL_COMMUNICATIONS.md](LOCAL_COMMUNICATIONS.md).
+
 ## The three demonstrated paths
 
 **CTA path**: an `RTA` packet starts in `clearance_outbox`. The operator grants a

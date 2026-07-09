@@ -76,6 +76,10 @@ This repository ships the local, single-machine foundation:
   (`tools/clearwright_request.py`).
 - A local agent event adapter: record agent events into the durable queue over
   CLI or local HTTP (`tools/clearwright_agent_event.py`).
+- A local communications loop: post, list, and respond to durable, threaded,
+  packet-linked messages over CLI or local HTTP (`tools/clearwright_message.py`,
+  `/api/messages`), so agents and tools converse with ClearWright without a
+  browser.
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a
@@ -151,6 +155,8 @@ behavior, and implementation simplicity are especially useful. See
   plane console tour (the operator display).
 - [docs/OPERATOR_MODE.md](docs/OPERATOR_MODE.md): operator mode (live local use)
   vs demo mode for the local control plane, and how agents and tools drive it.
+- [docs/LOCAL_COMMUNICATIONS.md](docs/LOCAL_COMMUNICATIONS.md): the local
+  communications loop (CLI and local HTTP messages, threads, packet links).
 - [CHANGELOG.md](CHANGELOG.md): notable changes.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): community expectations.

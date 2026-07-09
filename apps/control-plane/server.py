@@ -47,6 +47,7 @@ TOOLS = os.path.join(REPO_ROOT, "tools")
 sys.path.insert(0, TOOLS)
 import clearwright_validate as wpv  # noqa: E402
 import clearwright_agent_event as cwae  # noqa: E402
+import clearwright_message as cwm  # noqa: E402
 STATIC = os.path.join(HERE, "static")
 DEMO_PACKETS = os.path.join(REPO_ROOT, "examples", "demo_packets")
 MISSION_FILE = os.path.join(REPO_ROOT, "examples", "sample_project", "mission.json")
@@ -317,6 +318,37 @@ def do_agent_event(root, payload):
     except OSError as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "event": event}
+
+
+def do_message(root, payload, respond=False):
+    """Post one local message via the shared adapter. The server is a thin
+    driver: it builds and writes through clearwright_message, the same code
+    path the CLI uses. On respond, a thread_id is required and the message
+    defaults to an outbound response. Returns a result dict."""
+    fields = payload if isinstance(payload, dict) else {}
+    thread_id = fields.get("thread_id")
+    if respond and not (thread_id and str(thread_id).strip()):
+        return {"ok": False, "error": "respond requires a thread_id"}
+    direction = fields.get("direction") or ("outbound" if respond else cwm.DEFAULT_DIRECTION)
+    status = fields.get("status") or ("responded" if respond else cwm.DEFAULT_STATUS)
+    try:
+        message = cwm.build_message(
+            fields.get("actor"), fields.get("message"),
+            role=fields.get("role") or cwm.DEFAULT_ROLE,
+            packet_id=fields.get("packet_id"),
+            thread_id=thread_id,
+            direction=direction,
+            status=status,
+            source=fields.get("source") or "local-http",
+            simulated=bool(fields.get("simulated", False)),
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        cwm.write_message(root, message)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "message": message, "thread_id": message["thread_id"]}
 
 
 def do_request(root, fields):
@@ -674,6 +706,17 @@ class Handler(BaseHTTPRequestHandler):
             limit = int(limit_raw) if limit_raw.isdigit() else None
             self._send_json({"events": cwae.read_events(QUEUE_ROOT, packet_id, limit)})
             return
+        if path == "/api/messages":
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            packet_id = urllib.parse.unquote(params.get("packet_id", "")) or None
+            thread_id = urllib.parse.unquote(params.get("thread_id", "")) or None
+            limit_raw = params.get("limit", "")
+            limit = int(limit_raw) if limit_raw.isdigit() else None
+            self._send_json({"messages": cwm.read_messages(
+                QUEUE_ROOT, packet_id=packet_id, thread_id=thread_id, limit=limit)})
+            return
         if path.startswith("/static/") or path in ("/app.js", "/style.css"):
             self._send_static(path)
             return
@@ -717,6 +760,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/agent-events":
             result = do_agent_event(QUEUE_ROOT, payload)
+            self._send_json(result, code=200 if result.get("ok") else 400)
+            return
+
+        if path == "/api/messages":
+            result = do_message(QUEUE_ROOT, payload, respond=False)
+            self._send_json(result, code=200 if result.get("ok") else 400)
+            return
+
+        if path == "/api/messages/respond":
+            result = do_message(QUEUE_ROOT, payload, respond=True)
             self._send_json(result, code=200 if result.get("ok") else 400)
             return
 

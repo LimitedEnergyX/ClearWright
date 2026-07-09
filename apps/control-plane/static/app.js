@@ -146,23 +146,11 @@ function flowActivity(state) {
   };
 }
 
-// Which stages should pulse, driven only by real queue and message state. A
-// stage pulses when it is the live focus of work; there is no fake activity.
+// Which stages should pulse. The server computes this from real durable state
+// (packets + real messages + derived work items) with a recency window, so a
+// stale DONE packet does not keep DONE pulsing. There is no fake activity.
 function flowPulse(state) {
-  const lanes = state.lanes || {};
-  const outbox = lanes.clearance_outbox || [];
-  const inprog = lanes.clearance_in_progress || [];
-  const done = lanes.clearance_done || [];
-  const inProgIds = new Set(inprog.map((c) => c.packet_id));
-  const hasProgressMsg = (lastMessages || []).some(
-    (m) => !m.simulated && m.packet_id && inProgIds.has(m.packet_id));
-  return {
-    incoming: outbox.some((c) => ["RTA", "IN_REVIEW", "RFI_PENDING", "CTA"].includes(c.status)),
-    decision: outbox.some((c) => ["RTA", "IN_REVIEW"].includes(c.status)),
-    claimed: inprog.length > 0,
-    verify: inprog.length > 0 && hasProgressMsg,
-    done: done.some((c) => c.status === "DONE"),
-  };
+  return state.pulse || {};
 }
 
 function edgePath(from, to, kind) {

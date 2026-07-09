@@ -49,6 +49,12 @@ jobs:
       - name: Compile clearwright_worker
         run: python -m py_compile tools/clearwright_worker.py
 
+      - name: Compile clearwright_codex_review
+        run: python -m py_compile tools/clearwright_codex_review.py
+
+      - name: Compile clearwright_proof
+        run: python -m py_compile tools/clearwright_proof.py
+
       - name: Compile control plane server
         run: python -m py_compile apps/control-plane/server.py
 
@@ -78,6 +84,12 @@ jobs:
 
       - name: Smoke test, worker help
         run: python tools/clearwright_worker.py --help
+
+      - name: Smoke test, codex-review help
+        run: python tools/clearwright_codex_review.py --help
+
+      - name: Smoke test, proof help
+        run: python tools/clearwright_proof.py --help
 
       - name: Smoke test, control plane help
         run: python apps/control-plane/server.py --help

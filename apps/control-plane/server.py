@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -580,6 +581,90 @@ def packet_summary(path, lane):
     }
 
 
+PULSE_RECENCY_SECONDS = 300  # 5 minutes: how recent a completion still pulses.
+
+
+def _within(iso, now, seconds):
+    """True if the ISO timestamp is no older than `seconds` before `now`. A
+    just-written (or slightly future, from monotonic-clock skew) timestamp still
+    counts as recent. Robust to microsecond and non-microsecond ISO, with or
+    without a trailing Z."""
+    if not iso:
+        return False
+    try:
+        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return (now - t).total_seconds() <= seconds
+
+
+def compute_pulse(root, now=None):
+    """Which workflow stages should pulse, from real durable state only.
+
+    DONE pulses only for a recent completion (a recent responded/outbound
+    message, or a clearance_done packet whose latest audit event is recent),
+    never merely because clearance_done still holds an old packet. Simulated
+    messages never drive the pulse.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    items = cww.derive_work_items(root)
+    messages = [m for m in cwm.read_messages(root) if not m.get("simulated")]
+
+    outbox_status, done_packets, inprog_count = [], [], 0
+    for lane in LANES:
+        lane_dir = os.path.join(root, lane)
+        if not os.path.isdir(lane_dir):
+            continue
+        for name in sorted(os.listdir(lane_dir)):
+            if not name.endswith(".json"):
+                continue
+            try:
+                pkt = load_json(os.path.join(lane_dir, name))
+            except (OSError, ValueError):
+                continue
+            if lane == "clearance_outbox":
+                outbox_status.append(pkt.get("status"))
+            elif lane == "clearance_in_progress":
+                inprog_count += 1
+            elif lane == "clearance_done":
+                done_packets.append(pkt)
+
+    open_items = any(i.get("status") == "open" for i in items)
+    claimed_items = any(i.get("status") == "claimed" for i in items)
+    recent_progress = any(_within(m.get("at"), now, PULSE_RECENCY_SECONDS)
+                          for m in messages if m.get("direction") == "internal")
+    recent_response = any(_within(m.get("at"), now, PULSE_RECENCY_SECONDS)
+                          for m in messages
+                          if m.get("direction") == "outbound" or m.get("status") == "responded")
+    recent_done_packet = False
+    for pkt in done_packets:
+        evs = audit_events(pkt)
+        if evs and _within(evs[-1].get("at"), now, PULSE_RECENCY_SECONDS):
+            recent_done_packet = True
+            break
+
+    return {
+        "incoming": open_items or any(s in ("RTA", "IN_REVIEW", "RFI_PENDING", "CTA") for s in outbox_status),
+        "decision": any(s in ("RTA", "IN_REVIEW") for s in outbox_status),
+        "cta": any(s == "CTA" for s in outbox_status),
+        "rfi": any(s == "RFI_PENDING" for s in outbox_status),
+        "claimed": claimed_items or inprog_count > 0 or recent_progress,
+        "verify": recent_progress,
+        "done": recent_response or recent_done_packet,
+    }
+
+
+def wi_status_code(result):
+    """HTTP status for a work-item result: 200 ok, 404 when the work item is
+    unknown, 400 otherwise. The shared functions never write on an unknown id."""
+    if result.get("ok"):
+        return 200
+    return 404 if result.get("error") == "work_item_not_found" else 400
+
+
 def build_state(root, mode=None, durable=None, demo_seeded=None):
     """Return the full board: mode metadata, mission, and packets grouped by
     lane. Mode/durable/demo_seeded fall back to the running server's globals."""
@@ -605,6 +690,7 @@ def build_state(root, mode=None, durable=None, demo_seeded=None):
         "queue_root": root,
         "mission": read_mission() if mode == DEMO_MODE else {},
         "lanes": lanes,
+        "pulse": compute_pulse(root),
         "actor": DEMO_ACTOR,
         "intake": {
             "target_labels": APPROVED_TARGET_LABELS,
@@ -827,16 +913,25 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/work-items/claim":
             result = cww.claim_work_item(
                 QUEUE_ROOT, payload.get("work_item_id"), payload.get("actor"),
-                role=payload.get("role") or cwm.DEFAULT_ROLE, source="local-http")
-            self._send_json(result, code=200 if result.get("ok") else 400)
+                role=payload.get("role") or cwm.DEFAULT_ROLE,
+                source=payload.get("source") or "local-http")
+            self._send_json(result, code=wi_status_code(result))
+            return
+
+        if path == "/api/work-items/progress":
+            result = cww.progress_work_item(
+                QUEUE_ROOT, payload.get("work_item_id"), payload.get("actor"),
+                payload.get("message"), role=payload.get("role") or cwm.DEFAULT_ROLE,
+                source=payload.get("source") or "local-http")
+            self._send_json(result, code=wi_status_code(result))
             return
 
         if path == "/api/work-items/respond":
             result = cww.respond_work_item(
                 QUEUE_ROOT, payload.get("work_item_id"), payload.get("actor"),
                 payload.get("message"), role=payload.get("role") or cwm.DEFAULT_ROLE,
-                source="local-http")
-            self._send_json(result, code=200 if result.get("ok") else 400)
+                source=payload.get("source") or "local-http")
+            self._send_json(result, code=wi_status_code(result))
             return
 
         self._send_json({"ok": False, "error": "not found"}, code=404)

@@ -211,6 +211,8 @@ def claim_work_item(root, work_item_id, actor, role=cwm.DEFAULT_ROLE,
     kind, ref = parse_work_item_id(work_item_id)
     if kind is None:
         return {"ok": False, "error": "unrecognized work_item_id"}
+    if find_work_item(root, work_item_id) is None:
+        return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
 
     packet_claimed = None
     if kind == "packet":
@@ -249,6 +251,8 @@ def respond_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE,
     existing lifecycle tools for that."""
     if parse_work_item_id(work_item_id)[0] is None:
         return {"ok": False, "error": "unrecognized work_item_id"}
+    if find_work_item(root, work_item_id) is None:
+        return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
     thread_id, packet_id = _resolve_target(root, work_item_id)
     try:
         msg = cwm.build_message(
@@ -272,6 +276,8 @@ def progress_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE
     item stays open."""
     if parse_work_item_id(work_item_id)[0] is None:
         return {"ok": False, "error": "unrecognized work_item_id"}
+    if find_work_item(root, work_item_id) is None:
+        return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
     thread_id, packet_id = _resolve_target(root, work_item_id)
     try:
         msg = cwm.build_message(

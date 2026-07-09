@@ -82,6 +82,35 @@ actually invoked were consulted (for example, "Reviewed by claude only; GPT and
 Codex were not invoked in this run."), and continue with the real work. Simulated
 multi-agent conversation lives only in demo mode and is never real participation.
 
+Prefer the telemetry-backed helper for Codex so a hang or empty run can never be
+mistaken for a real review:
+
+    python tools/clearwright_codex_review.py path/to/queue --work-item-id <id> --actor claude --timeout 90
+
+It runs Codex read-only with stdin from the null device and a hard timeout,
+captures telemetry (exit code, elapsed seconds, byte and line counts, timed-out
+flag), and only posts an `actor=codex, role=reviewer, source=codex-cli` message
+when Codex exited cleanly and produced substantive output. If Codex is
+unavailable, times out, or produces only the stdin-hang marker, it records that
+as a `claude/orchestrator` note and claims no Codex participation. GPT / ChatGPT
+are never claimed; they are not connected to this local ClearWright instance.
+
+## Fewer approval prompts
+
+Long chained shell commands trigger more approval prompts than single, focused
+commands. Prefer one Python tool invocation at a time over `&&`-chains, pipes,
+inline environment variables, redirects, and command substitution.
+
+- Good: `python tools/clearwright_worker.py status path/to/queue`
+- Good: `python tools/clearwright_worker.py progress path/to/queue --work-item-id <id> --actor claude --message "Running tests."`
+- Good: `python tools/clearwright_proof.py path/to/queue --message "Worker proof smoke." --actor claude`
+- Avoid: `cd ... && Q=... && WID=... && python ... | python -c ... && curl ... && git status`
+
+`tools/clearwright_proof.py` runs the whole "use CW" flow (relay -> claim ->
+progress -> optional tests -> optional Codex -> respond) in one command and
+prints the `thread_id` and `work_item_id`, so no follow-up shell chaining is
+needed. It never edits files, branches, commits, or opens a PR.
+
 ## Verifying in the UI and history
 
 - The operator console (operator mode) shows the message thread and work item

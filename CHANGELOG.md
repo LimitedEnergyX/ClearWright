@@ -5,6 +5,22 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Dispatch console cleanup and worker HTTP parity. Cleaned the operator UI: long
+  panel descriptions moved behind keyboard-focusable `?` help tooltips, and the
+  operator chat placeholder is now "Send Agents a Message". Fixed the workflow
+  pulse: the active stage is computed server-side from real durable state (real
+  messages, packets, and derived work items) with a recency window and returned
+  as `state.pulse`, so a stale `clearance_done` packet no longer keeps DONE
+  pulsing; DONE pulses only for a recent completion. Hardened worker HTTP parity:
+  the `find_work_item` guard now lives in the shared `claim/progress/respond`
+  functions, so an unknown `work_item_id` returns 404 and writes nothing on both
+  CLI and HTTP; added `POST /api/work-items/progress` reusing the shared
+  `progress_work_item`. Added `tools/clearwright_codex_review.py` (telemetry-
+  backed Codex read-only review: only a clean, substantive run is posted as
+  Codex; a hang/timeout/empty run is recorded as such and claims no
+  participation) and `tools/clearwright_proof.py` (one-command "use CW" flow to
+  reduce approval prompts). Docs updated (single-purpose commands over chained
+  shell). No schema/validator change, no new dependency, no Discord, no model API.
 - Worker command bridge and runbook: `tools/clearwright_worker.py` makes "use
   CW" / "review with CW" a real, repeatable worker behavior over CLI or local
   HTTP, with `next`, `claim`, `progress`, `respond`, and `status` commands. It is

@@ -179,7 +179,9 @@ open/claimed/responded status, and any Codex telemetry) with simple filters
 (`limit`, `status`, `actor`, `source`, `has_codex`, `packet_id`), and the
 Active Run view uses it as a click-to-select run list. Runs are derived from
 the durable threads, never a new database; History remains the full ledger.
-None of this edits or deletes the record.
+A read-only `GET /api/health` reports readiness (green/yellow/red with counts,
+capabilities, and plain-language warnings; see
+[OPERATOR_MODE.md](OPERATOR_MODE.md)). None of this edits or deletes the record.
 
 For the "use CW" worker behavior (find work, claim, post progress, respond),
 `tools/clearwright_worker.py` is a thin bridge over these same functions with

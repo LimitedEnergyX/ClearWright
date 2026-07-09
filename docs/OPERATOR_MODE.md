@@ -46,6 +46,28 @@ seed packets. To run a demo walkthrough against a durable queue, add
 `--mode demo`; to run an empty live console on a temporary queue, add
 `--mode operator`.
 
+## System health (/api/health)
+
+`GET /api/health` is a **read-only** readiness snapshot: is ClearWright ready to
+use right now? It reports mode, durable flag, queue root, packet counts by lane,
+message/event/run/work-item counts, the latest run timestamp, the pulse, cheap
+capability checks (worker bridge, proof tool, Codex helper, and whether a
+`codex` executable is on PATH), and plain-language warnings/errors.
+
+Status meanings — readiness guidance, not compliance:
+
+- **green (Healthy)**: operator mode on a readable durable queue, tools present,
+  nothing waiting.
+- **yellow (Attention)**: something deserves a look — open or claimed work
+  items, demo mode, or the Codex CLI missing while the helper exists.
+- **red (Problem)**: the queue root or a lane is missing/unreadable, failed
+  packets exist, or the health check itself failed.
+
+The health check never runs Codex or tests and never mutates the queue. Codex
+availability is a cheap PATH capability check only — never proof of
+participation. The console shows a compact health chip in the top bar
+(Healthy / Attention / Problem) that opens a read-only details panel.
+
 ## /api/state metadata
 
 `/api/state` reports the current mode so the UI and any client can adapt:

@@ -146,6 +146,25 @@ function flowActivity(state) {
   };
 }
 
+// Which stages should pulse, driven only by real queue and message state. A
+// stage pulses when it is the live focus of work; there is no fake activity.
+function flowPulse(state) {
+  const lanes = state.lanes || {};
+  const outbox = lanes.clearance_outbox || [];
+  const inprog = lanes.clearance_in_progress || [];
+  const done = lanes.clearance_done || [];
+  const inProgIds = new Set(inprog.map((c) => c.packet_id));
+  const hasProgressMsg = (lastMessages || []).some(
+    (m) => !m.simulated && m.packet_id && inProgIds.has(m.packet_id));
+  return {
+    incoming: outbox.some((c) => ["RTA", "IN_REVIEW", "RFI_PENDING", "CTA"].includes(c.status)),
+    decision: outbox.some((c) => ["RTA", "IN_REVIEW"].includes(c.status)),
+    claimed: inprog.length > 0,
+    verify: inprog.length > 0 && hasProgressMsg,
+    done: done.some((c) => c.status === "DONE"),
+  };
+}
+
 function edgePath(from, to, kind) {
   const x1 = from.x, y1 = from.y + 24, x2 = to.x, y2 = to.y - 24;
   if (kind === "loop") {
@@ -160,8 +179,16 @@ function edgePath(from, to, kind) {
     " C " + x1 + " " + (y1 + bend) + ", " + x2 + " " + (y2 - bend) + ", " + x2 + " " + y2;
 }
 
+let lastFlowSig = "";
+
 function renderWorkflow(state) {
   const active = flowActivity(state);
+  const pulse = flowPulse(state);
+  // Skip the rebuild when nothing changed, so the pulse animation is not
+  // restarted on every fast poll.
+  const sig = JSON.stringify(active) + "|" + JSON.stringify(pulse);
+  if (sig === lastFlowSig) return;
+  lastFlowSig = sig;
   const canvas = document.getElementById("gcanvas");
   const svg = document.getElementById("gedges");
   const byKey = {};
@@ -179,7 +206,8 @@ function renderWorkflow(state) {
   GRAPH_NODES.forEach((n) => {
     const el = document.createElement("div");
     el.className = "gnode" + (n.sim ? " gnode-sim" : "") +
-      (active[n.key] ? " gnode-active" : "");
+      (active[n.key] ? " gnode-active" : "") +
+      (pulse[n.key] ? " gnode-pulse" : "");
     el.style.left = n.x + "px";
     el.style.top = n.y + "px";
     let inner = '<span class="gicon ' + n.cls + '">' + n.icon + '</span>' +
@@ -409,6 +437,130 @@ async function refreshMessages() {
   } catch (e) {
     // Leave the prior content in place on a transient fetch error.
   }
+}
+
+// Operator chat: the operator types a request in the console and it becomes a
+// real inbound message (OPERATOR-0001, role operator, source operator-ui). No
+// fake agent reply is ever generated; real workers pick it up as a work item
+// and respond through the work-item loop.
+async function submitOperatorChat(ev) {
+  ev.preventDefault();
+  const input = document.getElementById("operator-chat-input");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  await postJSON("/api/messages", {
+    actor: "OPERATOR-0001", role: "operator", source: "operator-ui",
+    direction: "inbound", simulated: false, message: text,
+  });
+  refreshMessages();
+  refreshWorkItems();
+}
+
+// --------------------------------------------------------------------------- //
+// Work items (derived live from packets + messages; claim/respond via CLI/API)
+// --------------------------------------------------------------------------- //
+
+const WORK_KIND_LABEL = {
+  message: "request", packet: "CTA packet", in_progress: "in progress", rfi: "RFI",
+};
+
+function renderWorkItems(items) {
+  const el = document.getElementById("work-items");
+  if (!el) return;
+  if (!items || !items.length) {
+    el.innerHTML = '<p class="muted work-empty">No open work items.</p>';
+    return;
+  }
+  el.innerHTML = "";
+  items.forEach((it) => {
+    const row = document.createElement("div");
+    row.className = "work-item work-" + esc(it.kind);
+    let html = '<div class="work-top"><span class="work-kind">' +
+      esc(WORK_KIND_LABEL[it.kind] || it.kind) + '</span><span class="work-badge">' +
+      esc(it.status || "open") + "</span></div>";
+    html += '<div class="work-title">' + esc(it.title || it.summary || "") + "</div>";
+    const meta = [];
+    if (it.packet_id) meta.push("packet " + esc(it.packet_id));
+    if (it.thread_id) meta.push("thread " + esc(it.thread_id));
+    if (it.actor) meta.push("from " + esc(it.actor) + (it.source ? " (" + esc(it.source) + ")" : ""));
+    if (it.claimed_by) meta.push("claimed by " + esc(it.claimed_by));
+    if (meta.length) html += '<div class="work-meta">' + meta.join(" · ") + "</div>";
+    html += '<div class="work-next">next: ' + esc(it.next_action || "") + "</div>";
+    html += '<div class="work-id mono">' + esc(it.work_item_id) + "</div>";
+    row.innerHTML = html;
+    el.appendChild(row);
+  });
+}
+
+let lastWorkItems = [];
+
+async function refreshWorkItems() {
+  try {
+    const data = await getJSON("/api/work-items");
+    lastWorkItems = data.work_items || [];
+    renderWorkItems(lastWorkItems);
+  } catch (e) {
+    // Leave the prior content in place on a transient fetch error.
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// History (read-only view of the durable record)
+// --------------------------------------------------------------------------- //
+
+function historyQuery() {
+  const params = [];
+  const add = (key, id) => {
+    const v = document.getElementById(id).value.trim();
+    if (v) params.push(key + "=" + encodeURIComponent(v));
+  };
+  add("packet_id", "hf-packet");
+  add("thread_id", "hf-thread");
+  add("actor", "hf-actor");
+  const lane = document.getElementById("hf-lane").value;
+  if (lane) params.push("lane=" + encodeURIComponent(lane));
+  add("status", "hf-status");
+  return params.length ? "?" + params.join("&") : "";
+}
+
+async function loadHistory() {
+  let data;
+  try {
+    data = await getJSON("/api/history" + historyQuery());
+  } catch (e) {
+    return;
+  }
+  const packets = data.packets || [], messages = data.messages || [], events = data.events || [];
+  document.getElementById("hc-packets").textContent = packets.length;
+  document.getElementById("hc-messages").textContent = messages.length;
+  document.getElementById("hc-events").textContent = events.length;
+  const none = '<p class="muted">None.</p>';
+  document.getElementById("history-packets").innerHTML = packets.map((p) =>
+    '<div class="hrow"><span class="mono">' + esc(p.packet_id || p.filename) +
+    '</span> <span class="badge status-' + esc(p.status) + '">' + esc(p.status) +
+    '</span><div class="hrow-sub">' + esc(p.lane) +
+    (p.action ? " · " + esc(p.action) : "") + "</div></div>").join("") || none;
+  document.getElementById("history-messages").innerHTML = messages.map((m) =>
+    '<div class="hrow"><span class="work-badge">' + esc(m.direction || "") +
+    '</span> <span class="comm-actor">' + esc(m.actor) + "</span>: " + esc(m.message) +
+    '<div class="hrow-sub mono">' + esc(m.thread_id || "") +
+    (m.packet_id ? " · " + esc(m.packet_id) : "") + "</div></div>").join("") || none;
+  document.getElementById("history-events").innerHTML = events.map((e) =>
+    '<div class="hrow"><span class="comm-actor">' + esc(e.actor) + "</span>: " + esc(e.message) +
+    '<div class="hrow-sub mono">' + esc(e.at || "") +
+    (e.packet_id ? " · " + esc(e.packet_id) : "") + "</div></div>").join("") || none;
+}
+
+function openHistory() {
+  document.body.classList.add("history-open");
+  document.getElementById("history-view").hidden = false;
+  loadHistory();
+}
+
+function closeHistory() {
+  document.body.classList.remove("history-open");
+  document.getElementById("history-view").hidden = true;
 }
 
 let feedStarted = false;
@@ -879,6 +1031,9 @@ function applyMode(state) {
   // real local communications instead, never fake agent replies.
   const convo = document.getElementById("convo-panel");
   if (convo) convo.hidden = operator;
+  // The operator chat is the real operator input; it belongs to operator mode.
+  const chat = document.getElementById("operator-chat-form");
+  if (chat) chat.hidden = !operator;
 
   // Re-render the real-events empty-state with the correct wording for the mode.
   renderRealEvents(lastEvents);
@@ -915,11 +1070,29 @@ function wire() {
   document.getElementById("zoom-out").addEventListener("click", () => zoomCanvas(-0.1));
   document.getElementById("zoom-fit").addEventListener("click", fitCanvas);
   document.getElementById("convo-form").addEventListener("submit", submitConvo);
+  document.getElementById("operator-chat-form").addEventListener("submit", submitOperatorChat);
+  document.getElementById("history-btn").addEventListener("click", openHistory);
+  document.getElementById("history-close").addEventListener("click", closeHistory);
+  document.getElementById("history-filters").addEventListener("submit", (e) => {
+    e.preventDefault();
+    loadHistory();
+  });
+  document.getElementById("hf-clear").addEventListener("click", () => {
+    ["hf-packet", "hf-thread", "hf-actor", "hf-status"].forEach(
+      (id) => { document.getElementById(id).value = ""; });
+    document.getElementById("hf-lane").value = "";
+    loadHistory();
+  });
   fitCanvas();
+  // Live console: fast polling (every 2s) of all real sources. No WebSockets.
+  const LIVE_MS = 2000;
   refreshAgentEvents();
   refreshMessages();
-  setInterval(refreshAgentEvents, 5000);
-  setInterval(refreshMessages, 5000);
+  refreshWorkItems();
+  setInterval(refresh, LIVE_MS);
+  setInterval(refreshAgentEvents, LIVE_MS);
+  setInterval(refreshMessages, LIVE_MS);
+  setInterval(refreshWorkItems, LIVE_MS);
 }
 
 wire();

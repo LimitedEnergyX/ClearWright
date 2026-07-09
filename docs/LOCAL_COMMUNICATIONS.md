@@ -110,6 +110,58 @@ authority record, and the conversation and activity sit beside it.
 See [OPERATOR_MODE.md](OPERATOR_MODE.md) for the two modes and
 [CONTROL_PLANE_DEMO.md](CONTROL_PLANE_DEMO.md) for the full console tour.
 
+## Dispatch: work items
+
+The communications loop is also a real local dispatch loop. The operator can type
+a request in the console's operator chat (posted as a real inbound message from
+`OPERATOR-0001`, role `operator`, source `operator-ui`, never a fake reply), or
+send one from the CLI or local HTTP. ClearWright then surfaces **work items**
+that agents, tools, and scripts can pick up and act on, over
+`tools/clearwright_work.py` or the `/api/work-items` endpoints, without a browser.
+
+Work items are **derived** from existing durable state, not a separate database:
+
+- an inbound message thread with no response -> `kind: message`
+- a CTA packet in `clearance_outbox` -> `kind: packet` (claimable)
+- an `IN_PROGRESS` packet -> `kind: in_progress` (needs an update)
+- an `RFI_PENDING` packet -> `kind: rfi` (needs clarification)
+
+Work item ids are stable and deterministic (`message:<message_id>`,
+`packet:<packet_id>:cta`, `in_progress:<packet_id>`, `rfi:<packet_id>`).
+
+Claiming and responding never touch the packet schema or validator. Claiming a
+CTA packet uses the existing claim lifecycle to move the real packet; every claim
+and response is also written as a durable message in the related thread, so the
+original request is never lost.
+
+CLI:
+
+    python tools/clearwright_work.py list path/to/queue
+    python tools/clearwright_work.py claim path/to/queue --work-item-id <id> --actor claude
+    python tools/clearwright_work.py respond path/to/queue --work-item-id <id> --actor claude --message "Reviewing the repo."
+
+Local HTTP:
+
+- `GET /api/work-items` lists the derived work items.
+- `POST /api/work-items/claim` records a claim (input: `work_item_id`, `actor`, optional `role`).
+- `POST /api/work-items/respond` writes a response (input: `work_item_id`, `actor`, `message`, optional `role`).
+
+Example end-to-end flow (operator asks, an agent picks it up):
+
+    # operator posts a request (CLI, or the console operator chat)
+    python tools/clearwright_message.py post path/to/queue \
+        --actor OPERATOR-0001 --role operator --message "Review this repo under CW."
+    # an agent lists, claims, and responds
+    python tools/clearwright_work.py list path/to/queue
+    python tools/clearwright_work.py claim path/to/queue --work-item-id message:<id> --actor claude
+    python tools/clearwright_work.py respond path/to/queue --work-item-id message:<id> --actor claude \
+        --message "I am reviewing the repo."
+
+The operator console shows the work items and the message threads live (fast
+polling, no WebSockets), and the workflow graph pulses from real queue and
+message state. A read-only **History** view lists every packet, message, and
+agent event with basic filters. None of this edits or deletes the record.
+
 ## Discord and other transports (future)
 
 Discord is **not connected** in ClearWright yet. The local communications loop

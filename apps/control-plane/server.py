@@ -48,6 +48,7 @@ sys.path.insert(0, TOOLS)
 import clearwright_validate as wpv  # noqa: E402
 import clearwright_agent_event as cwae  # noqa: E402
 import clearwright_message as cwm  # noqa: E402
+import clearwright_work as cww  # noqa: E402
 STATIC = os.path.join(HERE, "static")
 DEMO_PACKETS = os.path.join(REPO_ROOT, "examples", "demo_packets")
 MISSION_FILE = os.path.join(REPO_ROOT, "examples", "sample_project", "mission.json")
@@ -638,6 +639,40 @@ def read_mission():
         return {}
 
 
+def build_history(root, packet_id=None, thread_id=None, actor=None,
+                  lane=None, status=None):
+    """Read-only history across the three durable sources: packets (summaries
+    across lanes), messages, and agent events. Optional filters narrow each
+    source; nothing here mutates state."""
+    packets = []
+    for a_lane in LANES:
+        if lane and a_lane != lane:
+            continue
+        lane_dir = os.path.join(root, a_lane)
+        if not os.path.isdir(lane_dir):
+            continue
+        for name in sorted(os.listdir(lane_dir)):
+            if not name.endswith(".json"):
+                continue
+            try:
+                summary = packet_summary(os.path.join(lane_dir, name), a_lane)
+            except (OSError, ValueError):
+                summary = {"filename": name, "lane": a_lane, "status": "UNREADABLE"}
+            if packet_id and summary.get("packet_id") != packet_id:
+                continue
+            if status and summary.get("status") != status:
+                continue
+            packets.append(summary)
+
+    messages = cwm.read_messages(root, packet_id=packet_id, thread_id=thread_id)
+    if actor:
+        messages = [m for m in messages if m.get("actor") == actor]
+    events = cwae.read_events(root, packet_id=packet_id)
+    if actor:
+        events = [e for e in events if e.get("actor") == actor]
+    return {"packets": packets, "messages": messages, "events": events}
+
+
 # --------------------------------------------------------------------------- #
 # HTTP handler
 # --------------------------------------------------------------------------- #
@@ -717,6 +752,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"messages": cwm.read_messages(
                 QUEUE_ROOT, packet_id=packet_id, thread_id=thread_id, limit=limit)})
             return
+        if path == "/api/work-items":
+            self._send_json({"work_items": cww.derive_work_items(QUEUE_ROOT)})
+            return
+        if path == "/api/history":
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            def q(name):
+                return urllib.parse.unquote(params.get(name, "")) or None
+            self._send_json(build_history(
+                QUEUE_ROOT, packet_id=q("packet_id"), thread_id=q("thread_id"),
+                actor=q("actor"), lane=q("lane"), status=q("status")))
+            return
         if path.startswith("/static/") or path in ("/app.js", "/style.css"):
             self._send_static(path)
             return
@@ -770,6 +818,21 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/messages/respond":
             result = do_message(QUEUE_ROOT, payload, respond=True)
+            self._send_json(result, code=200 if result.get("ok") else 400)
+            return
+
+        if path == "/api/work-items/claim":
+            result = cww.claim_work_item(
+                QUEUE_ROOT, payload.get("work_item_id"), payload.get("actor"),
+                role=payload.get("role") or cwm.DEFAULT_ROLE, source="local-http")
+            self._send_json(result, code=200 if result.get("ok") else 400)
+            return
+
+        if path == "/api/work-items/respond":
+            result = cww.respond_work_item(
+                QUEUE_ROOT, payload.get("work_item_id"), payload.get("actor"),
+                payload.get("message"), role=payload.get("role") or cwm.DEFAULT_ROLE,
+                source="local-http")
             self._send_json(result, code=200 if result.get("ok") else 400)
             return
 

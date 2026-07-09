@@ -155,13 +155,17 @@ Or over local HTTP:
 In the UI, the Live agent feed shows these as **local** (real) events; the
 simulated demo lines remain only as a clearly labeled fallback.
 
-Beyond one-shot events, the **local communications loop** carries real,
-threaded, packet-linked messages between local agents, tools, or scripts and
-ClearWright, over `tools/clearwright_message.py` or `POST`/`GET /api/messages`
-(and `POST /api/messages/respond`). The operator console shows the real message
-threads in a Local communications panel, and the packet audit drawer surfaces
-the related messages and agent events as working context. Messages are stored
-durably under the queue root in `communications/`. See
+Beyond one-shot events, the **local communications and dispatch loop** carries
+real, threaded, packet-linked messages between local agents, tools, or scripts
+and ClearWright, over `tools/clearwright_message.py` or `POST`/`GET /api/messages`
+(and `POST /api/messages/respond`). The operator can type a request in the
+console's operator chat, and agents pick it up as a derived **work item**
+(`tools/clearwright_work.py`, `/api/work-items`), claim it, and respond. The
+operator console shows the message threads and work items live, the workflow
+graph pulses from real state, and a read-only **History** view lists every
+packet, message, and agent event. The packet audit drawer surfaces related
+messages and agent events as working context. Messages are stored durably under
+the queue root in `communications/`. See
 [LOCAL_COMMUNICATIONS.md](LOCAL_COMMUNICATIONS.md).
 
 ## The three demonstrated paths

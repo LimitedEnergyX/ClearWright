@@ -81,6 +81,14 @@ Or over local HTTP:
 Agent events are a durable log under the queue root in `agent_events/`. An agent
 event is not a clearance packet and grants no authority; the operator decides.
 
+Beyond one-shot events, the **local communications loop** lets agents, tools,
+and scripts hold a real, threaded, packet-linked conversation with ClearWright
+over the CLI (`tools/clearwright_message.py`) or local HTTP (`/api/messages`).
+In operator mode the console shows these real messages and real agent events
+only; it never presents simulated conversation as if real agents participated.
+The simulated agent-conversation console is a demo-mode walkthrough aid. See
+[LOCAL_COMMUNICATIONS.md](LOCAL_COMMUNICATIONS.md).
+
 ### Browser automation is not the integration method
 
 Browser automation (for example ChromeMCP) is **not the integration method** for

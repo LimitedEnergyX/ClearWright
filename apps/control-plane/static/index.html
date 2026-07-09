@@ -67,7 +67,15 @@
           </div>
         </section>
 
-        <section class="panel convo-panel" aria-labelledby="convo-h">
+        <section class="panel comms-panel" id="comms-panel" aria-labelledby="comms-h">
+          <div class="panel-head">
+            <h2 id="comms-h">Local communications <span class="feed-badge local">real</span></h2>
+            <p class="hint">Real, durable, packet-linked messages sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The browser is the operator display; no browser automation is needed. Threads and replies appear as they arrive.</p>
+          </div>
+          <div class="comms" id="comms"><p class="muted comms-empty">No local messages yet. Send one with tools/clearwright_message.py or POST /api/messages.</p></div>
+        </section>
+
+        <section class="panel convo-panel" id="convo-panel" aria-labelledby="convo-h">
           <div class="panel-head">
             <h2 id="convo-h">Agent conversation <span class="sim-tag">simulated agents</span></h2>
             <p class="hint">Ask agents a question about the sample project. Simulated agent roles deliberate (max 5 rounds), then ClearWright condenses a recommendation the operator can send to the clearance queue. Consensus does not grant authority; the operator decides. No real external model integration.</p>

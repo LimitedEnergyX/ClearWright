@@ -5,6 +5,18 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Local communications loop: a durable, threaded, packet-linked message store
+  under the queue root (`communications/`), `POST`/`GET /api/messages` and
+  `POST /api/messages/respond` local HTTP endpoints, and a
+  `tools/clearwright_message.py` CLI (`post`, `list`, `respond`) so Claude
+  Desktop, Codex, scripts, or future workers hold a real local conversation with
+  ClearWright over CLI or local HTTP, without a browser. The operator console
+  shows real message threads in a Local communications panel, and the packet
+  audit drawer surfaces related messages and agent events as working context;
+  operator mode never presents simulated conversation as real. Discord remains a
+  future transport (explicit credentials required, none stored). No real model
+  API is wired. Messages are not clearance packets and grant no authority; no
+  schema or validator change. See `docs/LOCAL_COMMUNICATIONS.md`.
 - Operator mode for live local use: the control plane now runs as an operator
   console by default whenever a durable `--queue-root` is given, with an
   explicit `--mode operator|demo` override. Operator mode never seeds demo

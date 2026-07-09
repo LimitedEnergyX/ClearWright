@@ -170,8 +170,15 @@ polling, no WebSockets), and the workflow graph pulses from real queue and
 message state (pulse is recent-activity state, not permanent packet lifecycle,
 so a completed packet does not pulse forever). A read-only **History** view
 lists every packet, message, and agent event with basic filters, and a focused
-**Active Run** view (`GET /api/active-run`) shows the current or most recent
-thread as one readable sequence with copy buttons and Codex telemetry as fields.
+**Active Run** view (`GET /api/active-run`, or
+`GET /api/active-run?thread_id=<id>` for a specific run) shows a run as one
+readable sequence with copy buttons and Codex telemetry as fields. A small
+**run registry** (`GET /api/runs`) derives one summary per durable message
+thread (thread id, title, timestamps, message count, actors, sources,
+open/claimed/responded status, and any Codex telemetry) with simple filters
+(`limit`, `status`, `actor`, `source`, `has_codex`, `packet_id`), and the
+Active Run view uses it as a click-to-select run list. Runs are derived from
+the durable threads, never a new database; History remains the full ledger.
 None of this edits or deletes the record.
 
 For the "use CW" worker behavior (find work, claim, post progress, respond),

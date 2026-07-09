@@ -93,8 +93,10 @@ This repository ships the local, single-machine foundation:
   and a one-command proof flow (`tools/clearwright_proof.py`). Both take an
   absolute `--repo` path (and the proof tool a `--server-url` preflight) so they
   run from any directory without `cd` or chained shell.
-- A focused Active Run view (`/api/active-run`) that shows the current run as one
-  readable thread with copy buttons and Codex telemetry as fields.
+- A focused Active Run view (`/api/active-run`, selectable by `?thread_id=`)
+  with a run registry (`/api/runs`, one derived summary per durable message
+  thread) so the operator can browse and review recent runs; copy buttons and
+  Codex telemetry as fields.
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

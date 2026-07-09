@@ -74,6 +74,8 @@ This repository ships the local, single-machine foundation:
   information (RFI) on one outbox packet (`tools/clearwright_decide.py`).
 - A manual RTA intake tool: author one new request into the outbox
   (`tools/clearwright_request.py`).
+- A local agent event adapter: record agent events into the durable queue over
+  CLI or local HTTP (`tools/clearwright_agent_event.py`).
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

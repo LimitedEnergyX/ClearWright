@@ -46,6 +46,7 @@ TOOLS = os.path.join(REPO_ROOT, "tools")
 # driver and never re-implements clearance logic.
 sys.path.insert(0, TOOLS)
 import clearwright_validate as wpv  # noqa: E402
+import clearwright_agent_event as cwae  # noqa: E402
 STATIC = os.path.join(HERE, "static")
 DEMO_PACKETS = os.path.join(REPO_ROOT, "examples", "demo_packets")
 MISSION_FILE = os.path.join(REPO_ROOT, "examples", "sample_project", "mission.json")
@@ -278,6 +279,29 @@ def do_action(root, action, filename, reason="", results=None):
 
     code, output = run_tool(argv)
     return {"ok": code == 0, "returncode": code, "output": output}
+
+
+def do_agent_event(root, payload):
+    """Record one agent event via the shared adapter. The server is a thin
+    driver: it builds and writes through clearwright_agent_event, which is the
+    same code path the CLI uses. Returns a result dict."""
+    fields = payload if isinstance(payload, dict) else {}
+    try:
+        event = cwae.build_event(
+            fields.get("actor"), fields.get("message"),
+            role=fields.get("role") or cwae.DEFAULT_ROLE,
+            packet_id=fields.get("packet_id"),
+            severity=fields.get("severity") or cwae.DEFAULT_SEVERITY,
+            source=fields.get("source") or "local-http",
+            simulated=bool(fields.get("simulated", False)),
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        cwae.write_event(root, event)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "event": event}
 
 
 def do_request(root, fields):
@@ -616,6 +640,15 @@ class Handler(BaseHTTPRequestHandler):
             filename = urllib.parse.unquote(params.get("filename", ""))
             self._send_json(build_audit(QUEUE_ROOT, filename))
             return
+        if path == "/api/agent-events":
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            packet_id = urllib.parse.unquote(params.get("packet_id", "")) or None
+            limit_raw = params.get("limit", "")
+            limit = int(limit_raw) if limit_raw.isdigit() else None
+            self._send_json({"events": cwae.read_events(QUEUE_ROOT, packet_id, limit)})
+            return
         if path.startswith("/static/") or path in ("/app.js", "/style.css"):
             self._send_static(path)
             return
@@ -655,6 +688,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/converse":
             self._send_json(build_conversation(payload.get("question", "")))
+            return
+
+        if path == "/api/agent-events":
+            result = do_agent_event(QUEUE_ROOT, payload)
+            self._send_json(result, code=200 if result.get("ok") else 400)
             return
 
         self._send_json({"ok": False, "error": "not found"}, code=404)

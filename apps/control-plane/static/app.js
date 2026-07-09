@@ -289,6 +289,43 @@ function renderOperatorCard(state) {
 // Live agent feed (simulated; no real streaming or agent integration)
 // --------------------------------------------------------------------------- //
 
+// Real local agent events: read from the server (durable), refreshed on a
+// poll. These are actual events sent by agents/tools/scripts through the local
+// adapter (CLI/curl/HTTP), distinct from the simulated demo lines below.
+function renderRealEvents(events) {
+  const el = document.getElementById("feed-real");
+  if (!el) return;
+  if (!events || !events.length) {
+    el.innerHTML = '<p class="muted feed-empty">No local events yet. Send one ' +
+      'with tools/clearwright_agent_event.py or POST /api/agent-events.</p>';
+    return;
+  }
+  el.innerHTML = "";
+  events.slice(-40).forEach((ev) => {
+    const line = document.createElement("div");
+    line.className = "feed-line";
+    const badge = ev.simulated
+      ? '<span class="feed-badge sim">simulated</span>'
+      : '<span class="feed-badge local">local</span>';
+    const pkt = ev.packet_id
+      ? ' <span class="feed-pkt">[' + esc(ev.packet_id) + "]</span>" : "";
+    const role = ev.role ? "/" + esc(ev.role) : "";
+    line.innerHTML = badge + ' <span class="feed-actor">' + esc(ev.actor) +
+      role + ":</span> " + esc(ev.message) + pkt;
+    el.appendChild(line);
+  });
+  el.scrollTop = el.scrollHeight;
+}
+
+async function refreshAgentEvents() {
+  try {
+    const data = await getJSON("/api/agent-events");
+    renderRealEvents(data.events || []);
+  } catch (e) {
+    // Leave the prior content in place on a transient fetch error.
+  }
+}
+
 let feedStarted = false;
 
 function feedPush(actor, text) {
@@ -462,6 +499,14 @@ async function sendRecommendationToQueue(summary) {
       (result.output || "").trim());
     feedPush("clearwright",
       "clearance request created from the recommendation; operator decision required");
+    // Bridge: record a real, durable local agent event for the recommendation
+    // (no model call; this is the condenser's own note).
+    postJSON("/api/agent-events", {
+      actor: "clearwright", role: "condenser", source: "control-plane",
+      simulated: false,
+      message: "Recommendation " + (summary.recommended || "") +
+        " sent to clearance queue: " + (summary.proposed_rta_title || ""),
+    }).then(refreshAgentEvents);
   } else {
     setActivity("Refused: " + (result.error || "") + "\n" + (result.output || "").trim());
   }
@@ -710,6 +755,8 @@ function wire() {
   document.getElementById("zoom-fit").addEventListener("click", fitCanvas);
   document.getElementById("convo-form").addEventListener("submit", submitConvo);
   fitCanvas();
+  refreshAgentEvents();
+  setInterval(refreshAgentEvents, 5000);
 }
 
 wire();

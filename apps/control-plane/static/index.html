@@ -83,9 +83,17 @@
 
         <section class="panel" aria-labelledby="feed-h">
           <div class="panel-head">
-            <h2 id="feed-h">Live agent feed <span class="sim-tag">simulated</span></h2>
+            <h2 id="feed-h">Live agent feed</h2>
+            <p class="hint">Local events are real, sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/agent-events). Simulated lines are a demo fallback only. No copy/paste into this page is required, and no browser automation is needed to drive ClearWright.</p>
           </div>
-          <div class="feed" id="feed"></div>
+          <div class="feed-group">
+            <div class="feed-grouplabel">Local events <span class="feed-badge local">real</span></div>
+            <div class="feed" id="feed-real"><p class="muted feed-empty">No local events yet. Send one with tools/clearwright_agent_event.py or POST /api/agent-events.</p></div>
+          </div>
+          <div class="feed-group">
+            <div class="feed-grouplabel">Simulated demo <span class="sim-tag">simulated</span></div>
+            <div class="feed" id="feed"></div>
+          </div>
         </section>
       </aside>
     </div>

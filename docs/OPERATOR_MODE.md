@@ -91,11 +91,14 @@ The operator can type a request in the console's operator chat (a real inbound
 real messages, events, and work items only, updating live; it never presents
 simulated conversation as if real agents participated. The simulated
 agent-conversation console is a demo-mode walkthrough aid. The workflow graph
-pulses the active stage from real durable state (a stale completed packet does
-not keep DONE pulsing), and a real Codex review is only recorded when the local
-Codex CLI actually ran and produced substantive output (telemetry-backed); GPT /
-ChatGPT are never claimed. A read-only History view lists every packet, message,
-and event. See [LOCAL_COMMUNICATIONS.md](LOCAL_COMMUNICATIONS.md) and
+pulses the active stage from real durable state (pulse is recent-activity state,
+not permanent packet lifecycle, so a stale completed packet does not keep DONE
+pulsing), and a real Codex review is only recorded when the local Codex CLI
+actually ran and produced substantive output (telemetry-backed); GPT / ChatGPT
+are never claimed. A read-only History view lists every packet, message, and
+event, and a focused Active Run view shows the current run as one readable thread
+with copy buttons and Codex telemetry as fields. See
+[LOCAL_COMMUNICATIONS.md](LOCAL_COMMUNICATIONS.md) and
 [WORKER_RUNBOOK.md](WORKER_RUNBOOK.md).
 
 ### Browser automation is not the integration method

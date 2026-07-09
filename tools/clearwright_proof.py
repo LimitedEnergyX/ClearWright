@@ -24,24 +24,58 @@ import clearwright_message as cwm
 import clearwright_work as cww
 
 
-def _run_tests(repo_root):
-    """Run the unittest suite as a subprocess; return (passed, summary)."""
+def _run_tests(repo):
+    """Run the unittest suite as a subprocess with cwd=repo (no shell cd);
+    return (passed, summary)."""
     proc = subprocess.run(
         [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-        cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace")
     tail = (proc.stderr or proc.stdout or "").strip().splitlines()
     summary = tail[-1] if tail else ""
     return proc.returncode == 0, summary
 
 
+def _repo_clean(repo):
+    """True if `git status --short` in repo is empty. Uses cwd=repo, not cd."""
+    try:
+        proc = subprocess.run(["git", "status", "--short"], cwd=repo,
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return not (proc.stdout or "").strip()
+
+
+def preflight(server_url):
+    """GET <server_url>/api/state; return (ok, info) so the proof can fail
+    clearly before writing anything when the server is down."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(server_url.rstrip("/") + "/api/state", timeout=5) as r:
+            st = json.loads(r.read().decode())
+        return True, {"alive": True, "mode": st.get("mode"), "durable": st.get("durable"),
+                      "queue_root": st.get("queue_root"), "pulse": st.get("pulse")}
+    except Exception as exc:  # noqa: BLE001 - report any connection failure clearly
+        return False, {"alive": False, "error": str(exc)}
+
+
 def run_proof(queue_root, message, actor="claude", role="orchestrator",
               relay_actor="OPERATOR-0001", source="claude-desktop-relay",
-              run_tests=False, repo_root=None, use_codex=False, codex_timeout=90,
-              final=None):
-    """Execute the proof flow and return a result dict. Does not edit files."""
+              run_tests=False, repo=None, use_codex=False, codex_timeout=90,
+              final=None, server_url=None):
+    """Execute the proof flow and return a result dict. Does not edit files.
+    Uses absolute paths and subprocess cwd=repo, so no shell cd is needed."""
     if not os.path.isdir(queue_root):
         return {"ok": False, "error": "queue root does not exist", "queue_root": queue_root}
+    repo = repo or os.getcwd()
 
+    server = None
+    if server_url:
+        ok, server = preflight(server_url)
+        if not ok:
+            return {"ok": False, "error": "server preflight failed",
+                    "server_url": server_url, "server": server}
+
+    repo_clean_before = _repo_clean(repo)
     steps = []
     relay = cwm.build_message(relay_actor, message, role="operator", source=source,
                               direction="inbound", status="posted")
@@ -63,7 +97,7 @@ def run_proof(queue_root, message, actor="claude", role="orchestrator",
 
     tests_result = None
     if run_tests:
-        passed, summary = _run_tests(repo_root or os.getcwd())
+        passed, summary = _run_tests(repo)
         tests_result = {"passed": passed, "summary": summary}
         cww.progress_work_item(queue_root, work_item_id, actor,
                                "Test suite: {} ({}).".format("passed" if passed else "FAILED", summary),
@@ -75,7 +109,7 @@ def run_proof(queue_root, message, actor="claude", role="orchestrator",
         try:
             import clearwright_codex_review as ccr
             codex_result = ccr.review(queue_root, work_item_id, actor=actor,
-                                      timeout=codex_timeout, cwd=repo_root or os.getcwd())
+                                      timeout=codex_timeout, cwd=repo)
             steps.append({"step": "codex", "classification": codex_result.get("classification")})
         except Exception as exc:  # never let an optional step break the flow
             codex_result = {"ok": False, "error": str(exc)}
@@ -87,7 +121,9 @@ def run_proof(queue_root, message, actor="claude", role="orchestrator",
     steps.append({"step": "respond", "ok": resp.get("ok")})
 
     return {"ok": True, "thread_id": thread_id, "work_item_id": work_item_id,
-            "steps": steps, "tests": tests_result, "codex": codex_result}
+            "steps": steps, "tests": tests_result, "codex": codex_result,
+            "server": server, "repo": repo,
+            "repo_clean_before": repo_clean_before, "repo_clean_after": _repo_clean(repo)}
 
 
 def main():
@@ -120,22 +156,36 @@ def main():
                         help="Source label for the relayed request (default: claude-desktop-relay).")
     parser.add_argument("--run-tests", action="store_true",
                         help="Run the unittest suite and post the result.")
-    parser.add_argument("--repo-root", default=None, metavar="PATH",
-                        help="Repo root for --run-tests / --codex (default: current directory).")
+    parser.add_argument("--repo", "--repo-root", dest="repo", default=None, metavar="PATH",
+                        help="Absolute repo path for git/tests/Codex; used as subprocess "
+                             "cwd so no shell cd is needed (default: current directory).")
+    parser.add_argument("--server-url", default=None, metavar="URL",
+                        help="If set, GET <URL>/api/state first and fail clearly if the "
+                             "server is down before posting anything.")
     parser.add_argument("--codex", action="store_true",
                         help="Run a telemetry-backed Codex read-only review if Codex is available.")
     parser.add_argument("--codex-timeout", type=int, default=90, metavar="SECONDS",
                         help="Timeout for the Codex review (default: 90).")
     parser.add_argument("--final", default=None, metavar="TEXT",
                         help="Override the final response message.")
+    parser.add_argument("--json", action="store_true",
+                        help="Print compact JSON only (no readable summary line).")
     args = parser.parse_args()
 
     result = run_proof(
         args.queue_root, args.message, actor=args.actor, role=args.role,
         relay_actor=args.relay_actor, source=args.source, run_tests=args.run_tests,
-        repo_root=args.repo_root, use_codex=args.codex, codex_timeout=args.codex_timeout,
-        final=args.final)
-    print(json.dumps(result, indent=2))
+        repo=args.repo, use_codex=args.codex, codex_timeout=args.codex_timeout,
+        final=args.final, server_url=args.server_url)
+    if args.json:
+        print(json.dumps(result))
+    else:
+        print(json.dumps(result, indent=2))
+        if result.get("ok"):
+            print("SUMMARY: thread_id={} work_item_id={} tests={} repo_clean={}->{}".format(
+                result.get("thread_id"), result.get("work_item_id"),
+                (result.get("tests") or {}).get("summary", "not run"),
+                result.get("repo_clean_before"), result.get("repo_clean_after")))
     return 0 if result.get("ok") else 1
 
 

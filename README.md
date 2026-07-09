@@ -90,7 +90,11 @@ This repository ships the local, single-machine foundation:
   HTTP routes (`/api/work-items/claim|progress|respond`) share the CLI guard and
   reject unknown work items.
 - A telemetry-backed Codex review helper (`tools/clearwright_codex_review.py`)
-  and a one-command proof flow (`tools/clearwright_proof.py`).
+  and a one-command proof flow (`tools/clearwright_proof.py`). Both take an
+  absolute `--repo` path (and the proof tool a `--server-url` preflight) so they
+  run from any directory without `cd` or chained shell.
+- A focused Active Run view (`/api/active-run`) that shows the current run as one
+  readable thread with copy buttons and Codex telemetry as fields.
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

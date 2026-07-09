@@ -31,6 +31,7 @@ import argparse
 import atexit
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -759,6 +760,59 @@ def build_history(root, packet_id=None, thread_id=None, actor=None,
     return {"packets": packets, "messages": messages, "events": events}
 
 
+def parse_codex_telemetry(text):
+    """Parse a Codex review footer ("Telemetry: exit=..., elapsed=...s,
+    bytes=..., lines=..., timed_out=..., classification=...") into structured
+    fields, or None if there is no telemetry footer. Pure and unit-testable."""
+    if not text or "Telemetry:" not in text:
+        return None
+
+    def grab(key):
+        m = re.search(key + r"=([^,\s]+)", text)
+        return m.group(1) if m else None
+
+    def as_int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return v
+
+    elapsed = grab("elapsed")
+    timed_out = grab("timed_out")
+    classification = grab("classification")
+    return {
+        "exit_code": as_int(grab("exit")),
+        "elapsed_seconds": (float(elapsed.rstrip("s")) if elapsed else None),
+        "bytes": as_int(grab("bytes")),
+        "lines": as_int(grab("lines")),
+        "timed_out": (timed_out.lower() == "true" if timed_out else None),
+        "classification": (classification.rstrip(".") if classification else None),
+    }
+
+
+def build_active_run(root):
+    """The most recently active message thread, grouped and ready to render for
+    the Active Run view: thread_id, work_item_id, packet_id, the ordered
+    messages, and any parsed Codex telemetry. Read-only; simulated messages are
+    excluded so operator mode stays real-only."""
+    messages = [m for m in cwm.read_messages(root) if not m.get("simulated")]
+    empty = {"thread_id": None, "work_item_id": None, "packet_id": None,
+             "messages": [], "codex_telemetry": None}
+    if not messages:
+        return empty
+    threads = {}
+    for m in messages:
+        threads.setdefault(m.get("thread_id"), []).append(m)
+    active_tid = max(threads, key=lambda t: max((mm.get("at", "") for mm in threads[t]), default=""))
+    msgs = threads[active_tid]
+    work_item_id = next((m.get("work_item_id") for m in msgs if m.get("work_item_id")), None)
+    packet_id = next((m.get("packet_id") for m in msgs if m.get("packet_id")), None)
+    codex = next((m for m in msgs if m.get("actor") == "codex"), None)
+    telemetry = parse_codex_telemetry(codex["message"]) if codex else None
+    return {"thread_id": active_tid, "work_item_id": work_item_id,
+            "packet_id": packet_id, "messages": msgs, "codex_telemetry": telemetry}
+
+
 # --------------------------------------------------------------------------- #
 # HTTP handler
 # --------------------------------------------------------------------------- #
@@ -843,6 +897,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/worker-status":
             self._send_json(cww.worker_status(QUEUE_ROOT))
+            return
+        if path == "/api/active-run":
+            self._send_json(build_active_run(QUEUE_ROOT))
             return
         if path == "/api/history":
             import urllib.parse

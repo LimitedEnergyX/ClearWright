@@ -491,6 +491,30 @@ body.history-open .console-grid, body.history-open .mission { display: none !imp
 .hrow-sub { font-size: 0.66rem; color: var(--gray); margin-top: 0.1rem; }
 @media (max-width: 900px) { .history-grid { grid-template-columns: 1fr; } }
 
+/* Active Run view */
+.active-run-view { margin-top: 1rem; }
+.active-run-view[hidden] { display: none; }
+body.run-open .console-grid, body.run-open .mission { display: none !important; }
+.active-run-controls { display: flex; align-items: center; gap: 0.6rem; }
+.run-filter { display: inline-flex; gap: 0.25rem; }
+.run-filter-btn.is-on { border-color: var(--blue-soft); color: var(--text); }
+.run-thread { border: 1px solid var(--line); border-radius: 10px; padding: 0.7rem 0.85rem; background: var(--panel); margin-bottom: 0.8rem; max-width: 900px; }
+.run-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+.run-id { font-size: 0.78rem; color: var(--text); }
+.run-wid { font-size: 0.72rem; color: var(--blue-soft); }
+.run-pkt { font-size: 0.72rem; color: var(--teal); }
+.copy-btn { font: inherit; font-size: 0.62rem; color: var(--gray); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 0.1rem 0.4rem; cursor: pointer; }
+.copy-btn:hover { color: var(--text); border-color: var(--blue-soft); }
+.copy-summary { margin-top: 0.5rem; }
+.codex-telemetry { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin: 0.3rem 0 0.5rem; }
+.tele-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray); font-weight: 700; }
+.tele { font-size: 0.66rem; color: #08111e; background: var(--teal); border-radius: 999px; padding: 0.05rem 0.45rem; font-family: ui-monospace, monospace; }
+.run-messages { display: flex; flex-direction: column; gap: 0.4rem; }
+.run-msg { font-size: 0.84rem; padding: 0.3rem 0; border-top: 1px solid rgba(255, 255, 255, 0.05); }
+.run-msg:first-child { border-top: none; }
+.run-meta { font-size: 0.64rem; color: var(--gray); margin-top: 0.1rem; }
+.comm-outbound.run-msg, .run-msg.comm-outbound { padding-left: 0.5rem; border-left: 2px solid rgba(45, 212, 191, 0.4); }
+
 /* Agent conversation console (simulated) */
 .convo-panel { border-left: 4px solid var(--teal); }
 .convo-form { display: flex; gap: 0.45rem; margin-top: 0.5rem; }

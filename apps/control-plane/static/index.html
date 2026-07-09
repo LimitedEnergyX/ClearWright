@@ -17,6 +17,7 @@
     </div>
     <div class="topbar-actions">
       <span class="actor" id="actor-label">operator</span>
+      <button id="active-run-btn" class="btn btn-quiet" type="button">Active Run</button>
       <button id="history-btn" class="btn btn-quiet" type="button">History</button>
       <button id="reset-btn" class="btn btn-quiet" type="button">Reset demo</button>
     </div>
@@ -34,7 +35,7 @@
       <div class="console-main">
         <section class="panel canvas-panel" aria-labelledby="flow-h">
           <div class="panel-head">
-            <h2 id="flow-h">Clearance workflow <span class="help" tabindex="0" role="button" aria-label="About the clearance workflow">?<span class="tip">The path every request travels. Stages light up as packets move through the live queue, and the active stage pulses. Visual aid only; not a workflow editor.</span></span></h2>
+            <h2 id="flow-h">Clearance workflow <span class="help" tabindex="0" role="button" aria-label="About the clearance workflow">?<span class="tip">The path every request travels. Stages light up as packets move through the live queue, and the active stage pulses. Pulse shows recent activity, not permanent packet state, so a completed packet does not pulse forever. Visual aid only; not a workflow editor.</span></span></h2>
           </div>
           <div class="canvas-wrap" id="canvas-wrap">
             <div class="gcanvas" id="gcanvas">
@@ -114,6 +115,22 @@
         </section>
       </aside>
     </div>
+
+    <section class="active-run-view" id="active-run-view" hidden aria-labelledby="active-run-h">
+      <div class="panel-head history-head">
+        <h2 id="active-run-h">Active Run <span class="feed-badge local">live</span></h2>
+        <div class="active-run-controls">
+          <div class="run-filter" id="run-filter">
+            <button class="btn btn-quiet run-filter-btn is-on" type="button" data-filter="active">Active</button>
+            <button class="btn btn-quiet run-filter-btn" type="button" data-filter="recent">Recent</button>
+            <button class="btn btn-quiet run-filter-btn" type="button" data-filter="all">All</button>
+          </div>
+          <button id="active-run-close" class="btn btn-quiet" type="button">Back to console</button>
+        </div>
+      </div>
+      <p class="hint">The current or most recent run as one readable thread: operator request, claim, progress, reviewer notes, and the final response, with Codex telemetry shown as fields when present. Read-only.</p>
+      <div id="active-run-body"><p class="muted">Loading...</p></div>
+    </section>
 
     <section class="history-view" id="history-view" hidden aria-labelledby="history-h">
       <div class="panel-head history-head">

@@ -102,12 +102,20 @@ def classify(available, telemetry, output):
     return "non_substantive"
 
 
+def build_codex_cmd(prompt):
+    """The Codex CLI invocation: read-only sandbox, and skip the trusted-git-repo
+    check so a review can run against any target directory (a plain folder, or a
+    repo Codex does not already trust). read-only keeps it unable to edit files,
+    so skipping the trust check does not grant write access."""
+    return ["codex", "exec", "-s", "read-only", "--skip-git-repo-check", prompt]
+
+
 def run_codex(prompt, timeout, cwd=None):
     """Invoke the local Codex CLI read-only, non-interactively, with stdin from
     the null device and a hard timeout. Returns (output, telemetry). Never
     raises on timeout; the telemetry records timed_out. (Not unit-tested; the
     classification/posting logic around it is.)"""
-    cmd = ["codex", "exec", "-s", "read-only", prompt]
+    cmd = build_codex_cmd(prompt)
     start = time.monotonic()
     try:
         with open(os.devnull, "rb") as devnull:
@@ -278,6 +286,10 @@ def review_structured(root, *, thread_id=None, work_item_id=None, packet_id=None
 
     try:
         raw = cwv.extract_json_object(output)
+        # Reviewer identity is authoritative from this adapter (a real,
+        # substantive codex-cli run), not from the model's self-label.
+        if isinstance(raw, dict):
+            raw["reviewer"] = "codex"
         verdict = cwv.validate_verdict(raw, reviewer="codex")
     except cwv.VerdictError as exc:
         err = "malformed_output" if "parse" in str(exc).lower() or "json" in str(exc).lower() else "invalid_verdict"

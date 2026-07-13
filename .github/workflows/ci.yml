@@ -61,6 +61,12 @@ jobs:
       - name: Compile clearwright_review_council
         run: python -m py_compile tools/clearwright_review_council.py
 
+      - name: Compile clearwright_use_cw
+        run: python -m py_compile tools/clearwright_use_cw.py
+
+      - name: Compile install_use_cw_skill
+        run: python -m py_compile tools/install_use_cw_skill.py
+
       - name: Compile clearwright_proof
         run: python -m py_compile tools/clearwright_proof.py
 
@@ -102,6 +108,12 @@ jobs:
 
       - name: Smoke test, review-council help
         run: python tools/clearwright_review_council.py --help
+
+      - name: Smoke test, use-cw help
+        run: python tools/clearwright_use_cw.py --help
+
+      - name: Smoke test, install-use-cw-skill help
+        run: python tools/install_use_cw_skill.py --help
 
       - name: Smoke test, proof help
         run: python tools/clearwright_proof.py --help

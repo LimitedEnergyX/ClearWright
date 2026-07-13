@@ -122,6 +122,12 @@ This repository ships the local, single-machine foundation:
   never grants authority. Read-only `GET /api/review-councils` /
   `GET /api/review-council` and a Conversation Workspace council card. See
   [docs/REVIEW_COUNCIL.md](docs/REVIEW_COUNCIL.md).
+- An executable **Use CW** skill (`tools/clearwright_use_cw.py` +
+  `.claude/skills/use-cw/SKILL.md`, installed by `tools/install_use_cw_skill.py`)
+  that turns "Use CW to do X" into an automatic governed loop over the Review
+  Council (start / plan / council / progress / incident / verify / complete /
+  status) with compact JSON and stable exit codes. Council agreement never grants
+  authority; the operator's approved scope does. See [docs/USE_CW.md](docs/USE_CW.md).
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

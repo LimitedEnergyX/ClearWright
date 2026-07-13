@@ -5,6 +5,21 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Executable "Use CW" skill. `tools/clearwright_use_cw.py` is one stable command
+  surface (start / plan / council / progress / incident / verify / complete /
+  status) that turns "Use CW to do X" into an automatic governed loop with no
+  manual copy/paste: create a conversation and work item, run the Review Council,
+  proceed inside the operator-approved scope only on agreement, consult an
+  Incident Council on glitches, run a Verification Council on the result, and
+  record completion. It delegates to the existing message / work-item / council
+  helpers, emits compact JSON, preserves thread/work-item/packet/council ids, and
+  uses stable exit codes (0 continue, 2 revision, 3 operator, 4 reviewer
+  unavailable, 5 hard gate, 6 required authority not granted). Council agreement
+  never grants authority; the operator's approved scope does. The repository
+  skill lives at `.claude/skills/use-cw/SKILL.md`, installed by the safe
+  `tools/install_use_cw_skill.py` (backup, atomic, verify). `OPENAI_API_KEY` is
+  never printed or stored. See [docs/USE_CW.md](docs/USE_CW.md). No new
+  dependency; no PLEX.
 - Automated GPT and Codex Review Council. ClearWright now coordinates real,
   independent reviews of a plan and decides deterministically whether Claude may
   proceed, with no manual copy/paste. New `tools/clearwright_gpt_review.py`

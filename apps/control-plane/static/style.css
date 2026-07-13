@@ -653,6 +653,20 @@ body.conv-open .console-grid, body.conv-open .mission { display: none !important
 .council-vb { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 0 0.35rem; }
 .council-vmiss { color: var(--gray); font-style: italic; }
 .council-recon { color: var(--blue-soft); }
+
+/* "New messages" pill for a scroll-paused live panel */
+.newmsg-pill { position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 5; font: inherit; font-size: 0.68rem; font-weight: 700; color: #08111e; background: var(--blue-soft); border: none; border-radius: 999px; padding: 0.2rem 0.7rem; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
+.newmsg-pill[hidden] { display: none; }
+
+/* Conversation timeline entry tags: reviewer verdict, reconciliation, and a
+   clearly-distinct "unavailable / not recorded" for a failed reviewer. */
+.conv-entry-tag { font-size: 0.62rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 0.2rem; }
+.conv-entry-reviewer { border-left: 3px solid var(--ok); }
+.conv-entry-reviewer .conv-entry-tag { color: var(--ok); }
+.conv-entry-reconcile { border-left: 3px solid var(--blue-soft); }
+.conv-entry-reconcile .conv-entry-tag { color: var(--blue-soft); }
+.conv-entry-unavailable { border-left: 3px solid var(--pending); opacity: 0.85; }
+.conv-entry-unavailable .conv-entry-tag { color: var(--pending); }
 .run-count { font-size: 0.62rem; color: var(--gray); }
 .run-last { font-size: 0.62rem; color: var(--gray); margin-left: auto; font-family: ui-monospace, monospace; }
 body.run-open .console-grid, body.run-open .mission { display: none !important; }

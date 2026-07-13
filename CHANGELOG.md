@@ -5,6 +5,30 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Automated GPT and Codex Review Council. ClearWright now coordinates real,
+  independent reviews of a plan and decides deterministically whether Claude may
+  proceed, with no manual copy/paste. New `tools/clearwright_gpt_review.py`
+  calls the OpenAI Responses API (standard-library HTTP, no new dependency),
+  reading `OPENAI_API_KEY` only from the environment and never returning,
+  printing, logging, persisting, or recording it; it posts a GPT reviewer
+  message only after a real, successful response validates. `clearwright_codex_review.py`
+  gained a `--structured` mode returning the same verdict shape from a real
+  read-only Codex run (existing behavior unchanged). A shared
+  `tools/clearwright_verdict.py` defines the structured verdict and Claude's
+  reconciliation (every rejected finding requires evidence). `tools/clearwright_review_council.py`
+  runs `plan` / `incident` / `verify` rounds (round one independent; a secret
+  scan on the context is a hard gate), attaches reconciliations, and evaluates a
+  deterministic agreement rule (>= 2 rounds, real GPT + real Codex, no
+  revise/block, no unresolved blocker, confidence >= 0.70, ready_to_proceed, no
+  hard gate) into `agreement_threshold_met | needs_revision | reviewer_unavailable |
+  operator_required | hard_gate` with matching exit codes. Council state is
+  stored durably under `review_councils/<id>/`. Read-only `GET /api/review-councils`
+  and `GET /api/review-council` (the server never runs a reviewer), a
+  Conversation Workspace council card, and health capability booleans
+  (`gpt_helper`, `openai_api_key_configured`, `configured_gpt_model`,
+  `council_available`; the key value is never exposed). Council agreement never
+  grants authority; the operator's approved scope does. See
+  [docs/REVIEW_COUNCIL.md](docs/REVIEW_COUNCIL.md).
 - Chat/work separation. Plain conversation no longer becomes actionable work.
   Messages may carry an optional `intent`: `chat` is normal durable conversation
   that never derives a work item and never raises an Attention state, and

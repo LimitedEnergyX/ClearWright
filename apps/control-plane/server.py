@@ -51,6 +51,7 @@ import clearwright_validate as wpv  # noqa: E402
 import clearwright_agent_event as cwae  # noqa: E402
 import clearwright_message as cwm  # noqa: E402
 import clearwright_work as cww  # noqa: E402
+import clearwright_review_council as cwrc  # noqa: E402
 STATIC = os.path.join(HERE, "static")
 DEMO_PACKETS = os.path.join(REPO_ROOT, "examples", "demo_packets")
 MISSION_FILE = os.path.join(REPO_ROOT, "examples", "sample_project", "mission.json")
@@ -1001,7 +1002,14 @@ def _codex_cli_on_path():
         return None
 
 
-def build_health(root, mode=None, durable=None, codex_check=_codex_cli_on_path):
+def _openai_key_present():
+    """Cheap capability probe only: is OPENAI_API_KEY present in the process
+    environment? Returns a boolean and NEVER the value."""
+    return bool(os.environ.get("OPENAI_API_KEY"))
+
+
+def build_health(root, mode=None, durable=None, codex_check=_codex_cli_on_path,
+                 key_check=_openai_key_present):
     """Read-only health/readiness snapshot: is ClearWright ready to use right
     now? Derives everything from existing durable state and cheap filesystem
     checks. Never mutates the queue, never runs Codex or tests. Status is
@@ -1063,8 +1071,18 @@ def build_health(root, mode=None, durable=None, codex_check=_codex_cli_on_path):
             "worker_bridge": os.path.isfile(os.path.join(TOOLS, "clearwright_worker.py")),
             "proof_tool": os.path.isfile(os.path.join(TOOLS, "clearwright_proof.py")),
             "codex_helper": os.path.isfile(os.path.join(TOOLS, "clearwright_codex_review.py")),
+            "gpt_helper": os.path.isfile(os.path.join(TOOLS, "clearwright_gpt_review.py")),
+            "council_available": os.path.isfile(os.path.join(TOOLS, "clearwright_review_council.py")),
         }
         capabilities["codex_cli_on_path"] = codex_check() if codex_check else None
+        # Review Council readiness: report only a boolean for the key (never the
+        # value) and the configured model id. This never invokes GPT or Codex.
+        capabilities["openai_api_key_configured"] = bool(key_check()) if key_check else None
+        try:
+            import clearwright_gpt_review as _gpt
+            capabilities["configured_gpt_model"] = _gpt.resolve_model()
+        except Exception:  # noqa: BLE001
+            capabilities["configured_gpt_model"] = None
         health["capabilities"] = capabilities
         if not capabilities["worker_bridge"] or not capabilities["proof_tool"]:
             errors.append("Worker bridge or proof tool is missing from tools/.")
@@ -1206,6 +1224,26 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(build_history(
                 QUEUE_ROOT, packet_id=q("packet_id"), thread_id=q("thread_id"),
                 actor=q("actor"), lane=q("lane"), status=q("status")))
+            return
+        if path == "/api/review-councils":
+            # Read-only. The web server never runs GPT or Codex; it only reads
+            # durable council state produced by the CLI/helper.
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            thread_id = urllib.parse.unquote(params.get("thread_id", "")) or None
+            self._send_json({"review_councils": cwrc.list_councils(QUEUE_ROOT, thread_id=thread_id)})
+            return
+        if path == "/api/review-council":
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            council_id = urllib.parse.unquote(params.get("id", "")) or None
+            full = cwrc.get_council(QUEUE_ROOT, council_id) if council_id else None
+            if full is None:
+                self._send_json({"error": "council not found"}, code=404)
+                return
+            self._send_json(full)
             return
         if path.startswith("/static/") or path in ("/app.js", "/style.css"):
             self._send_static(path)

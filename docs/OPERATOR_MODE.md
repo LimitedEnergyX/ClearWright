@@ -99,6 +99,21 @@ real follow-up request; "Request clearance packet" files an RTA through the
 existing request intake; "Mark reviewed" writes a durable acknowledge note.
 Nothing is deleted or archived by these actions.
 
+## Review Council
+
+The **Review Council** coordinates real, independent GPT and Codex review of a
+plan and decides deterministically whether Claude may proceed, with no manual
+copy/paste. The engine (`tools/clearwright_review_council.py`) runs the
+reviewers, records each round durably under `review_councils/`, and returns one
+machine-readable outcome. The web console only reads that state and shows a
+**Review Council** card in the Conversation Workspace; GPT and Codex are never
+run inside an HTTP request handler. Reviewers are never faked, and council
+agreement never grants authority: the operator's approved scope does. Health
+reports safe capability booleans only (`gpt_helper`, `openai_api_key_configured`
+as a boolean never a value, `configured_gpt_model`, `codex_helper`,
+`codex_cli_on_path`, `council_available`) and never invokes a reviewer. See
+[REVIEW_COUNCIL.md](REVIEW_COUNCIL.md).
+
 ## Durable record vs active work
 
 The **Durable record** panel is a packet lane/audit snapshot, **not the active

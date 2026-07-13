@@ -52,6 +52,15 @@ jobs:
       - name: Compile clearwright_codex_review
         run: python -m py_compile tools/clearwright_codex_review.py
 
+      - name: Compile clearwright_verdict
+        run: python -m py_compile tools/clearwright_verdict.py
+
+      - name: Compile clearwright_gpt_review
+        run: python -m py_compile tools/clearwright_gpt_review.py
+
+      - name: Compile clearwright_review_council
+        run: python -m py_compile tools/clearwright_review_council.py
+
       - name: Compile clearwright_proof
         run: python -m py_compile tools/clearwright_proof.py
 
@@ -87,6 +96,12 @@ jobs:
 
       - name: Smoke test, codex-review help
         run: python tools/clearwright_codex_review.py --help
+
+      - name: Smoke test, gpt-review help
+        run: python tools/clearwright_gpt_review.py --help
+
+      - name: Smoke test, review-council help
+        run: python tools/clearwright_review_council.py --help
 
       - name: Smoke test, proof help
         run: python tools/clearwright_proof.py --help

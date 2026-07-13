@@ -633,6 +633,26 @@ body.conv-open .console-grid, body.conv-open .mission { display: none !important
 .run-status-responded { background: var(--ok); }
 /* Plain chat is deliberately quiet: it is not work and not an attention state. */
 .run-status-chat { background: var(--panel-2); color: var(--gray); border: 1px solid var(--line); }
+
+/* Review Council card (read-only summary of the GPT + Codex council) */
+.council-card { border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; padding: 0.5rem 0.6rem; margin: 0.5rem 0; background: var(--panel); }
+.council-card.council-ok { border-left-color: var(--ok); }
+.council-card.council-warn { border-left-color: var(--pending); }
+.council-card.council-bad { border-left-color: var(--bad, #ef4444); }
+.council-card.council-muted { border-left-color: var(--gray); }
+.council-head { display: flex; align-items: center; gap: 0.5rem; }
+.council-badge { font-size: 0.6rem; font-weight: 800; letter-spacing: 0.06em; padding: 0.05rem 0.4rem; border-radius: 999px; background: var(--blue-soft); color: #fff; }
+.council-outcome { font-size: 0.74rem; font-weight: 700; text-transform: capitalize; }
+.council-meta { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.3rem; font-size: 0.66rem; color: var(--gray); }
+.council-ok-tag { color: var(--ok); font-weight: 700; }
+.council-warn-tag { color: var(--pending); font-weight: 700; }
+.council-bad-tag { color: var(--bad, #ef4444); font-weight: 700; }
+.council-rounds { margin-top: 0.4rem; display: flex; flex-direction: column; gap: 0.25rem; }
+.council-round { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; font-size: 0.66rem; }
+.council-rn { font-weight: 700; color: var(--gray); }
+.council-vb { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 0 0.35rem; }
+.council-vmiss { color: var(--gray); font-style: italic; }
+.council-recon { color: var(--blue-soft); }
 .run-count { font-size: 0.62rem; color: var(--gray); }
 .run-last { font-size: 0.62rem; color: var(--gray); margin-left: auto; font-family: ui-monospace, monospace; }
 body.run-open .console-grid, body.run-open .mission { display: none !important; }

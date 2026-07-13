@@ -112,6 +112,16 @@ This repository ships the local, single-machine foundation:
   means actionable). Chat messages are durable but never derive a work item and
   never turn the health chip yellow; the composer defaults to Message and only
   Ask agent / Create work item / Request clearance make a message actionable.
+- An automated **Review Council** (`tools/clearwright_review_council.py`) that
+  coordinates real GPT (OpenAI Responses API, `tools/clearwright_gpt_review.py`)
+  and real Codex (structured mode of the telemetry-backed CLI helper)
+  independent reviews of a plan, records each round durably under
+  `review_councils/`, and decides with a deterministic agreement rule over
+  structured verdicts (never prose). `OPENAI_API_KEY` is read only from the
+  environment and never stored; reviewers are never faked; council agreement
+  never grants authority. Read-only `GET /api/review-councils` /
+  `GET /api/review-council` and a Conversation Workspace council card. See
+  [docs/REVIEW_COUNCIL.md](docs/REVIEW_COUNCIL.md).
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

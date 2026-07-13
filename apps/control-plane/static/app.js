@@ -655,6 +655,67 @@ function telemetryBadges(t) {
     parts.map((p) => '<span class="tele">' + p + "</span>").join("") + "</div>";
 }
 
+// Review Council: a durable, read-only summary of the GPT + Codex council for
+// a thread. The web UI only reads this state; GPT and Codex are run by the
+// CLI/helper, never from the browser or the HTTP handler.
+const COUNCIL_OUTCOME_CLASS = {
+  agreement_threshold_met: "council-ok",
+  needs_revision: "council-warn",
+  operator_required: "council-warn",
+  reviewer_unavailable: "council-muted",
+  hard_gate: "council-bad",
+};
+
+function verdictBadge(label, verdict) {
+  if (!verdict) return '<span class="council-vmiss">' + esc(label) + ": none</span>";
+  return '<span class="council-vb">' + esc(label) + ": " + esc(verdict.verdict) +
+    " (" + esc(Number(verdict.confidence).toFixed(2)) + ", " + esc(verdict.risk_level) + ")</span>";
+}
+
+function councilCard(councils, detail) {
+  if (!councils || !councils.length) return "";
+  const c = councils[0];
+  const outcome = c.outcome || "running";
+  const cls = COUNCIL_OUTCOME_CLASS[outcome] || "council-muted";
+  let html = '<div class="council-card ' + cls + '">';
+  html += '<div class="council-head"><span class="council-badge">REVIEW COUNCIL</span>' +
+    '<span class="council-outcome">' + esc(outcome.replace(/_/g, " ")) + "</span></div>";
+  html += '<div class="council-meta">' +
+    '<span class="council-id mono">' + esc(c.council_id) + "</span>" +
+    "<span>phase " + esc(c.phase) + "</span>" +
+    "<span>round " + esc(c.current_round) + "/" + esc(c.max_rounds) + "</span>" +
+    "<span>gpt: " + esc(c.gpt_status || "-") + "</span>" +
+    "<span>codex: " + esc(c.codex_status || "-") + "</span>" +
+    (c.ready_to_proceed ? '<span class="council-ok-tag">ready to proceed</span>' : "") +
+    (c.operator_required ? '<span class="council-warn-tag">operator required</span>' : "") +
+    (c.hard_gate ? '<span class="council-bad-tag">hard gate</span>' : "") +
+    "</div>";
+  if (detail && detail.rounds && detail.rounds.length) {
+    html += '<div class="council-rounds">';
+    detail.rounds.slice(-5).forEach((r) => {
+      const g = (r.gpt || {}).verdict, x = (r.codex || {}).verdict;
+      const rec = r.reconciliation;
+      html += '<div class="council-round"><span class="council-rn">round ' + esc(r.round) + "</span>" +
+        verdictBadge("GPT", g) + verdictBadge("Codex", x);
+      if (rec) {
+        html += '<span class="council-recon">reconcile: ' +
+          (rec.ready_to_proceed ? "ready" : "hold");
+        if (rec.rejected_findings && rec.rejected_findings.length) {
+          html += ", rejected " + esc(rec.rejected_findings.length) + " (with evidence)";
+        }
+        if (rec.unresolved_blockers && rec.unresolved_blockers.length) {
+          html += ", " + esc(rec.unresolved_blockers.length) + " unresolved";
+        }
+        html += "</span>";
+      }
+      html += "</div>";
+    });
+    html += "</div>";
+  }
+  html += "</div>";
+  return html;
+}
+
 function renderRunThread(run) {
   if (!run || !run.thread_id || !(run.messages || []).length) {
     return '<p class="muted">No active run yet. Post a request, or run ' +
@@ -839,6 +900,8 @@ function toggleHealthPanel() {
 let selectedConvThread = null;
 let lastConversations = [];
 let convDetailRun = null;
+let lastConvCouncils = [];
+let lastConvCouncilDetail = null;
 
 function renderConvList(convs) {
   const el = document.getElementById("conv-list");
@@ -883,6 +946,7 @@ function renderConvDetail(run) {
     '<button class="btn btn-quiet conv-action" type="button" data-action="escalate">Request clearance packet</button>' +
     "</div></div>";
   html += telemetryBadges(run.codex_telemetry);
+  html += councilCard(lastConvCouncils, lastConvCouncilDetail);
   html += '<div class="conv-messages">';
   run.messages.forEach((m) => {
     const mine = m.actor === "OPERATOR-0001";
@@ -906,6 +970,18 @@ async function loadConversations() {
     renderConvList(lastConversations);
     if (selectedConvThread) {
       const run = await getJSON("/api/active-run?thread_id=" + encodeURIComponent(selectedConvThread));
+      // Read-only council state for this thread (newest first); fetch the full
+      // detail of the most recent council so the card can show verdicts by round.
+      lastConvCouncils = [];
+      lastConvCouncilDetail = null;
+      try {
+        const cd = await getJSON("/api/review-councils?thread_id=" + encodeURIComponent(selectedConvThread));
+        lastConvCouncils = cd.review_councils || [];
+        if (lastConvCouncils.length) {
+          const full = await getJSON("/api/review-council?id=" + encodeURIComponent(lastConvCouncils[0].council_id));
+          if (full && !full.error) lastConvCouncilDetail = full;
+        }
+      } catch (e2) { /* councils are optional; ignore transient errors */ }
       renderConvDetail(run);
     }
   } catch (e) {

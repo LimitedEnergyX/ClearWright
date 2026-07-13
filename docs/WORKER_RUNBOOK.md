@@ -92,8 +92,14 @@ captures telemetry (exit code, elapsed seconds, byte and line counts, timed-out
 flag), and only posts an `actor=codex, role=reviewer, source=codex-cli` message
 when Codex exited cleanly and produced substantive output. If Codex is
 unavailable, times out, or produces only the stdin-hang marker, it records that
-as a `claude/orchestrator` note and claims no Codex participation. GPT / ChatGPT
-are never claimed; they are not connected to this local ClearWright instance.
+as a `claude/orchestrator` note and claims no Codex participation. GPT is
+claimable only through the Review Council path
+(`tools/clearwright_gpt_review.py`): a `gpt/reviewer` message is posted only
+after a real, successful OpenAI Responses API call validates against the
+structured verdict contract. A missing key, an API error, an empty response, or
+a malformed/invalid verdict claims no GPT participation. Outside that validated
+path, no GPT participation is ever claimed. See
+[REVIEW_COUNCIL.md](REVIEW_COUNCIL.md).
 
 ## Fewer approval prompts
 

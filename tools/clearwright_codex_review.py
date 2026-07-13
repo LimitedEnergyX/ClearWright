@@ -35,9 +35,22 @@ import time
 
 import clearwright_message as cwm
 import clearwright_work as cww
+import clearwright_verdict as cwv
 
 STDIN_HANG_MARKER = "Reading additional input from stdin"
 MIN_SUBSTANTIVE_BYTES = 40
+
+STRUCTURED_PROMPT = (
+    "Read-only review. Do NOT edit any files. Review the provided ClearWright "
+    "context critically and honestly. Respond with ONLY a single JSON object "
+    "(no prose, no code fences) with EXACTLY these keys: reviewer (the string "
+    "\"codex\"), verdict (one of \"approve\", \"approve_with_changes\", "
+    "\"revise\", \"block\"), confidence (a number 0.0-1.0), risk_level (one of "
+    "\"low\", \"medium\", \"high\", \"critical\"), blocking_findings (array), "
+    "required_changes (array), nonblocking_findings (array), disagreements "
+    "(array), assumptions (array), questions (array), recommended_plan (array), "
+    "and summary (a substantive string)."
+)
 
 DEFAULT_PROMPT = (
     "Read-only review. Do NOT edit any files. Review the ClearWright worker "
@@ -169,6 +182,120 @@ def review(root, work_item_id, actor="claude", timeout=90, prompt=DEFAULT_PROMPT
             "telemetry": telemetry, "message_id": msg["message_id"]}
 
 
+def codex_executable():
+    """Absolute path to the codex executable, or None. Safe to log (a path)."""
+    return shutil.which("codex")
+
+
+def codex_version(runner=None, timeout=10):
+    """Best-effort codex version string, or None. Runs `codex --version` with a
+    short timeout; never raises. Injectable for tests. (Not part of the review
+    path, so a failure here never affects a review.)"""
+    if runner is not None:
+        try:
+            return runner()
+        except Exception:  # noqa: BLE001
+            return None
+    if not codex_available():
+        return None
+    try:
+        with open(os.devnull, "rb") as devnull:
+            proc = subprocess.run(["codex", "--version"], stdin=devnull,
+                                  capture_output=True, text=True, timeout=timeout,
+                                  encoding="utf-8", errors="replace")
+        out = (proc.stdout or proc.stderr or "").strip()
+        return out.splitlines()[0] if out else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _structured_telemetry(telemetry, council_id, round_no, phase, classification):
+    """Extend the base run telemetry with council context and the executable
+    path (a path is safe to record; no secrets are involved with Codex)."""
+    tel = dict(telemetry)
+    tel.update({
+        "reviewer": "codex",
+        "classification": classification,
+        "executable": codex_executable(),
+        "council_id": council_id,
+        "round": round_no,
+        "phase": phase,
+    })
+    return tel
+
+
+def _structured_body(verdict, telemetry):
+    footer = ("Codex structured review (codex-cli). Telemetry: reviewer=codex, "
+              "exit={exit_code}, elapsed={elapsed_seconds}s, bytes={bytes}, "
+              "lines={lines}, timed_out={timed_out}, classification={classification}, "
+              "council={council_id}, round={round}, phase={phase}.").format(**telemetry)
+    head = ("verdict={verdict}, confidence={confidence}, risk={risk_level}"
+            ).format(**verdict)
+    return footer + "\n" + head + "\n\n" + verdict["summary"]
+
+
+def review_structured(root, *, thread_id=None, work_item_id=None, packet_id=None,
+                      council_id=None, round=None, phase="plan", context_text="",
+                      prompt=None, timeout=90, runner=run_codex,
+                      available_fn=codex_available, cwd=None, actor="claude",
+                      note_on_failure=True):
+    """Run a real Codex read-only review and return the SAME structured verdict
+    shape as the GPT adapter. Posts a codex/reviewer message ONLY on a real,
+    successful, substantive, and validated run. A hang, timeout, empty run, or
+    malformed/invalid verdict posts no Codex participation. `runner` and
+    `available_fn` are injectable so tests never call real Codex.
+
+    Target is addressed by explicit thread_id/work_item_id/packet_id; if only
+    work_item_id is given, the thread and packet are resolved from it."""
+    if not thread_id and work_item_id:
+        item = cww.find_work_item(root, work_item_id)
+        if item is not None:
+            thread_id = item.get("thread_id")
+            packet_id = packet_id or item.get("packet_id")
+
+    def note(message, classification, telemetry):
+        if note_on_failure:
+            _note(root, {"thread_id": thread_id, "work_item_id": work_item_id,
+                         "packet_id": packet_id}, actor, "orchestrator",
+                  "internal", "codex-review-helper", message)
+        return {"ok": True, "posted": False, "reviewer": "codex",
+                "classification": classification,
+                "telemetry": _structured_telemetry(telemetry, council_id, round, phase, classification)}
+
+    if not bool(available_fn()):
+        return note("Codex CLI unavailable; no Codex participation claimed.",
+                    "unavailable", build_telemetry("", None, 0.0))
+
+    full_prompt = prompt or (STRUCTURED_PROMPT + "\n\n" + (context_text or ""))
+    output, telemetry = runner(full_prompt, timeout, cwd)
+    kind = classify(True, telemetry, output)
+    if kind == "timeout":
+        return note("Codex CLI timed out after {}s; no Codex participation claimed.".format(timeout),
+                    "timeout", telemetry)
+    if kind != "review":
+        return note("Codex CLI produced no substantive output; no Codex participation claimed.",
+                    "non_substantive", telemetry)
+
+    try:
+        raw = cwv.extract_json_object(output)
+        verdict = cwv.validate_verdict(raw, reviewer="codex")
+    except cwv.VerdictError as exc:
+        err = "malformed_output" if "parse" in str(exc).lower() or "json" in str(exc).lower() else "invalid_verdict"
+        result = note("Codex output failed structured validation ({}); no Codex participation claimed.".format(err),
+                      err, telemetry)
+        result["detail"] = str(exc)
+        return result
+
+    tel = _structured_telemetry(telemetry, council_id, round, phase, "review")
+    msg = _note(root, {"thread_id": thread_id, "work_item_id": work_item_id,
+                       "packet_id": packet_id}, "codex", "reviewer", "inbound",
+                "codex-cli", _structured_body(verdict, tel))
+    # Provenance: a validated, substantive codex-cli run.
+    return {"ok": True, "posted": True, "reviewer": "codex", "verdict": verdict,
+            "validated": True, "source": "codex-cli", "telemetry": tel,
+            "message_id": msg["message_id"]}
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -201,6 +328,21 @@ def main():
                         help="Override the review prompt.")
     parser.add_argument("--prompt-file", default=None, metavar="PATH",
                         help="Read the review prompt from a file.")
+    parser.add_argument("--structured", action="store_true",
+                        help="Return the shared structured verdict shape for the "
+                             "Review Council (reviewer=codex, verdict, confidence, "
+                             "risk_level, findings, summary); post only on a "
+                             "validated substantive run.")
+    parser.add_argument("--thread-id", default=None, metavar="ID",
+                        help="Structured mode: thread that receives the review "
+                             "(else resolved from --work-item-id).")
+    parser.add_argument("--packet-id", default=None, metavar="ID")
+    parser.add_argument("--council-id", default=None, metavar="ID")
+    parser.add_argument("--round", type=int, default=None, metavar="N")
+    parser.add_argument("--phase", default="plan", choices=["plan", "incident", "verify"])
+    parser.add_argument("--context-file", default=None, metavar="PATH",
+                        help="Structured mode: review context appended to the "
+                             "structured prompt.")
     parser.add_argument("--json", action="store_true",
                         help="Print compact JSON only.")
     args = parser.parse_args()
@@ -216,6 +358,24 @@ def main():
         except OSError as exc:
             print("REFUSED: {}".format(exc), file=sys.stderr)
             return 1
+
+    if args.structured:
+        context = ""
+        if args.context_file:
+            try:
+                with open(args.context_file, encoding="utf-8") as fh:
+                    context = fh.read()
+            except OSError as exc:
+                print("REFUSED: {}".format(exc), file=sys.stderr)
+                return 1
+        override_prompt = prompt if (args.prompt or args.prompt_file) else None
+        result = review_structured(
+            args.queue_root, thread_id=args.thread_id, work_item_id=args.work_item_id,
+            packet_id=args.packet_id, council_id=args.council_id, round=args.round,
+            phase=args.phase, context_text=context, prompt=override_prompt,
+            timeout=args.timeout, cwd=args.repo or os.getcwd(), actor=args.actor)
+        print(json.dumps(result) if args.json else json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
 
     result = review(args.queue_root, args.work_item_id, actor=args.actor,
                     timeout=args.timeout, prompt=prompt, cwd=args.repo or os.getcwd())

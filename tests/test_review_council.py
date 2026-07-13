@@ -173,6 +173,26 @@ class GptAdapterTests(unittest.TestCase):
         self._gpt(key_getter=lambda: None, note_on_failure=True)
         self.assertFalse([m for m in cwm.read_messages(self.root) if m.get("actor") == "gpt"])
 
+    def test_reviewer_self_label_is_coerced_to_gpt(self):
+        # A real HTTP 200 review whose model wrote a non-"gpt" reviewer label
+        # (e.g. "GPT-5.6-terra") must still post: identity is authoritative from
+        # the adapter, not the model's self-label. Regression for the JARVIS run.
+        v = make_verdict("gpt")
+        v["reviewer"] = "GPT-5.6-terra Reviewer"
+        res = self._gpt(transport=gpt_transport(v))
+        self.assertTrue(res["ok"] and res["posted"])
+        self.assertEqual(res["verdict"]["reviewer"], "gpt")
+        gpt_msgs = [m for m in cwm.read_messages(self.root) if m.get("actor") == "gpt"]
+        self.assertEqual(len(gpt_msgs), 1)
+
+    def test_still_rejects_a_genuinely_invalid_verdict(self):
+        # Coercing the reviewer must not paper over other schema violations.
+        v = make_verdict("gpt", verdict="ship_it")
+        v["reviewer"] = "whatever"
+        res = self._gpt(transport=gpt_transport(v))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], "invalid_verdict")
+
     def test_successful_review_posts_and_records_actual_model(self):
         res = self._gpt(transport=gpt_transport(make_verdict("gpt"), model="gpt-5.6-terra-2026"))
         self.assertTrue(res["ok"] and res["posted"])
@@ -255,6 +275,21 @@ class CodexStructuredTests(unittest.TestCase):
         return ccr.review_structured(self.root, thread_id=self.thread,
                                      runner=runner, available_fn=lambda: True,
                                      note_on_failure=False, **kw)
+
+    def test_codex_cmd_skips_git_repo_check(self):
+        # Regression: Codex must run read-only against any directory, including
+        # a non-git / untrusted target (the JARVIS run fast-exited without this).
+        cmd = ccr.build_codex_cmd("some prompt")
+        self.assertIn("--skip-git-repo-check", cmd)
+        self.assertIn("read-only", cmd)
+        self.assertEqual(cmd[-1], "some prompt")
+
+    def test_codex_reviewer_self_label_is_coerced(self):
+        v = make_verdict("codex")
+        v["reviewer"] = "Codex CLI"
+        res = self._run(codex_runner(v))
+        self.assertTrue(res["ok"] and res["posted"])
+        self.assertEqual(res["verdict"]["reviewer"], "codex")
 
     def test_structured_review_posts_correctly(self):
         res = self._run(codex_runner(make_verdict("codex", verdict="approve_with_changes")))

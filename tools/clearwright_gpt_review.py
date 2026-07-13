@@ -300,6 +300,14 @@ def review(root, context_text, *, thread_id, work_item_id=None, packet_id=None,
 
     try:
         raw = cwv.extract_json_object(text)
+        # The reviewer identity is authoritative from THIS adapter (a real,
+        # validated OpenAI call), not from whatever the model wrote in the
+        # `reviewer` field. Models phrase self-identification inconsistently
+        # ("GPT", "gpt-5.6-terra", "assistant"); coerce it so a good review is
+        # not discarded on a self-label mismatch. The rest of the verdict still
+        # validates the model's actual output.
+        if isinstance(raw, dict):
+            raw["reviewer"] = "gpt"
         verdict = cwv.validate_verdict(raw, reviewer="gpt")
     except cwv.VerdictError as exc:
         err = "malformed_output" if "parse" in str(exc).lower() or "json" in str(exc).lower() else "invalid_verdict"

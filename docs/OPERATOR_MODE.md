@@ -81,6 +81,17 @@ local adapter — the target selector (All / Claude / Codex / Operator note) is 
 **intent hint only**, written as a plain label into the message text, and never
 claims a model participated.
 
+**Chat is not work.** The composer defaults to **Message**: normal durable
+conversation that carries intent `chat`, never derives a work item, and never
+turns the health chip yellow. The other composer modes make a message
+actionable: **Ask agent** and **Create work item** post an actionable request
+(intent `request`, which derives an open work item), and **Request clearance**
+files an RTA through the existing intake. The compact operator quick box on the
+console also posts normal chat. A chat thread becomes work only when an
+actionable follow-up is posted into it, so the console stays quiet during
+ordinary dialogue and reserves work items, the pulse, and the health chip for
+things that genuinely need action.
+
 The escalation ladder is deliberate: **conversation → work item (if actionable)
 → clearance packet (if a governed change) → CTA/DTA/RFI → worker claim → DONE
 results → History.** Normal chat needs no packet. "Create work item" posts a

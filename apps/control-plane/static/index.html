@@ -78,14 +78,14 @@
 
         <section class="panel work-panel" id="work-panel" aria-labelledby="work-h">
           <div class="panel-head">
-            <h2 id="work-h">Work items <span class="feed-badge local">live</span> <span class="help" tabindex="0" role="button" aria-label="About work items">?<span class="tip">Open work derived from the live queue and messages: unanswered requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display.</span></span></h2>
+            <h2 id="work-h">Work items <span class="feed-badge local">live</span> <span class="help" tabindex="0" role="button" aria-label="About work items">?<span class="tip">Actionable work only, derived from the live queue and messages: unanswered actionable requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Normal chat stays in Conversations and never appears here. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display.</span></span></h2>
           </div>
           <div class="work-items" id="work-items"><p class="muted work-empty">No open work items.</p></div>
         </section>
 
         <section class="panel comms-panel" id="comms-panel" aria-labelledby="comms-h">
           <div class="panel-head">
-            <h2 id="comms-h">Local communications <span class="feed-badge local">real</span> <span class="help" tabindex="0" role="button" aria-label="About local communications">?<span class="tip">A compact recent feed of the real, durable, packet-linked messages sent through the local adapter (CLI, curl, or local HTTP at POST /api/messages). For readable threads, replies, and follow-ups, open Conversations in the top bar. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></h2>
+            <h2 id="comms-h">Local communications <span class="feed-badge local">real</span> <span class="help" tabindex="0" role="button" aria-label="About local communications">?<span class="tip">A compact recent feed of the real, durable, packet-linked messages sent through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The quick box below sends normal chat (never a work item); for readable threads, replies, follow-ups, and actionable requests, open Conversations in the top bar. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></h2>
           </div>
           <form id="operator-chat-form" class="operator-chat">
             <input id="operator-chat-input" type="text" maxlength="500" autocomplete="off"
@@ -139,6 +139,12 @@
         <div class="conv-main">
           <div id="conv-detail"><p class="muted">No conversation selected. Type below to start a new one.</p></div>
           <form id="conv-composer" class="conv-composer">
+            <select id="conv-mode" class="conv-target" aria-label="Composer mode">
+              <option value="chat" selected>Message</option>
+              <option value="ask">Ask agent</option>
+              <option value="workitem">Create work item</option>
+              <option value="clearance">Request clearance</option>
+            </select>
             <select id="conv-target" class="conv-target" aria-label="Message target hint">
               <option value="">All</option>
               <option value="@Claude ">Claude</option>
@@ -149,7 +155,7 @@
                    placeholder="Send Agents a Message" />
             <button id="conv-send" class="btn btn-primary" type="submit">Send</button>
           </form>
-          <p class="conv-target-hint">Target is an intent hint only; participation is real only when a worker posts back through CW.</p>
+          <p class="conv-target-hint">Message is normal chat: durable, but never a work item and never an Attention flag. Ask agent and Create work item make the message actionable; Request clearance files an RTA through the intake. Target is an intent hint only; participation is real only when a worker posts back through CW.</p>
         </div>
       </div>
     </section>

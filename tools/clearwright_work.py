@@ -15,7 +15,9 @@ authoritative:
   - DONE results remain the outcome record.
 
 Derivation:
-  - an inbound message thread with no response  -> kind "message"
+  - an inbound ACTIONABLE message thread with no response -> kind "message"
+    (a message with intent "chat" is plain conversation, never a work item;
+    chat is not work)
   - a CTA packet in clearance_outbox            -> kind "packet"   (claimable)
   - an IN_PROGRESS packet                        -> kind "in_progress"
   - an RFI_PENDING packet                        -> kind "rfi"
@@ -117,7 +119,9 @@ def derive_work_items(root):
                 "post progress or complete",
                 packet_id=pid, title=p["title"], summary=p["title"]))
 
-    # Message threads: an inbound request with no response is open work.
+    # Message threads: an inbound ACTIONABLE request with no response is open
+    # work. Plain chat (intent "chat") is conversation, not work; a chat thread
+    # becomes work only when an actionable follow-up is posted into it.
     messages = cwm.read_messages(root)
     threads = {}
     order = []
@@ -129,9 +133,10 @@ def derive_work_items(root):
         threads[tid].append(m)
     for tid in order:
         msgs = threads[tid]
-        origin = next((m for m in msgs if m.get("direction") == "inbound"), None)
+        origin = next((m for m in msgs if m.get("direction") == "inbound"
+                       and m.get("intent") != "chat"), None)
         if origin is None:
-            continue  # worker-only thread, not an inbound request
+            continue  # chat-only or worker-only thread, not an actionable request
         has_response = any(m.get("direction") == "outbound"
                            or m.get("status") == "responded" for m in msgs)
         if has_response:

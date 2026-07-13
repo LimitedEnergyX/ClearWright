@@ -107,6 +107,11 @@ This repository ships the local, single-machine foundation:
   happens on the durable threads: thread list, readable timeline, composer with
   thread continuation, and escalation to work items or clearance packets when a
   conversation turns into governed work.
+- A chat/work separation so normal conversation stays quiet: a message can carry
+  an `intent` (`chat` is plain conversation, `request` is actionable; omitted
+  means actionable). Chat messages are durable but never derive a work item and
+  never turn the health chip yellow; the composer defaults to Message and only
+  Ask agent / Create work item / Request clearance make a message actionable.
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

@@ -36,6 +36,7 @@ Exit codes (stable; the skill parses one JSON response and these codes):
 import argparse
 import json
 import os
+import re
 import sys
 
 import clearwright_message as cwm
@@ -66,22 +67,32 @@ OUTCOME_EXIT = {
 KINDS = ("chat", "analysis", "actionable", "governed", "high_risk")
 _GOVERNED_HINTS = ("deploy", "publish", "release", "force-push", "force push",
                    "delete", "drop table", "migration", "schema", "credential",
-                   "secret", "billing", "payment", "production", "prod ")
+                   "secret", "billing", "payment", "production")
 _HIGH_RISK_HINTS = ("access control", "permission", "license", "dns", "webhook",
                     "token", "api key")
-_CHAT_HINTS = ("just checking", "fyi", "note:", "thoughts?", "what do you think",
-               "how are", "hello", "hi ", "thanks")
+_CHAT_HINTS = ("just checking", "fyi", "thoughts", "what do you think",
+               "how are you", "hello", "hi", "thanks")
+
+
+def _phrase_present(text, phrases):
+    """True if any phrase appears as a whole word/phrase (word-boundary match),
+    so a hint never false-matches inside a larger word (e.g. 'fyi' inside
+    'clarifying', or 'hi' inside 'this')."""
+    for p in phrases:
+        if re.search(r"\b" + re.escape(p) + r"\b", text):
+            return True
+    return False
 
 
 def classify_request(text):
     """A coarse, deterministic classification. The skill may override with an
-    explicit --kind; this is only a default."""
-    t = " " + (text or "").lower() + " "
-    if any(h in t for h in _HIGH_RISK_HINTS):
+    explicit --kind; this is only a default. Hints match on word boundaries."""
+    t = (text or "").lower()
+    if _phrase_present(t, _HIGH_RISK_HINTS):
         return "high_risk"
-    if any(h in t for h in _GOVERNED_HINTS):
+    if _phrase_present(t, _GOVERNED_HINTS):
         return "governed"
-    if any(h in t for h in _CHAT_HINTS) and len(t.split()) < 25:
+    if _phrase_present(t, _CHAT_HINTS) and len(t.split()) < 25:
         return "chat"
     return "actionable"
 

@@ -68,6 +68,16 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(ucw.classify_request("Deploy the site to production."), "governed")
         self.assertEqual(ucw.classify_request("Change the access control on the repo."), "high_risk")
 
+    def test_hints_match_on_word_boundaries_not_substrings(self):
+        # 'fyi' must not match inside 'clarifying'; 'hi' must not match 'this'.
+        self.assertEqual(ucw.classify_request(
+            "Add one clarifying comment describing the exit-code contract."), "actionable")
+        self.assertEqual(ucw.classify_request(
+            "Rename this variable in the parser."), "actionable")
+        # 'production' governs, but 'reproduce' must not be read as 'prod'.
+        self.assertEqual(ucw.classify_request(
+            "Reproduce the parser test locally and tidy it."), "actionable")
+
 
 class StartTests(unittest.TestCase):
 

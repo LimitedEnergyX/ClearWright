@@ -582,6 +582,7 @@ async function loadHistory() {
 
 function openHistory() {
   closeActiveRun();
+  closeConversations();
   document.body.classList.add("history-open");
   document.getElementById("history-view").hidden = false;
   loadHistory();
@@ -747,6 +748,7 @@ async function loadActiveRun() {
 
 function openActiveRun() {
   closeHistory();
+  closeConversations();
   document.body.classList.add("run-open");
   document.getElementById("active-run-view").hidden = false;
   loadActiveRun();
@@ -821,6 +823,180 @@ function toggleHealthPanel() {
   const panel = document.getElementById("health-panel");
   panel.hidden = !panel.hidden;
   if (!panel.hidden) renderHealthDetails(lastHealth);
+}
+
+// --------------------------------------------------------------------------- //
+// Conversation Workspace (conversation-first view of the durable threads)
+//
+// Conversations are the durable message threads; the workspace is where the
+// operator reads and continues them. Replies from Claude/Codex/workers appear
+// only when they actually post back through the local adapter - the target
+// selector is an intent hint only and never claims participation.
+// --------------------------------------------------------------------------- //
+
+let selectedConvThread = null;
+let lastConversations = [];
+let convDetailRun = null;
+
+function renderConvList(convs) {
+  const el = document.getElementById("conv-list");
+  if (!el) return;
+  if (!convs.length) {
+    el.innerHTML = '<p class="muted">No conversations yet. Type below to start one.</p>';
+    return;
+  }
+  el.innerHTML = convs.map((c) => {
+    const badges = ['<span class="work-badge run-status-' + esc(c.status) + '">' + esc(c.status) + "</span>"];
+    if (c.has_codex_review) badges.push('<span class="feed-badge local">codex</span>');
+    badges.push('<span class="run-count">' + esc(c.message_count) + " msg</span>");
+    return '<div class="conv-item' + (c.thread_id === selectedConvThread ? " is-selected" : "") +
+      '" data-thread="' + esc(c.thread_id) + '">' +
+      '<div class="conv-item-title">' + esc(c.title || c.thread_id) + "</div>" +
+      '<div class="conv-item-sub">' + esc((c.latest_message_preview || "").slice(0, 70)) + "</div>" +
+      '<div class="run-item-badges">' + badges.join("") +
+      '<span class="run-last">' + esc(shortTime(c.last_timestamp)) + "</span></div></div>";
+  }).join("");
+}
+
+function renderConvDetail(run) {
+  const el = document.getElementById("conv-detail");
+  if (!el) return;
+  convDetailRun = run;
+  if (!run || !run.thread_id || !(run.messages || []).length) {
+    el.innerHTML = '<p class="muted">No conversation selected. Type below to start a new one.</p>';
+    return;
+  }
+  const title = (run.messages[0] && run.messages[0].message) || run.thread_id;
+  let html = '<div class="conv-head">';
+  html += '<div class="conv-title">' + esc(title.slice(0, 160)) + "</div>";
+  html += '<div class="conv-meta"><span class="run-id mono">' + esc(run.thread_id) + "</span>";
+  html += '<button class="copy-btn" type="button" data-copy="' + esc(run.thread_id) + '">copy thread_id</button>';
+  html += '<button class="copy-btn" type="button" data-copy-summary="1">copy summary</button>';
+  if (run.work_item_id) html += '<span class="run-wid mono">' + esc(run.work_item_id) + "</span>";
+  if (run.packet_id) html += '<span class="run-pkt">[' + esc(run.packet_id) + "]</span>";
+  html += "</div>";
+  html += '<div class="conv-actions">' +
+    '<button class="btn btn-quiet conv-action" type="button" data-action="ack">Mark reviewed</button>' +
+    '<button class="btn btn-quiet conv-action" type="button" data-action="workitem">Create work item</button>' +
+    '<button class="btn btn-quiet conv-action" type="button" data-action="escalate">Request clearance packet</button>' +
+    "</div></div>";
+  html += telemetryBadges(run.codex_telemetry);
+  html += '<div class="conv-messages">';
+  run.messages.forEach((m) => {
+    const mine = m.actor === "OPERATOR-0001";
+    const meta = [m.actor + (m.role ? "/" + m.role : ""), m.direction, m.status, m.source, m.at]
+      .filter(Boolean).map(esc).join(" · ");
+    html += '<div class="conv-msg' + (mine ? " conv-msg-operator" : "") +
+      (m.direction === "outbound" ? " conv-msg-outbound" : "") + '">' +
+      '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
+      '<div class="conv-msg-meta">' + meta + "</div></div>";
+  });
+  html += "</div>";
+  el.innerHTML = html;
+  const box = el.querySelector(".conv-messages");
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+async function loadConversations() {
+  try {
+    const data = await getJSON("/api/conversations");
+    lastConversations = data.conversations || [];
+    renderConvList(lastConversations);
+    if (selectedConvThread) {
+      const run = await getJSON("/api/active-run?thread_id=" + encodeURIComponent(selectedConvThread));
+      renderConvDetail(run);
+    }
+  } catch (e) {
+    // Leave prior content on a transient fetch error.
+  }
+}
+
+async function submitConvComposer(ev) {
+  ev.preventDefault();
+  const input = document.getElementById("conv-input");
+  const text = input.value.trim();
+  if (!text) return;
+  const prefix = document.getElementById("conv-target").value || "";
+  input.value = "";
+  const body = {
+    actor: "OPERATOR-0001", role: "operator", source: "operator-ui",
+    direction: "inbound", simulated: false, message: prefix + text,
+  };
+  if (selectedConvThread) body.thread_id = selectedConvThread;
+  const res = await postJSON("/api/messages", body);
+  if (res && res.ok && res.thread_id) selectedConvThread = res.thread_id;
+  loadConversations();
+  refreshMessages();
+  refreshWorkItems();
+}
+
+async function postConvNote(direction, message) {
+  if (!selectedConvThread) return;
+  await postJSON("/api/messages", {
+    actor: "OPERATOR-0001", role: "operator", source: "operator-ui",
+    direction: direction, simulated: false, message: message,
+    thread_id: selectedConvThread,
+  });
+  loadConversations();
+  refreshWorkItems();
+}
+
+function openEscalate() {
+  const run = convDetailRun;
+  const intake = (lastState && lastState.intake) || {};
+  document.getElementById("esc-type").innerHTML =
+    (intake.packet_types || ["analysis", "code_change", "docs_change"])
+      .map((t) => "<option>" + esc(t) + "</option>").join("");
+  document.getElementById("esc-target").innerHTML =
+    (intake.target_labels || []).map((t) => "<option>" + esc(t) + "</option>").join("");
+  const title = run && run.messages && run.messages[0] ? run.messages[0].message : "";
+  document.getElementById("esc-title").value = title.slice(0, 140);
+  document.getElementById("esc-action").value = "";
+  document.getElementById("escalate-modal").setAttribute("aria-hidden", "false");
+  document.getElementById("esc-action").focus();
+}
+
+function closeEscalate() {
+  document.getElementById("escalate-modal").setAttribute("aria-hidden", "true");
+}
+
+async function submitEscalate(ev) {
+  ev.preventDefault();
+  const body = {
+    title: document.getElementById("esc-title").value.trim(),
+    packet_type: document.getElementById("esc-type").value,
+    requesting_agent: "agent/worker",
+    requested_action: document.getElementById("esc-action").value.trim(),
+    target_label: document.getElementById("esc-target").value,
+  };
+  if (!body.title || !body.requested_action) return;
+  const res = await postJSON("/api/request", body);
+  if (res.ok) {
+    closeEscalate();
+    setActivity("Clearance request created from the conversation\n" + (res.output || "").trim());
+    if (selectedConvThread) {
+      await postConvNote("internal",
+        "Escalated to clearance packet (RTA created): " + body.title +
+        ". Decide CTA / DTA / RFI in the console.");
+    }
+    if (res.state) renderState(res.state);
+  } else {
+    setActivity("Refused: " + (res.error || "") + "\n" + (res.output || "").trim());
+  }
+}
+
+function openConversations() {
+  closeHistory();
+  closeActiveRun();
+  document.body.classList.add("conv-open");
+  document.getElementById("conversations-view").hidden = false;
+  loadConversations();
+  document.getElementById("conv-input").focus();
+}
+
+function closeConversations() {
+  document.body.classList.remove("conv-open");
+  document.getElementById("conversations-view").hidden = true;
 }
 
 let feedStarted = false;
@@ -1390,6 +1566,44 @@ function wire() {
     loadActiveRun();
   });
   document.getElementById("health-chip").addEventListener("click", toggleHealthPanel);
+  // Conversation Workspace
+  document.getElementById("conversations-btn").addEventListener("click", openConversations);
+  document.getElementById("conversations-close").addEventListener("click", closeConversations);
+  document.getElementById("conv-new-btn").addEventListener("click", () => {
+    selectedConvThread = null;
+    renderConvDetail(null);
+    renderConvList(lastConversations);
+    document.getElementById("conv-input").focus();
+  });
+  document.getElementById("conv-composer").addEventListener("submit", submitConvComposer);
+  document.getElementById("conv-list").addEventListener("click", (e) => {
+    const item = e.target.closest(".conv-item");
+    if (!item) return;
+    selectedConvThread = item.getAttribute("data-thread");
+    loadConversations();
+  });
+  document.getElementById("conv-detail").addEventListener("click", (e) => {
+    const copyBtn = e.target.closest("button[data-copy], button[data-copy-summary]");
+    if (copyBtn) {
+      if (copyBtn.hasAttribute("data-copy")) copyText(copyBtn.getAttribute("data-copy"), copyBtn);
+      else copyText(runSummaryText(convDetailRun), copyBtn);
+      return;
+    }
+    const action = e.target.closest("button[data-action]");
+    if (!action) return;
+    const kind = action.getAttribute("data-action");
+    if (kind === "ack") {
+      postConvNote("internal", "Operator acknowledged this conversation.");
+    } else if (kind === "workitem") {
+      const title = convDetailRun && convDetailRun.messages && convDetailRun.messages[0]
+        ? convDetailRun.messages[0].message.slice(0, 120) : "this conversation";
+      postConvNote("inbound", "Follow-up requested: " + title);
+    } else if (kind === "escalate") {
+      openEscalate();
+    }
+  });
+  document.getElementById("escalate-form").addEventListener("submit", submitEscalate);
+  document.getElementById("escalate-cancel").addEventListener("click", closeEscalate);
   // Archive toggle: reveal/hide old completed packets in the Durable record.
   document.getElementById("board").addEventListener("click", (e) => {
     const btn = e.target.closest(".show-completed-btn");
@@ -1409,9 +1623,10 @@ function wire() {
   setInterval(refreshMessages, LIVE_MS);
   setInterval(refreshWorkItems, LIVE_MS);
   setInterval(refreshHealth, LIVE_MS * 2);
-  // Keep the Active Run view live while it is open.
+  // Keep the Active Run and Conversation views live while they are open.
   setInterval(() => {
     if (document.body.classList.contains("run-open")) loadActiveRun();
+    if (document.body.classList.contains("conv-open")) loadConversations();
   }, LIVE_MS);
 }
 

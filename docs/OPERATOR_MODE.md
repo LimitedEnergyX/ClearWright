@@ -69,6 +69,25 @@ participation. The console shows a compact health chip in the top bar
 (Healthy / Attention / Problem) with the top reason as its tooltip; clicking
 opens a read-only details panel.
 
+## Conversation Workspace
+
+**Conversations** (top bar) opens the conversation-first view of the durable
+message threads: a thread list on the left, a readable timeline and a prominent
+composer on the right. The operator sends real inbound `OPERATOR-0001` messages
+("Send Agents a Message"); replying with a conversation selected continues that
+thread, and sending with none selected starts a new one. Replies from Claude,
+Codex, or other workers appear only when they actually post back through the
+local adapter — the target selector (All / Claude / Codex / Operator note) is an
+**intent hint only**, written as a plain label into the message text, and never
+claims a model participated.
+
+The escalation ladder is deliberate: **conversation → work item (if actionable)
+→ clearance packet (if a governed change) → CTA/DTA/RFI → worker claim → DONE
+results → History.** Normal chat needs no packet. "Create work item" posts a
+real follow-up request; "Request clearance packet" files an RTA through the
+existing request intake; "Mark reviewed" writes a durable acknowledge note.
+Nothing is deleted or archived by these actions.
+
 ## Durable record vs active work
 
 The **Durable record** panel is a packet lane/audit snapshot, **not the active

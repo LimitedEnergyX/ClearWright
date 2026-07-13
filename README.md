@@ -103,6 +103,10 @@ This repository ships the local, single-machine foundation:
 - An archive-aware durable record (old completed packets collapse behind a
   Show-completed toggle; files never touched) and a pulse inspector that
   explains why the workflow graph is pulsing and when it stops.
+- A Conversation Workspace (`/api/conversations`) where operator/agent dialogue
+  happens on the durable threads: thread list, readable timeline, composer with
+  thread continuation, and escalation to work items or clearance packets when a
+  conversation turns into governed work.
 - A stdlib test suite ([tests/](tests/)).
 
 Documented as direction, not yet implemented here: a read-only packet index, a

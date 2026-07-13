@@ -18,6 +18,7 @@
     <div class="topbar-actions">
       <span class="actor" id="actor-label">operator</span>
       <button id="health-chip" class="health-chip" type="button" aria-label="System health details"><span class="health-dot" aria-hidden="true"></span><span id="health-label">Checking</span></button>
+      <button id="conversations-btn" class="btn btn-quiet" type="button">Conversations</button>
       <button id="active-run-btn" class="btn btn-quiet" type="button">Active Run</button>
       <button id="history-btn" class="btn btn-quiet" type="button">History</button>
       <button id="reset-btn" class="btn btn-quiet" type="button">Reset demo</button>
@@ -84,7 +85,7 @@
 
         <section class="panel comms-panel" id="comms-panel" aria-labelledby="comms-h">
           <div class="panel-head">
-            <h2 id="comms-h">Local communications <span class="feed-badge local">real</span> <span class="help" tabindex="0" role="button" aria-label="About local communications">?<span class="tip">Real, durable, packet-linked messages sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The browser is the operator display; no browser automation is needed. Threads and replies appear as they arrive. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></h2>
+            <h2 id="comms-h">Local communications <span class="feed-badge local">real</span> <span class="help" tabindex="0" role="button" aria-label="About local communications">?<span class="tip">A compact recent feed of the real, durable, packet-linked messages sent through the local adapter (CLI, curl, or local HTTP at POST /api/messages). For readable threads, replies, and follow-ups, open Conversations in the top bar. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></h2>
           </div>
           <form id="operator-chat-form" class="operator-chat">
             <input id="operator-chat-input" type="text" maxlength="500" autocomplete="off"
@@ -123,6 +124,35 @@
         </section>
       </aside>
     </div>
+
+    <section class="conversations-view" id="conversations-view" hidden aria-labelledby="conversations-h">
+      <div class="panel-head history-head">
+        <h2 id="conversations-h">Conversations <span class="feed-badge local">durable</span></h2>
+        <div class="active-run-controls">
+          <button id="conv-new-btn" class="btn btn-quiet" type="button">New conversation</button>
+          <button id="conversations-close" class="btn btn-quiet" type="button">Back to console</button>
+        </div>
+      </div>
+      <p class="hint">Operator/agent dialogue on durable message threads. Pick a conversation on the left, read the timeline, and reply below. Replies from Claude, Codex, or other workers appear only when they actually post back through the local adapter; nothing here is simulated.</p>
+      <div class="conv-layout">
+        <div class="conv-list" id="conv-list"><p class="muted">Loading conversations...</p></div>
+        <div class="conv-main">
+          <div id="conv-detail"><p class="muted">No conversation selected. Type below to start a new one.</p></div>
+          <form id="conv-composer" class="conv-composer">
+            <select id="conv-target" class="conv-target" aria-label="Message target hint">
+              <option value="">All</option>
+              <option value="@Claude ">Claude</option>
+              <option value="@Codex ">Codex</option>
+              <option value="[operator note] ">Operator note</option>
+            </select>
+            <input id="conv-input" type="text" maxlength="1000" autocomplete="off"
+                   placeholder="Send Agents a Message" />
+            <button id="conv-send" class="btn btn-primary" type="submit">Send</button>
+          </form>
+          <p class="conv-target-hint">Target is an intent hint only; participation is real only when a worker posts back through CW.</p>
+        </div>
+      </div>
+    </section>
 
     <section class="active-run-view" id="active-run-view" hidden aria-labelledby="active-run-h">
       <div class="panel-head history-head">
@@ -223,6 +253,33 @@
         <div class="modal-actions">
           <button id="results-cancel" class="btn btn-quiet" type="button">Cancel</button>
           <button id="results-submit" class="btn btn-ok" type="submit">Mark DONE</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="escalate-modal" aria-hidden="true">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="escalate-title">
+      <h2 id="escalate-title">Request clearance packet</h2>
+      <p class="muted">Escalate this conversation into a governed change request (RTA). Normal chat does not need a packet; packets are the authority layer for governed changes. The operator still decides CTA / DTA / RFI.</p>
+      <form id="escalate-form">
+        <div class="form-grid">
+          <label class="form-field form-span">Title *
+            <input id="esc-title" type="text" required maxlength="140" />
+          </label>
+          <label class="form-field">Packet type
+            <select id="esc-type"></select>
+          </label>
+          <label class="form-field">Target label
+            <select id="esc-target"></select>
+          </label>
+          <label class="form-field form-span">Requested action *
+            <textarea id="esc-action" rows="3" required placeholder="What the worker is asking clearance to do. Keep it generic; no secrets or private names."></textarea>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button id="escalate-cancel" class="btn btn-quiet" type="button">Cancel</button>
+          <button id="escalate-submit" class="btn btn-ok" type="submit">Create RTA</button>
         </div>
       </form>
     </div>

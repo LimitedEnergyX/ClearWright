@@ -183,6 +183,18 @@ A read-only `GET /api/health` reports readiness (green/yellow/red with counts,
 capabilities, and plain-language warnings; see
 [OPERATOR_MODE.md](OPERATOR_MODE.md)). None of this edits or deletes the record.
 
+**Conversations are the same durable threads, conversation-first.**
+`GET /api/conversations` returns the identical derived summaries as
+`GET /api/runs` (same fields and filters, keyed `conversations`), and the
+selected thread is retrieved with `GET /api/active-run?thread_id=<id>`. The
+**Conversation Workspace** in the console is where operator/agent dialogue
+happens: threads on the left, timeline and composer on the right, with small
+escalation actions (create work item, request clearance packet, mark reviewed).
+Work items remain the actionable derived state, and packets remain the authority
+layer — normal chat needs no RTA/CTA; governed changes should be escalated into
+packets. Codex/Claude participation is never claimed unless the worker actually
+posted back through this adapter.
+
 For the "use CW" worker behavior (find work, claim, post progress, respond),
 `tools/clearwright_worker.py` is a thin bridge over these same functions with
 `next`, `claim`, `progress`, `respond`, and `status` commands, and

@@ -365,6 +365,10 @@ function renderOperatorCard(state) {
 function renderRealEvents(events) {
   const el = document.getElementById("feed-real");
   if (!el) return;
+  renderFollowing(el, "feed-real", (events || []).length, () => renderRealEventsInner(el, events));
+}
+
+function renderRealEventsInner(el, events) {
   if (!events || !events.length) {
     const empty = currentMode === "operator"
       ? OPERATOR_EMPTY_EVENTS
@@ -387,7 +391,6 @@ function renderRealEvents(events) {
       role + ":</span> " + esc(ev.message) + pkt;
     el.appendChild(line);
   });
-  el.scrollTop = el.scrollHeight;
 }
 
 let lastEvents = [];
@@ -413,9 +416,65 @@ async function refreshAgentEvents() {
 const COMMS_EMPTY =
   "No local messages yet. Send one with tools/clearwright_message.py or POST /api/messages.";
 
+// --------------------------------------------------------------------------- //
+// Scroll-follow: a live-refreshed panel follows new content ONLY while the
+// reader is already near the bottom. If the reader has scrolled up, polling
+// preserves their position (it never yanks them to the bottom), and a
+// "New messages" pill appears; clicking it, or scrolling back to the bottom,
+// resumes following. This keeps the panel from fighting the reader.
+// --------------------------------------------------------------------------- //
+const NEAR_BOTTOM_PX = 40;
+const _panelItemCounts = {};
+
+function isNearBottom(el) {
+  return (el.scrollHeight - el.scrollTop - el.clientHeight) <= NEAR_BOTTOM_PX;
+}
+
+function newMessagesPill(el, panelId) {
+  let pill = document.getElementById(panelId + "-newmsg");
+  if (!pill) {
+    const parent = el.parentNode || el;
+    if (!parent.style.position) parent.style.position = "relative";
+    pill = document.createElement("button");
+    pill.id = panelId + "-newmsg";
+    pill.type = "button";
+    pill.className = "newmsg-pill";
+    pill.textContent = "New messages ↓";
+    pill.hidden = true;
+    pill.addEventListener("click", () => { el.scrollTop = el.scrollHeight; pill.hidden = true; });
+    parent.appendChild(pill);
+    // Resume following (hide the pill) when the reader returns to the bottom.
+    el.addEventListener("scroll", () => { if (isNearBottom(el)) pill.hidden = true; });
+  }
+  return pill;
+}
+
+// Run a render that rebuilds el's content, preserving the reader's scroll
+// position unless they were near the bottom (then follow to the bottom).
+function renderFollowing(el, panelId, itemCount, renderFn) {
+  if (!el) { renderFn(); return; }
+  const follow = isNearBottom(el);
+  const prevTop = el.scrollTop;
+  const grew = itemCount > (_panelItemCounts[panelId] || 0);
+  _panelItemCounts[panelId] = itemCount;
+  renderFn();
+  const pill = newMessagesPill(el, panelId);
+  if (follow) {
+    el.scrollTop = el.scrollHeight;
+    pill.hidden = true;
+  } else {
+    el.scrollTop = prevTop;
+    if (grew) pill.hidden = false;
+  }
+}
+
 function renderMessages(messages) {
   const el = document.getElementById("comms");
   if (!el) return;
+  renderFollowing(el, "comms", (messages || []).length, () => renderMessagesInner(el, messages));
+}
+
+function renderMessagesInner(el, messages) {
   if (!messages || !messages.length) {
     el.innerHTML = '<p class="muted comms-empty">' + esc(COMMS_EMPTY) + "</p>";
     return;
@@ -452,7 +511,6 @@ function renderMessages(messages) {
     wrap.innerHTML = head + body;
     el.appendChild(wrap);
   });
-  el.scrollTop = el.scrollHeight;
 }
 
 let lastMessages = [];
@@ -952,15 +1010,48 @@ function renderConvDetail(run) {
     const mine = m.actor === "OPERATOR-0001";
     const meta = [m.actor + (m.role ? "/" + m.role : ""), m.direction, m.status, m.source, m.at]
       .filter(Boolean).map(esc).join(" · ");
-    html += '<div class="conv-msg' + (mine ? " conv-msg-operator" : "") +
-      (m.direction === "outbound" ? " conv-msg-outbound" : "") + '">' +
+    const tag = conversationEntryTag(m);
+    const cls = "conv-msg" + (mine ? " conv-msg-operator" : "") +
+      (m.direction === "outbound" ? " conv-msg-outbound" : "") +
+      (tag ? " " + tag.cls : "");
+    html += '<div class="' + cls + '">' +
+      (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
       '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
       '<div class="conv-msg-meta">' + meta + "</div></div>";
   });
   html += "</div>";
+  // Preserve the reader's position across the 2s rebuild: only follow to the
+  // bottom if they were already near it.
+  const oldBox = el.querySelector(".conv-messages");
+  const wasNear = !oldBox || isNearBottom(oldBox);
+  const oldTop = oldBox ? oldBox.scrollTop : 0;
   el.innerHTML = html;
   const box = el.querySelector(".conv-messages");
-  if (box) box.scrollTop = box.scrollHeight;
+  if (box) box.scrollTop = wasNear ? box.scrollHeight : oldTop;
+}
+
+// Classify a conversation entry so the timeline reads as a council transcript:
+// a real GPT/Codex reviewer message (with its verdict parsed from the footer),
+// a Claude reconciliation, or a "no participation" failure note shown WITHOUT a
+// reviewer badge so a failed/unavailable reviewer is never mistaken for a review.
+function conversationEntryTag(m) {
+  const body = m.message || "";
+  const isReviewer = (m.actor === "gpt" || m.actor === "codex") &&
+    (m.source === "openai-api" || m.source === "codex-cli");
+  if (isReviewer) {
+    const who = m.actor.toUpperCase();
+    const vm = body.match(/verdict=([a-z_]+), confidence=([\d.]+), risk=([a-z]+)/i);
+    return { cls: "conv-entry-reviewer",
+             label: vm ? (who + " reviewer · " + vm[1] + " · conf " + vm[2] + " · " + vm[3] + " risk")
+                       : (who + " reviewer") };
+  }
+  if (/no (GPT|Codex) participation claimed/i.test(body)) {
+    return { cls: "conv-entry-unavailable", label: "reviewer unavailable · not recorded as participation" };
+  }
+  if (m.source === "review-council") {
+    return { cls: "conv-entry-reconcile", label: "Claude reconciliation" };
+  }
+  return null;
 }
 
 async function loadConversations() {

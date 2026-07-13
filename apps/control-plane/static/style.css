@@ -631,6 +631,8 @@ body.conv-open .console-grid, body.conv-open .mission { display: none !important
 .run-status-open { background: var(--pending); }
 .run-status-claimed { background: var(--blue-soft); }
 .run-status-responded { background: var(--ok); }
+/* Plain chat is deliberately quiet: it is not work and not an attention state. */
+.run-status-chat { background: var(--panel-2); color: var(--gray); border: 1px solid var(--line); }
 .run-count { font-size: 0.62rem; color: var(--gray); }
 .run-last { font-size: 0.62rem; color: var(--gray); margin-left: auto; font-family: ui-monospace, monospace; }
 body.run-open .console-grid, body.run-open .mission { display: none !important; }

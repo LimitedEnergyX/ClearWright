@@ -344,6 +344,7 @@ def do_message(root, payload, respond=False):
             status=status,
             source=fields.get("source") or "local-http",
             simulated=bool(fields.get("simulated", False)),
+            intent=fields.get("intent"),
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
@@ -894,10 +895,10 @@ def _real_threads(root):
 def build_active_run(root, thread_id=None):
     """One message thread, grouped and ready to render for the Active Run view:
     thread_id, work_item_id, packet_id, the ordered messages, and any parsed
-    Codex telemetry. Without thread_id the most recently active thread is
-    returned (the PR #19 behavior); with thread_id that specific run is
-    returned. Read-only; simulated messages are excluded so operator mode stays
-    real-only."""
+    Codex telemetry. Without thread_id the most recently active actionable or
+    worked thread is returned (plain chat is not auto-selected); with thread_id
+    any specific run is returned, chat included. Read-only; simulated messages
+    are excluded so operator mode stays real-only."""
     threads = _real_threads(root)
     empty = {"thread_id": None, "work_item_id": None, "packet_id": None,
              "messages": [], "codex_telemetry": None}
@@ -908,7 +909,22 @@ def build_active_run(root, thread_id=None):
     else:
         if not threads:
             return empty
-        active_tid = max(threads, key=lambda t: max((mm.get("at", "") for mm in threads[t]), default=""))
+
+        # Plain chat is not auto-selected: the default pick is the most
+        # recently active thread with actionable or worked content (a work
+        # item, a packet, a claim, a response, or an actionable inbound
+        # request). A chat-only thread is selectable explicitly, and is the
+        # fallback when nothing actionable exists yet.
+        def _worked(tid):
+            return any(
+                m.get("work_item_id") or m.get("packet_id")
+                or m.get("direction") == "outbound"
+                or m.get("status") in ("claimed", "responded")
+                or (m.get("direction") == "inbound" and m.get("intent") != "chat")
+                for m in threads[tid])
+
+        candidates = [t for t in threads if _worked(t)] or list(threads)
+        active_tid = max(candidates, key=lambda t: max((mm.get("at", "") for mm in threads[t]), default=""))
     msgs = threads[active_tid]
     work_item_id = next((m.get("work_item_id") for m in msgs if m.get("work_item_id")), None)
     packet_id = next((m.get("packet_id") for m in msgs if m.get("packet_id")), None)
@@ -921,11 +937,15 @@ def build_active_run(root, thread_id=None):
 def _run_status(msgs):
     """Derive a run's status from its messages: responded when a final
     outbound/responded message exists, claimed when a claim was recorded,
-    otherwise open."""
+    chat when every inbound message is plain conversation (intent "chat",
+    nothing awaiting action), otherwise open."""
     if any(m.get("direction") == "outbound" or m.get("status") == "responded" for m in msgs):
         return "responded"
     if any(m.get("status") == "claimed" for m in msgs):
         return "claimed"
+    inbound = [m for m in msgs if m.get("direction") == "inbound"]
+    if inbound and all(m.get("intent") == "chat" for m in inbound):
+        return "chat"
     return "open"
 
 

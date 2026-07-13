@@ -467,10 +467,12 @@ async function refreshMessages() {
   }
 }
 
-// Operator chat: the operator types a request in the console and it becomes a
-// real inbound message (OPERATOR-0001, role operator, source operator-ui). No
-// fake agent reply is ever generated; real workers pick it up as a work item
-// and respond through the work-item loop.
+// Operator chat: the compact quick box posts a real inbound message
+// (OPERATOR-0001, role operator, source operator-ui) as normal chat (intent
+// "chat"): durable conversation, never a work item and never an Attention
+// flag. No fake agent reply is ever generated. Actionable requests are created
+// in the Conversation Workspace (Ask agent / Create work item) or over the
+// CLI/HTTP worker surface, where messages stay actionable by default.
 async function submitOperatorChat(ev) {
   ev.preventDefault();
   const input = document.getElementById("operator-chat-input");
@@ -479,7 +481,7 @@ async function submitOperatorChat(ev) {
   input.value = "";
   await postJSON("/api/messages", {
     actor: "OPERATOR-0001", role: "operator", source: "operator-ui",
-    direction: "inbound", simulated: false, message: text,
+    direction: "inbound", simulated: false, message: text, intent: "chat",
   });
   refreshMessages();
   refreshWorkItems();
@@ -911,16 +913,32 @@ async function loadConversations() {
   }
 }
 
+// Composer modes keep chat and work separate: Message is normal chat (intent
+// "chat", never a work item), Ask agent and Create work item are actionable
+// (intent "request", derived as open work), and Request clearance opens the
+// escalation modal to file an RTA through the existing intake.
 async function submitConvComposer(ev) {
   ev.preventDefault();
   const input = document.getElementById("conv-input");
   const text = input.value.trim();
+  const mode = document.getElementById("conv-mode").value || "chat";
+  if (mode === "clearance") {
+    openEscalate();
+    if (text) {
+      document.getElementById("esc-action").value = text;
+      const titleEl = document.getElementById("esc-title");
+      if (!titleEl.value.trim()) titleEl.value = text.slice(0, 140);
+    }
+    input.value = "";
+    return;
+  }
   if (!text) return;
   const prefix = document.getElementById("conv-target").value || "";
   input.value = "";
   const body = {
     actor: "OPERATOR-0001", role: "operator", source: "operator-ui",
     direction: "inbound", simulated: false, message: prefix + text,
+    intent: mode === "chat" ? "chat" : "request",
   };
   if (selectedConvThread) body.thread_id = selectedConvThread;
   const res = await postJSON("/api/messages", body);

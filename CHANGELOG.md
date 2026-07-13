@@ -5,6 +5,19 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Chat/work separation. Plain conversation no longer becomes actionable work.
+  Messages may carry an optional `intent`: `chat` is normal durable conversation
+  that never derives a work item and never raises an Attention state, and
+  `request` is an actionable ask. When `intent` is omitted a message stays
+  actionable, so every existing tool, relay, and script is unchanged. Work-item
+  derivation now skips `chat` threads (a chat thread becomes work only when an
+  actionable follow-up is posted into it); runs and conversations gain a `chat`
+  status; the default Active Run selection skips chat-only threads (they remain
+  explicitly selectable); and a chat message no longer turns the health chip
+  yellow. The console composer gains a mode selector defaulting to Message
+  (chat), with Ask agent / Create work item (actionable) and Request clearance
+  (RTA); the compact operator quick box now posts normal chat. No schema or
+  validator change, no new dependency, no model API.
 - Conversation Workspace. New "Conversations" view makes ClearWright
   conversation-first: a thread list with status/Codex/count badges, a readable
   message timeline, and a prominent composer ("Send Agents a Message") that

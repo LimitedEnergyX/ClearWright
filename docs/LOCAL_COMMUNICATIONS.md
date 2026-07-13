@@ -25,6 +25,9 @@ Each message carries:
 - `actor`, `role`
 - `direction`: `inbound`, `outbound`, or `internal`
 - `status`: `posted`, `read`, or `responded`
+- `intent` (optional): `chat` is plain conversation that never becomes a work
+  item; `request` is an actionable ask. Omitted means actionable, so every
+  existing caller keeps its behavior unchanged.
 - `at` (UTC timestamp), `source` (for example `local-adapter`, `local-http`)
 - `simulated`: `false` for real communication
 
@@ -119,9 +122,20 @@ send one from the CLI or local HTTP. ClearWright then surfaces **work items**
 that agents, tools, and scripts can pick up and act on, over
 `tools/clearwright_work.py` or the `/api/work-items` endpoints, without a browser.
 
+**Chat is not work.** A plain conversation message (intent `chat`) is durable
+and appears in Conversations and History, but it never derives a work item and
+never raises an Attention state. Only actionable messages become work: an
+inbound message with intent `request` (or no intent, the actionable default). A
+chat thread becomes work the moment an actionable follow-up is posted into it.
+This keeps the console quiet during normal dialogue and reserves work items,
+the pulse, and the health chip for things that genuinely need action. The
+console composer defaults to Message (chat); Ask agent and Create work item post
+actionable requests; Request clearance files an RTA.
+
 Work items are **derived** from existing durable state, not a separate database:
 
-- an inbound message thread with no response -> `kind: message`
+- an inbound *actionable* message thread with no response -> `kind: message`
+  (a message with intent `chat` is plain conversation, never a work item)
 - a CTA packet in `clearance_outbox` -> `kind: packet` (claimable)
 - an `IN_PROGRESS` packet -> `kind: in_progress` (needs an update)
 - an `RFI_PENDING` packet -> `kind: rfi` (needs clarification)

@@ -19,6 +19,12 @@ a status (posted/read/responded), a timestamp, a source, and a simulated flag
 (false for real local messages). Every message is real by default; simulated
 demo conversation lives only in demo mode.
 
+A message may also carry an optional intent: "chat" marks plain conversation
+that needs no action, and "request" marks an actionable request. Chat is not
+work: an inbound message with intent "chat" never derives a work item. When
+intent is absent the message stays actionable, so existing worker tools,
+relays, and scripts keep their behavior without any change.
+
 The control plane server imports build_message, write_message, and read_messages
 for its /api/messages endpoints, so the CLI and the API share one implementation.
 
@@ -37,6 +43,7 @@ DEFAULT_DIRECTION = "inbound"
 DEFAULT_STATUS = "posted"
 DIRECTIONS = ("inbound", "outbound", "internal")
 STATUSES = ("posted", "read", "claimed", "responded")
+INTENTS = ("chat", "request")
 
 
 _last_dt = None
@@ -66,11 +73,12 @@ def _stamp():
 def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
                   thread_id=None, direction=DEFAULT_DIRECTION,
                   status=DEFAULT_STATUS, source=DEFAULT_SOURCE, simulated=False,
-                  work_item_id=None):
+                  work_item_id=None, intent=None):
     """Return a new message dict. Raises ValueError if actor or message is
-    missing/empty, or if direction/status is not one of the allowed values.
-    A new thread_id is generated when one is not supplied. Only a non-empty
-    packet_id and work_item_id are included."""
+    missing/empty, or if direction/status/intent is not one of the allowed
+    values. A new thread_id is generated when one is not supplied. Only a
+    non-empty packet_id, work_item_id, and intent are included. intent "chat"
+    marks plain conversation (never a work item); absent means actionable."""
     if not actor or not str(actor).strip():
         raise ValueError("actor is required and must be non-empty")
     if not message or not str(message).strip():
@@ -81,6 +89,9 @@ def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
     status = (str(status).strip() or DEFAULT_STATUS) if status else DEFAULT_STATUS
     if status not in STATUSES:
         raise ValueError("status must be one of: {}".format(", ".join(STATUSES)))
+    intent = str(intent).strip() if intent and str(intent).strip() else None
+    if intent is not None and intent not in INTENTS:
+        raise ValueError("intent must be one of: {}".format(", ".join(INTENTS)))
     stamp = _stamp()
     thread = str(thread_id).strip() if thread_id and str(thread_id).strip() else "thr-" + stamp
     msg = {
@@ -99,6 +110,8 @@ def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
         msg["packet_id"] = str(packet_id).strip()
     if work_item_id and str(work_item_id).strip():
         msg["work_item_id"] = str(work_item_id).strip()
+    if intent is not None:
+        msg["intent"] = intent
     return msg
 
 
@@ -168,7 +181,7 @@ def _record(args, respond):
         message = build_message(
             args.actor, args.message, role=args.role, packet_id=args.packet_id,
             thread_id=thread_id, direction=direction, status=status,
-            source=args.source, simulated=args.simulated,
+            source=args.source, simulated=args.simulated, intent=args.intent,
         )
     except ValueError as exc:
         print("REFUSED: {}".format(exc), file=sys.stderr)
@@ -231,6 +244,10 @@ def _add_write_args(sub, thread_required):
                      help="Message status (default: posted for post, responded for respond).")
     sub.add_argument("--source", default=DEFAULT_SOURCE, metavar="NAME",
                      help="Optional source label (default: {}).".format(DEFAULT_SOURCE))
+    sub.add_argument("--intent", default=None, choices=INTENTS,
+                     help=("Optional intent: chat is plain conversation (never "
+                           "a work item); request is actionable. Omitted means "
+                           "actionable, so existing callers are unchanged."))
     sub.add_argument("--simulated", action="store_true",
                      help="Mark this message as simulated/demo, not real communication.")
     sub.add_argument("--dry-run", action="store_true",

@@ -1157,7 +1157,9 @@ class Handler(BaseHTTPRequestHandler):
             thread_id = urllib.parse.unquote(params.get("thread_id", "")) or None
             self._send_json(build_active_run(QUEUE_ROOT, thread_id=thread_id))
             return
-        if path == "/api/runs":
+        if path in ("/api/runs", "/api/conversations"):
+            # Conversations are the same derived durable-thread summaries as
+            # runs, presented conversation-first. One derivation, no new store.
             import urllib.parse
             query = self.path.split("?", 1)[1] if "?" in self.path else ""
             params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
@@ -1169,9 +1171,11 @@ class Handler(BaseHTTPRequestHandler):
             has_codex = None
             if has_codex_raw is not None:
                 has_codex = has_codex_raw.lower() in ("1", "true", "yes")
-            self._send_json({"runs": build_runs(
+            rows = build_runs(
                 QUEUE_ROOT, limit=limit, status=q("status"), actor=q("actor"),
-                source=q("source"), has_codex=has_codex, packet_id=q("packet_id"))})
+                source=q("source"), has_codex=has_codex, packet_id=q("packet_id"))
+            key = "conversations" if path == "/api/conversations" else "runs"
+            self._send_json({key: rows})
             return
         if path == "/api/history":
             import urllib.parse

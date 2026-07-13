@@ -5,6 +5,23 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Conversation Workspace. New "Conversations" view makes ClearWright
+  conversation-first: a thread list with status/Codex/count badges, a readable
+  message timeline, and a prominent composer ("Send Agents a Message") that
+  continues the selected thread or starts a new one, posting real inbound
+  `OPERATOR-0001` messages. A target selector (All / Claude / Codex / Operator
+  note) adds a plain intent label to the message text and never claims a model
+  participated - replies appear only when a worker actually posts back through
+  the local adapter. Small escalation actions: Mark reviewed (durable
+  acknowledge note), Create work item (real follow-up request), and Request
+  clearance packet (RTA via the existing request intake) - normal chat needs no
+  packet; packets remain the authority layer for governed changes. New read-only
+  `GET /api/conversations` returns the same derived thread summaries as
+  `/api/runs` (same filters), and thread retrieval reuses
+  `/api/active-run?thread_id=`. Local communications stays as a compact recent
+  feed; Active Run, Run Registry, History, Health, Durable Record, and the pulse
+  inspector are unchanged. No schema or validator change, no new dependency, no
+  Discord, no model API.
 - Archive-aware durable record and pulse inspector. Terminal packets
   (DONE/DTA/SUPERSEDED) older than a 24-hour recent-terminal window are flagged
   `archived` in `/api/state` and collapsed in the console behind a compact

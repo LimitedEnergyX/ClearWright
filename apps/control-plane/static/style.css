@@ -667,6 +667,11 @@ body.conv-open .console-grid, body.conv-open .mission { display: none !important
 .conv-entry-reconcile .conv-entry-tag { color: var(--blue-soft); }
 .conv-entry-unavailable { border-left: 3px solid var(--pending); opacity: 0.85; }
 .conv-entry-unavailable .conv-entry-tag { color: var(--pending); }
+.conv-entry-summary { border-left: 3px solid var(--ok); background: var(--panel-2); }
+.conv-entry-summary .conv-entry-tag { color: var(--ok); }
+.conv-entry-summary .conv-msg-body { white-space: pre-wrap; font-size: 0.74rem; }
+.conv-entry-closure { border-left: 3px solid var(--pending); }
+.conv-entry-closure .conv-entry-tag { color: var(--pending); }
 .run-count { font-size: 0.62rem; color: var(--gray); }
 .run-last { font-size: 0.62rem; color: var(--gray); margin-left: auto; font-family: ui-monospace, monospace; }
 body.run-open .console-grid, body.run-open .mission { display: none !important; }

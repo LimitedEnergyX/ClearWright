@@ -65,7 +65,13 @@ RECON_REQUIRED_FIELDS = RECON_LIST_FIELDS + ("ready_to_proceed", "summary")
 # Per-item resolution dispositions. A resolution binds one specific final-round
 # reviewer finding (by its ref, e.g. "gpt.required_changes[0]") to a disposition,
 # so agreement cannot be reached by an unrelated or duplicated disposition count.
-RESOLUTION_DISPOSITIONS = ("accepted", "planned", "rejected")
+#
+# blocked_by_capability means "the reviewer is RIGHT and the harness cannot
+# satisfy the requirement". It is a first-class disposition for the per-item
+# accounting, but it NEVER counts as resolved: any occurrence forces
+# operator_required immediately, can never coexist with ready_to_proceed=true,
+# and can never contribute to agreement_threshold_met.
+RESOLUTION_DISPOSITIONS = ("accepted", "planned", "rejected", "blocked_by_capability")
 
 MIN_SUMMARY_CHARS = 8
 
@@ -239,8 +245,24 @@ def validate_reconciliation(obj):
         evidence = _as_list(entry.get("evidence"), "evidence")
         if disp == "rejected" and not [e for e in evidence if str(e).strip()]:
             raise VerdictError("a rejected resolution requires non-empty 'evidence'")
+        if disp == "blocked_by_capability":
+            limitation = str(entry.get("limitation") or entry.get("note") or "").strip()
+            if not limitation:
+                raise VerdictError("a blocked_by_capability resolution requires a "
+                                   "'limitation' statement naming the capability gap")
+            if not [e for e in evidence if str(e).strip()]:
+                raise VerdictError("a blocked_by_capability resolution requires "
+                                   "non-empty 'evidence'")
         resolutions.append({"ref": ref, "disposition": disp,
                             "note": str(entry.get("note") or "").strip(),
+                            "limitation": str(entry.get("limitation") or "").strip(),
                             "evidence": evidence})
     normalized["resolutions"] = resolutions
+
+    # Impossibility can never be waved through: a reconciliation that declares
+    # ready_to_proceed while carrying a capability block is invalid on its face.
+    if normalized["ready_to_proceed"] and any(
+            r["disposition"] == "blocked_by_capability" for r in resolutions):
+        raise VerdictError("ready_to_proceed cannot be true while a resolution is "
+                           "blocked_by_capability")
     return normalized

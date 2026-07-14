@@ -269,17 +269,23 @@ def cmd_start(args):
     thread_id = res["thread_id"]
     message_id = res["message"]["message_id"]
 
-    envelope_sha = None
-    if envelope is not None:
-        blob = json.dumps(envelope, sort_keys=True).encode("utf-8")
-        envelope_sha = __import__("hashlib").sha256(blob).hexdigest()
-        _persist_envelope(args.queue_root, message_id, envelope, {
-            "classification": kind, "classification_method": method,
-            "classification_conflict": conflict, "conflict_detail": conflict_detail,
-            "verification_required": verification_required,
-            "verification_required_source": vr_source,
-            "envelope_sha256": envelope_sha, "received_at": cwm._now_iso(),
-            "thread_id": thread_id, "message_id": message_id})
+    # The envelope record is persisted for BOTH paths: verification_required is
+    # recorded at start, so its absence can never silently bypass the completion
+    # gate later. Lexical starts persist a minimal record marked as such.
+    record = envelope if envelope is not None else {
+        "envelope_version": 0, "task_kind": kind, "request": text,
+        "approved_scope": approved_scope or "", "intended_actions": [],
+        "excluded_actions": [],
+        "operator_authority_source": "lexical-fallback (no envelope provided)"}
+    blob = json.dumps(record, sort_keys=True).encode("utf-8")
+    envelope_sha = __import__("hashlib").sha256(blob).hexdigest()
+    _persist_envelope(args.queue_root, message_id, record, {
+        "classification": kind, "classification_method": method,
+        "classification_conflict": conflict, "conflict_detail": conflict_detail,
+        "verification_required": verification_required,
+        "verification_required_source": vr_source,
+        "envelope_sha256": envelope_sha, "received_at": cwm._now_iso(),
+        "thread_id": thread_id, "message_id": message_id})
 
     out = {"ok": not conflict, "command": "start", "kind": kind,
            "classification_method": method, "classification_conflict": conflict,
@@ -367,6 +373,7 @@ def _council(args, phase):
         outcome = cwrc.evaluate(cwrc.load_council(root, council["council_id"]),
                                 cwrc.load_rounds(root, council["council_id"]))
         cwrc.save_outcome(root, council["council_id"], outcome)
+        _maybe_post_council_summary(root, council, outcome)
         return _emit(_council_result(outcome), OUTCOME_EXIT.get(outcome["outcome"], EXIT_RUNTIME), args.json)
 
     # stage == review
@@ -413,10 +420,24 @@ def _council(args, phase):
         return _emit({"ok": False, "error": "provide --plan-file/--context-file or --prompt"},
                      EXIT_USAGE, args.json)
 
+    artifact_ids = list(getattr(args, "artifact_id", None) or [])
+    for path in (getattr(args, "artifact", None) or []):
+        import clearwright_artifacts as cwa
+        try:
+            artifact_ids.append(cwa.register(root, path)["artifact_id"])
+        except cwa.ArtifactError as exc:
+            return _emit({"ok": False, "error": str(exc)}, EXIT_USAGE, args.json)
+
     report = cwrc.run_round(root, council, context, model=args.model, repo=args.repo,
-                            timeout=args.timeout)
+                            timeout=args.timeout, artifact_ids=artifact_ids)
     council = cwrc.load_council(root, council["council_id"])
 
+    if report.get("artifact_error"):
+        return _emit({"ok": False, "command": "council",
+                      "council_id": council["council_id"], "phase": council.get("phase"),
+                      "outcome": "hard_gate", "hard_gate": True,
+                      "error_class": "artifact_verification_failed",
+                      "reason": report.get("reason")}, EXIT_HARD_GATE, args.json)
     if report.get("packet_undeliverable"):
         return _emit({"ok": False, "command": "council",
                       "council_id": council["council_id"], "phase": council.get("phase"),
@@ -439,8 +460,21 @@ def _council(args, phase):
 
     outcome = cwrc.evaluate(council, cwrc.load_rounds(root, council["council_id"]))
     outcome["attempts"] = report.get("attempts")
+    outcome["packet"] = {"gpt_delivery": report.get("gpt_delivery"),
+                         "estimated_input_tokens": report.get("estimated_input_tokens")}
     cwrc.save_outcome(root, council["council_id"], outcome)
+    _maybe_post_council_summary(root, council, outcome)
     return _emit(_council_result(outcome), OUTCOME_EXIT.get(outcome["outcome"], EXIT_RUNTIME), args.json)
+
+
+def _maybe_post_council_summary(root, council, outcome):
+    """Harness-generated canonical summary at council terminal outcomes."""
+    wid = council.get("work_item_id")
+    if wid and outcome.get("outcome") in ("agreement_threshold_met", "operator_required"):
+        summary = build_canonical_summary(root, wid, outcome["outcome"])
+        persist_and_post_summary(root, wid, summary)
+        return True
+    return False
 
 
 def _council_result(outcome):
@@ -480,9 +514,204 @@ def cmd_progress(args):
                  EXIT_OK, args.json)
 
 
+def _envelope_audit(root, work_item_id):
+    """The persisted envelope audit record for a work item, or None."""
+    if not work_item_id or ":" not in work_item_id:
+        return None
+    mid = work_item_id.split(":", 1)[1]
+    path = os.path.join(root, "task_envelopes", mid + ".json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return (json.load(fh) or {}).get("_audit")
+    except (OSError, ValueError):
+        return None
+
+
+def _verify_councils(root, work_item_id):
+    """Verify-phase councils bound to this work item, newest first."""
+    return [c for c in cwrc.list_councils(root)
+            if c.get("work_item_id") == work_item_id and c.get("phase") == "verify"]
+
+
+def _verification_state(root, work_item_id):
+    """(verification_required, latest_verify_council_summary_or_None)."""
+    audit = _envelope_audit(root, work_item_id) or {}
+    required = bool(audit.get("verification_required", False))
+    councils = _verify_councils(root, work_item_id)
+    return required, (councils[0] if councils else None)
+
+
+# Deterministic outcome -> (one-line status, recommended next action). The
+# harness authors these; the skill presents them and never invents its own.
+OUTCOME_LINES = {
+    "done": ("Completed with governed verification satisfied",
+             "None; work item is DONE"),
+    "done_unverified_not_required": ("Completed; verification was not required",
+                                     "None; work item is DONE"),
+    "verification_incomplete": ("Verification incomplete; DONE refused",
+                                "Run/finish the verification council, or the operator may close explicitly"),
+    "closed_by_operator": ("Closed by operator with verification incomplete.",
+                           "None; operator decision recorded"),
+    "agreement_threshold_met": ("Council agreement threshold met",
+                                "Proceed within the approved scope"),
+    "operator_required": ("Council escalated to the operator",
+                          "Operator decision needed on the recorded blockers"),
+    "reviewer_unavailable": ("Reviewer unavailable; attempt budget exhausted",
+                             "Fix the failure cause, then a new council or an operator recovery grant"),
+    "hard_gate": ("Hard gate; nothing dispatched",
+                  "Resolve the gate per the recorded reason"),
+    "needs_revision": ("Council needs another revision round",
+                       "Reconcile findings and run the next round"),
+}
+
+
+def build_canonical_summary(root, work_item_id, status, extra=None):
+    """The harness-generated canonical summary (the skill reads this; it never
+    authors governance status). Derived only from durable records: councils
+    bound to the work item, the envelope audit, and the invocation log."""
+    councils = [c for c in cwrc.list_councils(root)
+                if c.get("work_item_id") == work_item_id]
+    by_phase = {}
+    for c in councils:
+        by_phase.setdefault(c.get("phase"), []).append(c)
+    plan_c = (by_phase.get("plan") or [None])[0]
+    verify_c = (by_phase.get("verify") or [None])[0]
+    audit = _envelope_audit(root, work_item_id) or {}
+
+    material = 0
+    unresolved = []
+    capability_blocked = []
+    target = verify_c or plan_c
+    if target:
+        full = cwrc.get_council(root, target["council_id"])
+        rounds = [r for r in (full or {}).get("rounds", []) if r.get("substantive", True)]
+        if rounds:
+            gv = (rounds[-1].get("gpt") or {}).get("verdict") or {}
+            cv = (rounds[-1].get("codex") or {}).get("verdict") or {}
+            material = len(cwrc.required_item_refs(gv, cv))
+        outcome = (full or {}).get("outcome") or {}
+        unresolved = outcome.get("unresolved_blockers", []) or []
+        capability_blocked = outcome.get("capability_blocked_refs", []) or []
+
+    usage = {"invocations": 0, "dispatch_attempts": 0, "transport_retries": 0,
+             "validation_failures": 0, "gpt_input_tokens_actual": 0,
+             "gpt_output_tokens_actual": 0, "estimated_tokens_logged": 0}
+    council_ids = {c["council_id"] for c in councils}
+    try:
+        with open(os.path.join(root, "invocation_log.jsonl"), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("work_item_id") != work_item_id and \
+                        rec.get("council_id") not in council_ids:
+                    continue
+                usage["invocations"] += 1
+                if rec.get("command") == "council-dispatch":
+                    usage["dispatch_attempts"] += 1
+                    if (rec.get("attempt") or 1) > 1:
+                        usage["transport_retries"] += 1
+                if rec.get("error_class") == "validation_error":
+                    usage["validation_failures"] += 1
+                usage["gpt_input_tokens_actual"] += rec.get("actual_input_tokens") or 0
+                usage["gpt_output_tokens_actual"] += rec.get("actual_output_tokens") or 0
+                usage["estimated_tokens_logged"] += rec.get("estimated_input_tokens") or 0
+    except OSError:
+        pass
+
+    line, action = OUTCOME_LINES.get(status, (status, "See records"))
+    summary = {
+        "summary_version": 1, "generated_by": "harness",
+        "generated_at": cwm._now_iso(),
+        "work_item_id": work_item_id,
+        "status": status,
+        "outcome_line": line,
+        "verification_required": bool(audit.get("verification_required", False)),
+        "plan_council": plan_c and {"council_id": plan_c["council_id"],
+                                    "outcome": plan_c.get("outcome"),
+                                    "rounds": plan_c.get("current_round")},
+        "verify_council": verify_c and {"council_id": verify_c["council_id"],
+                                        "outcome": verify_c.get("outcome"),
+                                        "rounds": verify_c.get("current_round")},
+        "material_findings": material,
+        "unresolved_blockers": unresolved[:6],
+        "capability_blocked_refs": capability_blocked,
+        "recommended_next_action": action,
+        "usage": usage,
+    }
+    if extra:
+        summary.update(extra)
+    return summary
+
+
+def _summary_text(summary):
+    lines = ["CW canonical summary",
+             "Outcome: " + str(summary.get("outcome_line"))]
+    for label, key in (("Plan council", "plan_council"),
+                       ("Verification", "verify_council")):
+        c = summary.get(key)
+        if c:
+            lines.append("{}: {} ({} round(s), {})".format(
+                label, c.get("outcome") or "in progress", c.get("rounds"),
+                c.get("council_id")))
+    lines.append("Material findings: {}".format(summary.get("material_findings")))
+    if summary.get("unresolved_blockers"):
+        lines.append("Unresolved: " + "; ".join(
+            str(b)[:120] for b in summary["unresolved_blockers"][:3]))
+    if summary.get("closure"):
+        cm = summary["closure"]
+        lines.append("Closure: {} by {} ({})".format(
+            summary.get("status"), cm.get("operator"), cm.get("reason", "")[:120]))
+    lines.append("Recommended next action: " + str(summary.get("recommended_next_action")))
+    u = summary.get("usage") or {}
+    lines.append("Usage: {} invocation(s), {} dispatch attempt(s), {} retry(ies), "
+                 "GPT tokens in/out {}/{} (actual where reported)".format(
+                     u.get("invocations"), u.get("dispatch_attempts"),
+                     u.get("transport_retries"), u.get("gpt_input_tokens_actual"),
+                     u.get("gpt_output_tokens_actual")))
+    return "\n".join(lines)
+
+
+def persist_and_post_summary(root, work_item_id, summary):
+    """Write summaries/<message_id>.json and post the durable CW summary
+    message. Returns the summary. Never raises into the caller's path."""
+    try:
+        mid = work_item_id.split(":", 1)[1] if ":" in work_item_id else work_item_id
+        directory = os.path.join(root, "summaries")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, mid + ".json")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+        thread_id, packet_id = cww._resolve_target(root, work_item_id)
+        msg = cwm.build_message("claude", _summary_text(summary), role="orchestrator",
+                                packet_id=packet_id, thread_id=thread_id,
+                                direction="internal", status="posted",
+                                source="use-cw-summary", work_item_id=work_item_id)
+        cwm.write_message(root, msg)
+    except (OSError, ValueError):
+        pass
+    return summary
+
+
+def load_summary(root, work_item_id):
+    mid = work_item_id.split(":", 1)[1] if ":" in work_item_id else work_item_id
+    try:
+        with open(os.path.join(root, "summaries", mid + ".json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def cmd_complete(args):
-    """Record completion: post the final response and mark the work item done.
-    A governed work item whose clearance packet is not in clearance_done is a
+    """Record completion. DONE is permitted only when verification is not
+    required, or the required verification council passed. An unpassed bound
+    verify council — or required verification that was never run — refuses DONE
+    (exit 3, verification_incomplete) and posts the canonical summary. A
+    governed work item whose clearance packet is not in clearance_done is a
     required-authority stop (exit 6)."""
     result_text = _load(args.result, args.result_file).strip()
     if not result_text:
@@ -494,14 +723,149 @@ def cmd_complete(args):
                           "error": "required_authority_not_granted",
                           "detail": "governed change packet {!r} is not in clearance_done".format(args.packet_id)},
                          EXIT_AUTHORITY, args.json)
+
+    required, verify_c = _verification_state(args.queue_root, args.work_item_id)
+    verify_passed = bool(verify_c and verify_c.get("outcome") == "agreement_threshold_met")
+    if (verify_c and not verify_passed) or (required and not verify_c):
+        detail = ("the bound verification council has not reached agreement"
+                  if verify_c else
+                  "verification is required for this work item and no "
+                  "verification council was run — absence never bypasses it")
+        summary = build_canonical_summary(
+            args.queue_root, args.work_item_id, "verification_incomplete",
+            extra={"verify_refusal_detail": detail})
+        persist_and_post_summary(args.queue_root, args.work_item_id, summary)
+        return _emit({"ok": False, "command": "complete",
+                      "status": "verification_incomplete",
+                      "verify_council_id": verify_c and verify_c.get("council_id"),
+                      "verify_outcome": verify_c and verify_c.get("outcome"),
+                      "verification_required": required,
+                      "detail": detail, "summary_posted": True},
+                     EXIT_OPERATOR, args.json)
+
     res = cww.respond_work_item(args.queue_root, args.work_item_id, "claude", result_text,
                                 role="orchestrator", source="use-cw")
     if not res.get("ok"):
         code = EXIT_USAGE if res.get("error") == "work_item_not_found" else EXIT_RUNTIME
         return _emit({"ok": False, "error": res.get("error")}, code, args.json)
+    summary = build_canonical_summary(args.queue_root, args.work_item_id,
+                                      "done" if verify_c else "done_unverified_not_required")
+    persist_and_post_summary(args.queue_root, args.work_item_id, summary)
     return _emit({"ok": True, "command": "complete", "work_item_id": args.work_item_id,
                   "thread_id": res["thread_id"], "message_id": res["message"]["message_id"],
-                  "status": "done"}, EXIT_OK, args.json)
+                  "status": "done", "verification_required": required,
+                  "summary_posted": True}, EXIT_OK, args.json)
+
+
+def cmd_close(args):
+    """CLOSED_BY_OPERATOR: the human closes a work item whose verification did
+    not pass, WITHOUT presenting it as governed completion. Requires a
+    CLOSURE-SPECIFIC authority record: an inbound operator-authored message,
+    created after the failed verification outcome, that names this work item or
+    its verify council and explicitly authorizes closing. The skill and the
+    harness never invoke this autonomously; the underlying council outcome is
+    not changed."""
+    required, verify_c = _verification_state(args.queue_root, args.work_item_id)
+    if not verify_c and not required:
+        return _emit({"ok": False, "error": "nothing to close by operator here: "
+                      "verification is not required and no verify council exists; "
+                      "use complete"}, EXIT_USAGE, args.json)
+    if verify_c and verify_c.get("outcome") == "agreement_threshold_met":
+        return _emit({"ok": False, "error": "the verification council passed; "
+                      "use complete, not close"}, EXIT_USAGE, args.json)
+
+    match = [m for m in cwm.read_messages(args.queue_root)
+             if m.get("message_id") == args.operator_message_id]
+    if not match:
+        return _emit({"ok": False, "error": "operator authority message not found"},
+                     EXIT_USAGE, args.json)
+    auth = match[0]
+    if auth.get("direction") != "inbound" or (auth.get("role") or "").lower() != "operator":
+        return _emit({"ok": False, "error": "authority record is not an inbound "
+                      "operator-authored message"}, EXIT_USAGE, args.json)
+    body = (auth.get("message") or "").lower()
+    names_target = (args.work_item_id.lower() in body or
+                    (verify_c and verify_c["council_id"].lower() in body))
+    if not names_target:
+        return _emit({"ok": False, "error": "authority record does not identify "
+                      "this work item or its verification council; the original "
+                      "task approval is not sufficient to close"}, EXIT_USAGE, args.json)
+    if "close" not in body and "accept" not in body:
+        return _emit({"ok": False, "error": "authority record does not explicitly "
+                      "authorize closing with verification incomplete"}, EXIT_USAGE, args.json)
+    outcome_at = None
+    if verify_c:
+        full = cwrc.get_council(args.queue_root, verify_c["council_id"]) or {}
+        outcome_at = (full.get("outcome") or {}).get("generated_at") or \
+            (full.get("council") or {}).get("created_at")
+    if outcome_at and (auth.get("at") or "") <= outcome_at:
+        return _emit({"ok": False, "error": "authority record predates the "
+                      "incomplete verification outcome; closure authorization "
+                      "must be issued after the failure"}, EXIT_USAGE, args.json)
+
+    closure_meta = {"operator": args.operator or auth.get("actor"),
+                    "operator_message_id": args.operator_message_id,
+                    "reason": args.reason,
+                    "verify_council_id": verify_c and verify_c.get("council_id"),
+                    "underlying_outcome": verify_c and verify_c.get("outcome"),
+                    "at": cwm._now_iso()}
+    thread_id, packet_id = cww._resolve_target(args.queue_root, args.work_item_id)
+    try:
+        msg = cwm.build_message(
+            closure_meta["operator"] or "OPERATOR-0001",
+            "Closed by operator with verification incomplete. Reason: " + args.reason,
+            role="operator", packet_id=packet_id, thread_id=thread_id,
+            direction="outbound", status="responded", source="use-cw",
+            work_item_id=args.work_item_id, closure="closed_by_operator",
+            closure_meta=closure_meta)
+        cwm.write_message(args.queue_root, msg)
+    except (ValueError, OSError) as exc:
+        return _emit({"ok": False, "error": str(exc)}, EXIT_RUNTIME, args.json)
+
+    summary = build_canonical_summary(
+        args.queue_root, args.work_item_id, "closed_by_operator",
+        extra={"closure": closure_meta,
+               "outcome": "accepted_with_verification_incomplete"})
+    persist_and_post_summary(args.queue_root, args.work_item_id, summary)
+    return _emit({"ok": True, "command": "close", "status": "closed_by_operator",
+                  "outcome": "accepted_with_verification_incomplete",
+                  "underlying_outcome": closure_meta["underlying_outcome"],
+                  "verify_council_id": closure_meta["verify_council_id"],
+                  "operator": closure_meta["operator"],
+                  "operator_message_id": args.operator_message_id,
+                  "reason": args.reason, "at": closure_meta["at"],
+                  "summary_posted": True}, EXIT_OK, args.json)
+
+
+def cmd_retrospective(args):
+    """Read-only usage/failure report over the invocation log and council
+    records — what failed, what retried, which limits were hit."""
+    wid = args.work_item_id
+    summary = build_canonical_summary(args.queue_root, wid, "in_progress") \
+        if wid else None
+    if not wid:
+        return _emit({"ok": False, "error": "--work-item-id is required"},
+                     EXIT_USAGE, args.json)
+    limits = []
+    try:
+        with open(os.path.join(args.queue_root, "invocation_log.jsonl"),
+                  encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("work_item_id") == wid and rec.get("error_class"):
+                    limits.append({"at": rec.get("at"), "command": rec.get("command"),
+                                   "reviewer": rec.get("reviewer"),
+                                   "error_class": rec.get("error_class")})
+    except OSError:
+        pass
+    return _emit({"ok": True, "command": "retrospective", "work_item_id": wid,
+                  "usage": summary["usage"], "failures": limits[:50],
+                  "councils": {"plan": summary.get("plan_council"),
+                               "verify": summary.get("verify_council")}},
+                 EXIT_OK, args.json)
 
 
 def _preflight_checks(root, implicit=False, key_resolver=None, codex_which=None):
@@ -657,6 +1021,13 @@ def cmd_schema(args):
 
 def cmd_status(args):
     root = args.queue_root
+    if getattr(args, "summary", None):
+        summary = load_summary(root, args.summary)
+        if not summary:
+            return _emit({"ok": False, "error": "no canonical summary recorded for "
+                          "{!r} yet".format(args.summary)}, EXIT_USAGE, args.json)
+        return _emit({"ok": True, "command": "status", "summary": summary},
+                     EXIT_OK, args.json)
     if args.council_id:
         full = cwrc.get_council(root, args.council_id)
         if not full:
@@ -695,10 +1066,18 @@ def _add_council_args(p):
     p.add_argument("--max-rounds", type=int, default=cwrc.DEFAULT_MAX_ROUNDS,
                    help="Substantive-round ceiling (bounds: 2 <= min <= max <= 5).")
     p.add_argument("--grant-attempts", default=None, choices=["gpt", "codex", "both"],
-                   help="Operator-authorized recovery: reset the attempt budget "
-                        "for the current round. Requires --operator-message-id.")
+                   help="Operator-authorized recovery: grant additional attempts. "
+                        "Requires --operator-message-id (retry-specific: names this "
+                        "council and reviewer, created after exhaustion).")
     p.add_argument("--operator-message-id", default=None, metavar="ID",
                    help="Durable inbound operator message authorizing the grant.")
+    p.add_argument("--grant-count", type=int, default=1, metavar="N",
+                   help="Additional attempts granted (default 1; never affects "
+                        "the substantive round ceiling).")
+    p.add_argument("--artifact", action="append", default=None, metavar="PATH",
+                   help="Register and pin an artifact for this council (repeatable).")
+    p.add_argument("--artifact-id", action="append", default=None, metavar="ID",
+                   help="Reference an already-registered artifact (repeatable).")
     p.add_argument("--timeout", type=int, default=90, metavar="SECONDS")
 
 
@@ -771,10 +1150,33 @@ def build_parser():
     p_done.add_argument("--json", action="store_true")
     p_done.set_defaults(func=cmd_complete)
 
+    p_close = subs.add_parser("close", help="OPERATOR-ONLY: close a work item with "
+                              "verification incomplete (never DONE; requires a "
+                              "closure-specific authority record).")
+    p_close.add_argument("queue_root")
+    p_close.add_argument("--work-item-id", required=True, metavar="ID")
+    p_close.add_argument("--operator", required=True, metavar="NAME")
+    p_close.add_argument("--reason", required=True, metavar="TEXT")
+    p_close.add_argument("--operator-message-id", required=True, metavar="ID",
+                         help="Durable inbound operator message that names this "
+                              "work item / verify council and explicitly "
+                              "authorizes closing, created after the failure.")
+    p_close.add_argument("--json", action="store_true")
+    p_close.set_defaults(func=cmd_close)
+
+    p_retro = subs.add_parser("retrospective", help="Read-only usage/failure report "
+                              "for a work item (from the invocation log).")
+    p_retro.add_argument("queue_root")
+    p_retro.add_argument("--work-item-id", required=True, metavar="ID")
+    p_retro.add_argument("--json", action="store_true")
+    p_retro.set_defaults(func=cmd_retrospective)
+
     p_status = subs.add_parser("status", help="Read-only status (no reviewers run).")
     p_status.add_argument("queue_root")
     p_status.add_argument("--council-id", default=None, metavar="ID")
     p_status.add_argument("--thread-id", default=None, metavar="ID")
+    p_status.add_argument("--summary", default=None, metavar="WORK_ITEM_ID",
+                          help="Return the latest canonical summary for a work item.")
     p_status.add_argument("--json", action="store_true")
     p_status.set_defaults(func=cmd_status)
 

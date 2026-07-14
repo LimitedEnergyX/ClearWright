@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-14T17:47:39.449291Z",
+  "records": [
+    {
+      "id": "evt-20260709T004851944185",
+      "type": "agent_event",
+      "reason": "pre-communications-loop seed data"
+    },
+    {
+      "id": "evt-20260709T004854240806",
+      "type": "agent_event",
+      "reason": "pre-communications-loop seed data"
+    },
+    {
+      "id": "evt-20260709T005937699950",
+      "type": "agent_event",
+      "reason": "pre-communications-loop seed data"
+    },
+    {
+      "id": "cw-harness-301",
+      "type": "clearance_packet",
+      "reason": "historical clearance lifecycle proof"
+    },
+    {
+      "id": "cw-council-20260713T201027505377",
+      "type": "council",
+      "reason": "docs-referenced engine fixture (docs/ACCEPTANCE.md)"
+    },
+    {
+      "id": "cw-council-20260713T213101231861",
+      "type": "council",
+      "reason": "council bound to an archived smoke/proof thread"
+    },
+    {
+      "id": "thr-20260709T023952487824",
+      "type": "thread",
+      "reason": "pre-council-era operational thread, superseded/aged out of the latest-run window"
+    },
+    {
+      "id": "thr-20260709T131541411325",
+      "type": "thread",
+      "reason": "pre-council-era operational thread, superseded/aged out of the latest-run window"
+    },
+    {
+      "id": "thr-20260709T135106854417",
+      "type": "thread",
+      "reason": "pre-council-era operational thread, superseded/aged out of the latest-run window"
+    },
+    {
+      "id": "thr-20260709T135619023161",
+      "type": "thread",
+      "reason": "pre-council-era operational thread, superseded/aged out of the latest-run window"
+    },
+    {
+      "id": "thr-20260709T151255083475",
+      "type": "thread",
+      "reason": "pre-council-era operational thread, superseded/aged out of the latest-run window"
+    },
+    {
+      "id": "thr-20260709T153054495483",
+      "type": "thread",
+      "reason": "pre-council-era operational thread, superseded/aged out of the latest-run window"
+    },
+    {
+      "id": "thr-20260709T160837531463",
+      "type": "thread",
+      "reason": "pre-council-era operational thread, superseded/aged out of the latest-run window"
+    },
+    {
+      "id": "thr-20260709T183551587416",
+      "type": "thread",
+      "reason": "pre-council-era operational thread, superseded/aged out of the latest-run window"
+    },
+    {
+      "id": "thr-20260713T175640279801",
+      "type": "thread",
+      "reason": "smoke/proof run, archived regardless of age"
+    },
+    {
+      "id": "thr-20260713T192725914048",
+      "type": "thread",
+      "reason": "smoke/proof run, archived regardless of age"
+    },
+    {
+      "id": "thr-20260713T192739205096",
+      "type": "thread",
+      "reason": "smoke/proof run, archived regardless of age"
+    },
+    {
+      "id": "thr-20260713T195925913072",
+      "type": "thread",
+      "reason": "smoke/proof run, archived regardless of age"
+    },
+    {
+      "id": "thr-20260713T205532302356",
+      "type": "thread",
+      "reason": "smoke/proof run, archived regardless of age"
+    },
+    {
+      "id": "thr-20260713T213053223808",
+      "type": "thread",
+      "reason": "smoke/proof run, archived regardless of age"
+    }
+  ],
+  "content_hash": "4c6df2cc25b23a0bd96737c01f354986474f49209bc1c3fb4003e1e1edb8f4cb"
+}

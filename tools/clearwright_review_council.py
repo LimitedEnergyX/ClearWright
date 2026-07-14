@@ -46,6 +46,7 @@ import clearwright_message as cwm
 import clearwright_verdict as cwv
 import clearwright_gpt_review as gpt_adapter
 import clearwright_codex_review as codex_adapter
+import clearwright_writer_lock as cwl
 
 COUNCILS_DIR = "review_councils"
 DEFAULT_MIN_ROUNDS = 2
@@ -119,6 +120,11 @@ def log_invocation(root, record):
     rec = {"invocation_id": "inv-" + cwm._stamp(), "at": cwm._now_iso()}
     rec.update({k: v for k, v in record.items() if v is not None})
     try:
+        import clearwright_archive as cwarch  # lazy: avoids a circular import
+        cwarch.rotate_invocation_log_if_needed(root)
+    except Exception:
+        pass
+    try:
         path = os.path.join(root, "invocation_log.jsonl")
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
@@ -178,15 +184,30 @@ def council_dir(root, council_id):
 
 
 def _atomic_write_json(path, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    """Raises clearwright_writer_lock.MaintenanceInProgress while an archive
+    operation holds exclusivity over this queue root. ``path`` is always under
+    the queue root passed to the top-level council functions."""
+    root = _queue_root_from_path(path)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(obj, fh, indent=2)
-        fh.write("\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    with cwl.write_token(root, purpose="council"):
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
     return path
+
+
+def _queue_root_from_path(path):
+    """review_councils/<id>/<file>.json under the queue root -> the queue
+    root, so the write-token lock file lives in the same root as every other
+    writer's lock, and archive draining sees every writer consistently."""
+    marker = os.sep + COUNCILS_DIR + os.sep
+    idx = path.find(marker)
+    return path[:idx] if idx != -1 else os.path.dirname(os.path.dirname(path))
 
 
 def _read_json(path, default=None):

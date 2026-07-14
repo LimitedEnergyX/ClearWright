@@ -26,6 +26,8 @@ import os
 import re
 from datetime import datetime, timezone
 
+import clearwright_writer_lock as cwl
+
 GATES_DIR = "gates"
 DISPOSITIONS = ("unresolved", "resolved", "closed_unresolved")
 
@@ -125,17 +127,20 @@ def _load_record(root, subject):
 
 
 def _write_record(root, record):
+    """Raises clearwright_writer_lock.MaintenanceInProgress while an archive
+    operation holds exclusivity over this queue root."""
     directory = os.path.join(root, GATES_DIR)
     os.makedirs(directory, exist_ok=True)
     path = _subject_path(root, record["subject"])
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(record, fh, indent=2)
-        fh.write("\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
-    _fsync_dir(directory)
+    with cwl.write_token(root, purpose="gate"):
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        _fsync_dir(directory)
 
 
 def _fsync_dir(directory):

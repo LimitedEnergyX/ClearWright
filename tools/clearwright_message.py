@@ -36,6 +36,8 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import clearwright_writer_lock as cwl
+
 COMMS_DIR = "communications"
 DEFAULT_ROLE = "agent"
 DEFAULT_SOURCE = "local-adapter"
@@ -135,23 +137,29 @@ def comms_dir(root):
 def write_message(root, message):
     """Write one message as a durable JSON file under root/communications/.
     Creates the directory if missing. Never overwrites: on the rare same-
-    microsecond collision, a suffix is added. Returns the path written."""
+    microsecond collision, a suffix is added. Returns the path written.
+
+    Raises clearwright_writer_lock.MaintenanceInProgress while an archive
+    operation holds exclusivity over this queue root -- message writes are one
+    of the shared choke points every durable writer drains through before
+    archive begins moving records."""
     directory = comms_dir(root)
     os.makedirs(directory, exist_ok=True)
     base = message["message_id"]
-    for attempt in range(1000):
-        name = base + (".json" if attempt == 0 else "-{}.json".format(attempt))
-        path = os.path.join(directory, name)
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(message, fh, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        return path
+    with cwl.write_token(root, purpose="message"):
+        for attempt in range(1000):
+            name = base + (".json" if attempt == 0 else "-{}.json".format(attempt))
+            path = os.path.join(directory, name)
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(message, fh, indent=2)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            return path
     raise OSError("could not allocate a unique message filename")
 
 

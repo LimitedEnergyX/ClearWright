@@ -43,6 +43,7 @@ import clearwright_message as cwm
 import clearwright_work as cww
 import clearwright_review_council as cwrc
 import clearwright_gate as cwg
+import clearwright_writer_lock as cwl
 
 EXIT_OK = 0
 EXIT_REVISION = 2
@@ -371,7 +372,17 @@ def _council(args, phase):
     refusal = _gate_refusal(args, getattr(args, "work_item_id", None))
     if refusal is not None:
         return refusal
+    try:
+        return _council_body(args, phase, root, stage)
+    except cwl.MaintenanceInProgress:
+        return _emit({"ok": False, "command": "council",
+                      "error": "maintenance_in_progress",
+                      "reason": "an archive operation currently holds "
+                                "exclusivity over this queue root"},
+                     EXIT_RUNTIME, args.json)
 
+
+def _council_body(args, phase, root, stage):
     try:
         cwrc.clamp_rounds(getattr(args, "min_rounds", cwrc.DEFAULT_MIN_ROUNDS),
                           getattr(args, "max_rounds", cwrc.DEFAULT_MAX_ROUNDS))

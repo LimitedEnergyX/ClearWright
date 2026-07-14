@@ -155,7 +155,7 @@ class UiTests(unittest.TestCase):
 
     def test_operator_chat_placeholder_is_exact(self):
         html = read(os.path.join(STATIC, "index.html"))
-        self.assertIn('placeholder="Send Agents a Message"', html)
+        self.assertIn('placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"', html)
         self.assertNotIn("Send a request as OPERATOR-0001", html)
 
     def test_long_descriptions_behind_help_tooltips(self):

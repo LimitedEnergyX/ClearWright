@@ -281,11 +281,13 @@ function fitCanvas() {
 
 function renderOperatorCard(state) {
   const holder = document.getElementById("operator-card");
+  const panel = holder.closest(".operator-panel");
   const outbox = (state.lanes && state.lanes.clearance_outbox) || [];
   const card = outbox.find((c) => (c.allowed_actions || []).includes("cta"));
   const waiting = outbox.filter((c) => (c.allowed_actions || []).includes("cta")).length;
 
   if (!card) {
+    if (panel) panel.classList.add("is-empty");
     if (currentMode === "operator") {
       holder.innerHTML =
         '<p class="muted">' + esc(OPERATOR_EMPTY_REQUESTS) +
@@ -299,6 +301,7 @@ function renderOperatorCard(state) {
     }
     return;
   }
+  if (panel) panel.classList.remove("is-empty");
 
   const mission = state.mission || {};
   const disallowed = (mission.disallowed_scope || [])
@@ -525,24 +528,247 @@ async function refreshMessages() {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// Composer payload integrity: ONE canonical content contract, ONE documented
+// size limit, atomic idempotency, and draft preservation, shared by every
+// operator composer (the Local Communications quick box and the Conversations
+// workspace composer). No layer here ever silently truncates: an oversized
+// send is refused with a clear, actionable reason before any network request
+// is made, and success is shown only after the durable copy is re-read and
+// confirmed to match what was sent -- never from a clipped local preview.
+// --------------------------------------------------------------------------- //
+
+const MESSAGE_MAX_BYTES = 65536; // must match clearwright_message.MESSAGE_MAX_BYTES
+
+function canonicalContent(text) {
+  return (text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+}
+
+function utf8ByteLength(text) {
+  return new TextEncoder().encode(text).length;
+}
+
+function genIdempotencyKey() {
+  if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+  return "key-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+}
+
+function genThreadId() {
+  const suffix = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() :
+    Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+  return "thr-web-" + suffix;
+}
+
+function draftStorageKey(name) { return "cw-draft:" + name; }
+
+function saveDraft(name, draft) {
+  try { sessionStorage.setItem(draftStorageKey(name), JSON.stringify(draft)); }
+  catch (e) { /* sessionStorage unavailable (private mode, quota); the draft
+                 simply does not survive navigation in that case. */ }
+}
+function loadDraft(name) {
+  try {
+    const raw = sessionStorage.getItem(draftStorageKey(name));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function clearDraft(name) {
+  try { sessionStorage.removeItem(draftStorageKey(name)); } catch (e) { /* ignore */ }
+}
+
+// One composer instance wraps a textarea + send control: auto-grow, a byte
+// counter shown only as the limit approaches, Shift+Enter/plain Enter for a
+// newline and Ctrl+Enter to send, a per-target idempotency key that survives
+// reload and every retry until a VERIFIED durable write clears the draft, and
+// a destination banner the operator sees before sending.
+function createComposer(opts) {
+  const { name, textarea, sendBtn, counterEl, errorEl, bannerEl,
+          getTarget, buildFields, endpoint, onPosted, isConfirmedTarget } = opts;
+  let sending = false;
+
+  function draftKey() {
+    const target = getTarget();
+    return name + ":" + (target.thread_id || "new") + ":" + (target.work_item_id || "");
+  }
+
+  function updateBanner() {
+    if (!bannerEl) return;
+    const target = getTarget();
+    // A target may already carry a (pre-allocated, retry-safety) thread id
+    // before anything has actually been sent; the banner only calls it
+    // "continuing" once the caller confirms that id is a real durable thread.
+    const confirmed = !isConfirmedTarget || isConfirmedTarget();
+    let text = (target.thread_id && confirmed) ? ("Continuing " + target.thread_id) : "New conversation";
+    if (target.work_item_id) text += " · " + target.work_item_id;
+    bannerEl.textContent = text;
+  }
+
+  function updateCounter() {
+    if (!counterEl) return;
+    const bytes = utf8ByteLength(canonicalContent(textarea.value));
+    const near = bytes > MESSAGE_MAX_BYTES * 0.8;
+    counterEl.hidden = !near;
+    if (near) counterEl.textContent = bytes + " / " + MESSAGE_MAX_BYTES + " bytes";
+    counterEl.classList.toggle("composer-counter-over", bytes > MESSAGE_MAX_BYTES);
+  }
+
+  function autoGrow() {
+    textarea.style.height = "auto";
+    textarea.style.height = Math.min(textarea.scrollHeight, 320) + "px";
+  }
+
+  function showError(msg) {
+    if (!errorEl) return;
+    errorEl.textContent = msg || "";
+    errorEl.hidden = !msg;
+  }
+
+  function persistDraft() {
+    const key = draftKey();
+    const draft = loadDraft(key) || {};
+    draft.text = textarea.value;
+    draft.idempotencyKey = draft.idempotencyKey || genIdempotencyKey();
+    saveDraft(key, draft);
+    return draft;
+  }
+
+  function restoreDraft() {
+    const draft = loadDraft(draftKey());
+    textarea.value = draft ? (draft.text || "") : "";
+    autoGrow();
+    updateCounter();
+    updateBanner();
+    showError("");
+  }
+
+  async function send() {
+    if (sending) return;
+    const raw = textarea.value;
+    const canonical = canonicalContent(raw);
+    if (!canonical) return;
+    const bytes = utf8ByteLength(canonical);
+    if (bytes > MESSAGE_MAX_BYTES) {
+      showError("Message is " + bytes + " bytes, over the " + MESSAGE_MAX_BYTES +
+                "-byte limit. Shorten it to send.");
+      return;
+    }
+    showError("");
+    const draft = persistDraft();
+    const target = getTarget();
+    sending = true;
+    sendBtn.disabled = true;
+    try {
+      const body = Object.assign(
+        { message: raw, idempotency_key: draft.idempotencyKey },
+        target.thread_id ? { thread_id: target.thread_id } : {},
+        target.work_item_id ? { work_item_id: target.work_item_id } : {},
+        buildFields ? buildFields(canonical) : {});
+      let result;
+      try {
+        result = await postJSON(endpoint, body);
+      } catch (netErr) {
+        showError("Network error sending the message. The draft was kept; " +
+                  "sending again will not create a duplicate.");
+        return;
+      }
+      if (!result || !result.ok) {
+        showError((result && (result.error || result.error_code)) ||
+                  "Send was refused. The draft was kept.");
+        return;
+      }
+      // Post-write re-read: success is shown ONLY after the durable content is
+      // confirmed to match what was submitted, comparing against the COMPLETE
+      // stored message -- never a preview.
+      let stored = null;
+      try {
+        const verify = await getJSON("/api/messages?thread_id=" +
+          encodeURIComponent(result.thread_id) + "&message_id=" +
+          encodeURIComponent(result.message_id));
+        stored = verify && verify.found ? verify.message : null;
+      } catch (verifyErr) { /* stored stays null -> falls through to the error below */ }
+      if (!stored || stored.message !== canonical) {
+        showError("Sent, but could not verify the durable copy matched. The " +
+                  "draft was kept; check Conversations before retrying.");
+        return;
+      }
+      clearDraft(draftKey());
+      textarea.value = "";
+      autoGrow();
+      updateCounter();
+      if (onPosted) onPosted(result, stored);
+    } finally {
+      sending = false;
+      sendBtn.disabled = false;
+    }
+  }
+
+  textarea.addEventListener("input", () => { autoGrow(); updateCounter(); persistDraft(); });
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      send();
+    }
+    // Plain Enter and Shift+Enter both insert a newline (the textarea
+    // default is left alone), so the operator can review the complete
+    // multi-line message before an explicit Ctrl+Enter or Send click.
+  });
+
+  restoreDraft();
+  return { send, restoreDraft, updateBanner, updateCounter, autoGrow };
+}
+
 // Operator chat: the compact quick box posts a real inbound message
 // (OPERATOR-0001, role operator, source operator-ui) as normal chat (intent
 // "chat"): durable conversation, never a work item and never an Attention
 // flag. No fake agent reply is ever generated. Actionable requests are created
 // in the Conversation Workspace (Ask agent / Create work item) or over the
-// CLI/HTTP worker surface, where messages stay actionable by default.
-async function submitOperatorChat(ev) {
-  ev.preventDefault();
-  const input = document.getElementById("operator-chat-input");
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = "";
-  await postJSON("/api/messages", {
-    actor: "OPERATOR-0001", role: "operator", source: "operator-ui",
-    direction: "inbound", simulated: false, message: text, intent: "chat",
+// CLI/HTTP worker surface, where messages stay actionable by default. Each
+// quick-box send targets a fresh thread; the thread id is generated and
+// pinned to the draft BEFORE the first attempt so a retry after a failed or
+// timed-out send reuses the same id and idempotency key rather than risking a
+// duplicate durable message.
+let operatorChatThreadId = null;
+let operatorChatThreadConfirmed = false;
+let operatorChatComposer = null;
+
+// The POST target always uses the pre-allocated thread id (retry-safety: a
+// timed-out send retries into the SAME thread rather than forking a second
+// one), but the banner LABEL only calls it "continuing" once that id has
+// actually been confirmed by a verified durable write -- otherwise it reads
+// "New conversation," since nothing has been sent yet.
+function operatorChatTarget() {
+  if (!operatorChatThreadId) operatorChatThreadId = genThreadId();
+  return { thread_id: operatorChatThreadId };
+}
+
+function initOperatorChatComposer() {
+  operatorChatComposer = createComposer({
+    name: "operator-chat",
+    textarea: document.getElementById("operator-chat-input"),
+    sendBtn: document.getElementById("operator-chat-send"),
+    counterEl: document.getElementById("operator-chat-counter"),
+    errorEl: document.getElementById("operator-chat-error"),
+    bannerEl: document.getElementById("operator-chat-banner"),
+    getTarget: operatorChatTarget,
+    isConfirmedTarget: () => operatorChatThreadConfirmed,
+    buildFields: () => ({
+      actor: "OPERATOR-0001", role: "operator", source: "operator-ui",
+      direction: "inbound", simulated: false, intent: "chat",
+    }),
+    endpoint: "/api/messages",
+    onPosted: () => {
+      operatorChatThreadId = null; // the next message starts a fresh thread
+      operatorChatThreadConfirmed = false;
+      operatorChatComposer.updateBanner();
+      refreshMessages();
+      refreshWorkItems();
+    },
   });
-  refreshMessages();
-  refreshWorkItems();
+}
+
+function submitOperatorChat(ev) {
+  ev.preventDefault();
+  if (operatorChatComposer) operatorChatComposer.send();
 }
 
 // --------------------------------------------------------------------------- //
@@ -641,6 +867,7 @@ async function loadHistory() {
 }
 
 function openHistory() {
+  closeAllPopovers();
   closeActiveRun();
   closeConversations();
   document.body.classList.add("history-open");
@@ -649,6 +876,7 @@ function openHistory() {
 }
 
 function closeHistory() {
+  closeAllPopovers();
   document.body.classList.remove("history-open");
   document.getElementById("history-view").hidden = true;
 }
@@ -868,6 +1096,7 @@ async function loadActiveRun() {
 }
 
 function openActiveRun() {
+  closeAllPopovers();
   closeHistory();
   closeConversations();
   document.body.classList.add("run-open");
@@ -876,6 +1105,7 @@ function openActiveRun() {
 }
 
 function closeActiveRun() {
+  closeAllPopovers();
   document.body.classList.remove("run-open");
   document.getElementById("active-run-view").hidden = true;
 }
@@ -940,10 +1170,70 @@ async function refreshHealth() {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// Popover management: System Health and any peer popover registered here
+// share one behavior -- click outside closes it, Escape closes it, a
+// navigation change (opening/closing Conversations, History, Active Run)
+// closes every open popover, only one popover stays open at a time (opening
+// one closes the others), and focus returns to the trigger that opened it.
+// A popover never needs its trigger clicked twice to reopen after dismissal.
+// --------------------------------------------------------------------------- //
+
+const _popovers = new Map(); // id -> {trigger, panel, isOpen, onOpen, onClose}
+
+function registerPopover(id, { trigger, panel, onOpen, onClose }) {
+  _popovers.set(id, { trigger, panel, isOpen: false, onOpen, onClose });
+}
+
+function isPopoverOpen(id) {
+  const p = _popovers.get(id);
+  return !!(p && p.isOpen);
+}
+
+function openPopover(id) {
+  const p = _popovers.get(id);
+  if (!p) return;
+  // Only one peer popover stays open: close every other one first.
+  _popovers.forEach((other, otherId) => { if (otherId !== id && other.isOpen) closePopover(otherId); });
+  p.panel.hidden = false;
+  p.isOpen = true;
+  if (p.onOpen) p.onOpen();
+}
+
+function closePopover(id, opts) {
+  const p = _popovers.get(id);
+  if (!p || !p.isOpen) return;
+  p.panel.hidden = true;
+  p.isOpen = false;
+  if (p.onClose) p.onClose();
+  if (!(opts && opts.skipFocusRestore) && p.trigger && document.body.contains(p.trigger)) {
+    p.trigger.focus();
+  }
+}
+
+function togglePopover(id) {
+  isPopoverOpen(id) ? closePopover(id) : openPopover(id);
+}
+
+function closeAllPopovers(opts) {
+  _popovers.forEach((_p, id) => closePopover(id, opts));
+}
+
+function wirePopovers() {
+  document.addEventListener("click", (e) => {
+    _popovers.forEach((p, id) => {
+      if (!p.isOpen) return;
+      if (p.panel.contains(e.target) || p.trigger.contains(e.target)) return;
+      closePopover(id, { skipFocusRestore: true }); // an outside click owns focus already
+    });
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeAllPopovers();
+  });
+}
+
 function toggleHealthPanel() {
-  const panel = document.getElementById("health-panel");
-  panel.hidden = !panel.hidden;
-  if (!panel.hidden) renderHealthDetails(lastHealth);
+  togglePopover("health");
 }
 
 // --------------------------------------------------------------------------- //
@@ -981,14 +1271,22 @@ function renderConvList(convs) {
   }).join("");
 }
 
-function renderConvDetail(run) {
-  const el = document.getElementById("conv-detail");
-  if (!el) return;
-  convDetailRun = run;
-  if (!run || !run.thread_id || !(run.messages || []).length) {
-    el.innerHTML = '<p class="muted">No conversation selected. Type below to start a new one.</p>';
-    return;
-  }
+// Task workspace tabs: every primary panel in this view binds to the SAME
+// selected conversation/work item (convDetailRun); tabs just change which
+// slice of that one bound record is shown, so nothing here ever mixes
+// content from a different task. Selection persists across the periodic
+// refresh so the operator's place in the workspace is not reset every 2s.
+const CONV_TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "conversation", label: "Conversation" },
+  { id: "councils", label: "Councils" },
+  { id: "evidence", label: "Evidence" },
+  { id: "audit", label: "Audit" },
+];
+let activeConvTab = "conversation";
+let lastConvSummary = null;
+
+function buildConvHead(run) {
   const title = (run.messages[0] && run.messages[0].message) || run.thread_id;
   let html = '<div class="conv-head">';
   html += '<div class="conv-title">' + esc(title.slice(0, 160)) + "</div>";
@@ -1003,9 +1301,41 @@ function renderConvDetail(run) {
     '<button class="btn btn-quiet conv-action" type="button" data-action="workitem">Create work item</button>' +
     '<button class="btn btn-quiet conv-action" type="button" data-action="escalate">Request clearance packet</button>' +
     "</div></div>";
-  html += telemetryBadges(run.codex_telemetry);
-  html += councilCard(lastConvCouncils, lastConvCouncilDetail);
-  html += '<div class="conv-messages">';
+  return html;
+}
+
+function buildConvTabBar() {
+  return '<div class="conv-tabs" role="tablist">' + CONV_TABS.map((t) =>
+    '<button class="conv-tab' + (t.id === activeConvTab ? " is-active" : "") +
+    '" type="button" role="tab" aria-selected="' + (t.id === activeConvTab) +
+    '" data-conv-tab="' + t.id + '">' + esc(t.label) + "</button>").join("") + "</div>";
+}
+
+function buildOverviewTab(run) {
+  let html = telemetryBadges(run.codex_telemetry);
+  html += '<div class="conv-overview-stats muted">' + esc(run.messages.length) +
+    " message(s) · status " + esc(run.status || "unknown") + "</div>";
+  html += '<div id="conv-overview-summary">';
+  if (lastConvSummary) {
+    const s = lastConvSummary;
+    html += '<div class="conv-summary-card">' +
+      '<div class="conv-summary-line"><strong>' + esc(s.status || "") + "</strong> — " +
+      esc(s.outcome_line || "") + "</div>";
+    if (s.recommended_next_action) {
+      html += '<div class="conv-summary-line muted">Next: ' + esc(s.recommended_next_action) + "</div>";
+    }
+    html += "</div>";
+  } else if (run.work_item_id) {
+    html += '<p class="muted">No canonical summary recorded yet for this work item.</p>';
+  } else {
+    html += '<p class="muted">This conversation has no bound work item, so there is no canonical summary.</p>';
+  }
+  html += "</div>";
+  return html;
+}
+
+function buildConversationTab(run) {
+  let html = '<div class="conv-messages">';
   run.messages.forEach((m) => {
     const mine = m.actor === "OPERATOR-0001";
     const meta = [m.actor + (m.role ? "/" + m.role : ""), m.direction, m.status, m.source, m.at]
@@ -1020,14 +1350,103 @@ function renderConvDetail(run) {
       '<div class="conv-msg-meta">' + meta + "</div></div>";
   });
   html += "</div>";
-  // Preserve the reader's position across the 2s rebuild: only follow to the
-  // bottom if they were already near it.
-  const oldBox = el.querySelector(".conv-messages");
+  return html;
+}
+
+function buildEvidenceTab(run) {
+  const evidenceMsgs = run.messages.filter((m) =>
+    m.source === "use-cw-summary" || (m.closure === "closed_by_operator") ||
+    /changed_files|verification|findings/i.test(m.message || ""));
+  if (!evidenceMsgs.length) {
+    return '<p class="muted">No recorded evidence (results, verification notes, or ' +
+      "changed-file lists) for this task yet.</p>";
+  }
+  let html = '<div class="conv-messages conv-evidence-list">';
+  evidenceMsgs.forEach((m) => {
+    const tag = conversationEntryTag(m);
+    html += '<div class="conv-msg' + (tag ? " " + tag.cls : "") + '">' +
+      (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
+      '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
+      '<div class="conv-msg-meta">' + esc(m.at || "") + "</div></div>";
+  });
+  html += "</div>";
+  return html;
+}
+
+function buildAuditTab(run) {
+  if (!run.packet_id) {
+    return '<p class="muted">This conversation has no associated clearance packet, ' +
+      "so there is no packet audit trail. Message history is on the Conversation tab.</p>";
+  }
+  return '<button class="btn btn-quiet" type="button" data-conv-open-audit="' +
+    esc(run.packet_id) + '">Open audit trail for ' + esc(run.packet_id) + "</button>";
+}
+
+function renderConvTabPanel(run) {
+  const panel = document.getElementById("conv-tab-panel");
+  if (!panel) return;
+  const oldBox = panel.querySelector(".conv-messages");
   const wasNear = !oldBox || isNearBottom(oldBox);
   const oldTop = oldBox ? oldBox.scrollTop : 0;
-  el.innerHTML = html;
-  const box = el.querySelector(".conv-messages");
+  if (activeConvTab === "overview") panel.innerHTML = buildOverviewTab(run);
+  else if (activeConvTab === "conversation") panel.innerHTML = buildConversationTab(run);
+  else if (activeConvTab === "councils") panel.innerHTML = councilCard(lastConvCouncils, lastConvCouncilDetail) ||
+    '<p class="muted">No review council has run for this task yet.</p>';
+  else if (activeConvTab === "evidence") panel.innerHTML = buildEvidenceTab(run);
+  else if (activeConvTab === "audit") panel.innerHTML = buildAuditTab(run);
+  const box = panel.querySelector(".conv-messages");
   if (box) box.scrollTop = wasNear ? box.scrollHeight : oldTop;
+}
+
+function switchConvTab(tabId) {
+  if (!CONV_TABS.some((t) => t.id === tabId)) return;
+  activeConvTab = tabId;
+  const bar = document.querySelector("#conv-detail .conv-tabs");
+  if (bar) {
+    bar.querySelectorAll(".conv-tab").forEach((btn) => {
+      const on = btn.dataset.convTab === tabId;
+      btn.classList.toggle("is-active", on);
+      btn.setAttribute("aria-selected", String(on));
+    });
+  }
+  if (convDetailRun) renderConvTabPanel(convDetailRun);
+}
+
+async function loadConvSummaryForOverview(workItemId) {
+  lastConvSummary = null;
+  if (!workItemId) return;
+  try {
+    const data = await getJSON("/api/work-summary?work_item_id=" + encodeURIComponent(workItemId));
+    if (data && data.summary) lastConvSummary = data.summary;
+  } catch (e) {
+    // No summary recorded yet, or a transient fetch error; overview shows the
+    // "no summary" state either way.
+  }
+  if (activeConvTab === "overview" && convDetailRun) renderConvTabPanel(convDetailRun);
+}
+
+function renderConvDetail(run) {
+  const el = document.getElementById("conv-detail");
+  if (!el) return;
+  const isNewRun = !convDetailRun || convDetailRun.thread_id !== (run && run.thread_id);
+  convDetailRun = run;
+  if (!run || !run.thread_id || !(run.messages || []).length) {
+    el.innerHTML = '<p class="muted">No conversation selected. Type below to start a new one.</p>';
+    return;
+  }
+  if (isNewRun) {
+    activeConvTab = "conversation";
+    loadConvSummaryForOverview(run.work_item_id);
+  }
+  const alreadyBuilt = el.querySelector(".conv-tabs");
+  if (!alreadyBuilt) {
+    el.innerHTML = buildConvHead(run) + buildConvTabBar() +
+      '<div class="conv-tab-panel" id="conv-tab-panel"></div>';
+  } else {
+    const head = el.querySelector(".conv-head");
+    if (head) head.outerHTML = buildConvHead(run);
+  }
+  renderConvTabPanel(run);
 }
 
 // Classify a conversation entry so the timeline reads as a council transcript:
@@ -1093,7 +1512,53 @@ async function loadConversations() {
 // "chat", never a work item), Ask agent and Create work item are actionable
 // (intent "request", derived as open work), and Request clearance opens the
 // escalation modal to file an RTA through the existing intake.
-async function submitConvComposer(ev) {
+// The Conversations workspace composer targets the currently selected thread
+// when continuing one, or a client-generated id (pinned to the draft before
+// the first send attempt) when starting fresh -- the same retry-safety
+// pattern as the quick box, so the destination is always known up front and a
+// timed-out send can be retried without risking a duplicate.
+let convComposerNewThreadId = null;
+let convComposer = null;
+
+function convComposerTarget() {
+  if (selectedConvThread) return { thread_id: selectedConvThread };
+  if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
+  return { thread_id: convComposerNewThreadId };
+}
+
+function initConvComposer() {
+  convComposer = createComposer({
+    name: "conv-composer",
+    textarea: document.getElementById("conv-input"),
+    sendBtn: document.getElementById("conv-send"),
+    counterEl: document.getElementById("conv-counter"),
+    errorEl: document.getElementById("conv-error"),
+    bannerEl: document.getElementById("conv-banner"),
+    getTarget: convComposerTarget,
+    isConfirmedTarget: () => !!selectedConvThread,
+    buildFields: (canonical) => {
+      const mode = document.getElementById("conv-mode").value || "chat";
+      const prefix = document.getElementById("conv-target").value || "";
+      return {
+        actor: "OPERATOR-0001", role: "operator", source: "operator-ui",
+        direction: "inbound", simulated: false,
+        message: prefix + canonical,
+        intent: mode === "chat" ? "chat" : "request",
+      };
+    },
+    endpoint: "/api/messages",
+    onPosted: (result) => {
+      if (!selectedConvThread && result.thread_id) selectedConvThread = result.thread_id;
+      convComposerNewThreadId = null;
+      convComposer.updateBanner();
+      loadConversations();
+      refreshMessages();
+      refreshWorkItems();
+    },
+  });
+}
+
+function submitConvComposer(ev) {
   ev.preventDefault();
   const input = document.getElementById("conv-input");
   const text = input.value.trim();
@@ -1108,20 +1573,7 @@ async function submitConvComposer(ev) {
     input.value = "";
     return;
   }
-  if (!text) return;
-  const prefix = document.getElementById("conv-target").value || "";
-  input.value = "";
-  const body = {
-    actor: "OPERATOR-0001", role: "operator", source: "operator-ui",
-    direction: "inbound", simulated: false, message: prefix + text,
-    intent: mode === "chat" ? "chat" : "request",
-  };
-  if (selectedConvThread) body.thread_id = selectedConvThread;
-  const res = await postJSON("/api/messages", body);
-  if (res && res.ok && res.thread_id) selectedConvThread = res.thread_id;
-  loadConversations();
-  refreshMessages();
-  refreshWorkItems();
+  if (convComposer) convComposer.send();
 }
 
 async function postConvNote(direction, message) {
@@ -1180,6 +1632,7 @@ async function submitEscalate(ev) {
 }
 
 function openConversations() {
+  closeAllPopovers();
   closeHistory();
   closeActiveRun();
   document.body.classList.add("conv-open");
@@ -1189,6 +1642,7 @@ function openConversations() {
 }
 
 function closeConversations() {
+  closeAllPopovers();
   document.body.classList.remove("conv-open");
   document.getElementById("conversations-view").hidden = true;
 }
@@ -1709,6 +2163,14 @@ async function refresh() {
 }
 
 function wire() {
+  initOperatorChatComposer();
+  initConvComposer();
+  wirePopovers();
+  registerPopover("health", {
+    trigger: document.getElementById("health-chip"),
+    panel: document.getElementById("health-panel"),
+    onOpen: () => renderHealthDetails(lastHealth),
+  });
   document.getElementById("reset-btn").addEventListener("click", resetDemo);
   document.getElementById("audit-close").addEventListener("click", closeAudit);
   document.getElementById("reason-cancel").addEventListener("click", () => closeReason(null));
@@ -1776,8 +2238,10 @@ function wire() {
   document.getElementById("conversations-close").addEventListener("click", closeConversations);
   document.getElementById("conv-new-btn").addEventListener("click", () => {
     selectedConvThread = null;
+    convComposerNewThreadId = null;
     renderConvDetail(null);
     renderConvList(lastConversations);
+    if (convComposer) convComposer.restoreDraft();
     document.getElementById("conv-input").focus();
   });
   document.getElementById("conv-composer").addEventListener("submit", submitConvComposer);
@@ -1785,9 +2249,21 @@ function wire() {
     const item = e.target.closest(".conv-item");
     if (!item) return;
     selectedConvThread = item.getAttribute("data-thread");
+    convComposerNewThreadId = null;
+    if (convComposer) convComposer.restoreDraft();
     loadConversations();
   });
   document.getElementById("conv-detail").addEventListener("click", (e) => {
+    const tabBtn = e.target.closest("button[data-conv-tab]");
+    if (tabBtn) {
+      switchConvTab(tabBtn.getAttribute("data-conv-tab"));
+      return;
+    }
+    const auditBtn = e.target.closest("button[data-conv-open-audit]");
+    if (auditBtn) {
+      openAudit(auditBtn.getAttribute("data-conv-open-audit") + ".json");
+      return;
+    }
     const copyBtn = e.target.closest("button[data-copy], button[data-copy-summary]");
     if (copyBtn) {
       if (copyBtn.hasAttribute("data-copy")) copyText(copyBtn.getAttribute("data-copy"), copyBtn);

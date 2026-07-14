@@ -236,7 +236,7 @@ class UiTests(unittest.TestCase):
         self.assertIn("simulated agents", self.html)
         self.assertIn('id="active-run-view"', self.html)
         self.assertIn('id="history-view"', self.html)
-        self.assertIn('placeholder="Send Agents a Message"', self.html)
+        self.assertIn('placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"', self.html)
 
     def test_health_chip_reason_source(self):
         self.assertIn("chip.title", self.appjs)

@@ -31,9 +31,11 @@ for its /api/messages endpoints, so the CLI and the API share one implementation
 Exit codes: 0 recorded (or dry-run/listed), 1 refused/invalid, 2 argument error
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import clearwright_writer_lock as cwl
@@ -50,6 +52,52 @@ INTENTS = ("chat", "request")
 # "closed_by_operator" is an explicit operator decision that is NOT DONE and
 # never overrides the underlying council outcome.
 CLOSURES = ("done", "closed_by_operator")
+
+# The single documented message-content size limit, shared by every layer:
+# the browser composer's byte counter and client-side rejection, the server's
+# validation, the durable write, and the post-write re-read comparison all
+# measure against this same canonical form. It applies to the CONTENT field
+# only (UTF-8 bytes after newline normalization), never the whole JSON
+# request -- see clearwright_writer_lock-style REQUEST_MAX_BYTES in the
+# server for the separate, larger, pre-parse request-body cap.
+MESSAGE_MAX_BYTES = 65536
+
+
+class MessageTooLarge(ValueError):
+    """Canonical content exceeds MESSAGE_MAX_BYTES. A ValueError subclass so
+    every existing ``except ValueError`` caller keeps working unchanged; a
+    caller that wants a distinct HTTP 413 (rather than 400) catches this
+    specifically."""
+
+
+class IdempotencyConflict(Exception):
+    """A POST reused an idempotency_key with different content or a different
+    target than the message already recorded under that key. ``existing`` is
+    the prior message; the caller returns it as a 409, never as though the
+    new request had been recorded."""
+
+    def __init__(self, existing):
+        super().__init__("idempotency_conflict")
+        self.existing = existing
+
+
+def canonical_content(text):
+    """The canonical form of message content: CRLF/CR normalized to LF, then
+    leading/trailing whitespace trimmed (matching the durable-storage
+    convention every existing writer already applies). This is the ONE
+    representation every layer -- the browser byte counter, client-side
+    rejection, server validation, the durable write, and the post-write
+    comparison -- measures and compares against, so nothing is ever clipped or
+    differently encoded between what was counted and what was stored."""
+    return ((text or "").replace("\r\n", "\n").replace("\r", "\n")).strip()
+
+
+def canonical_bytes(text):
+    return canonical_content(text).encode("utf-8")
+
+
+def canonical_sha256(text):
+    return hashlib.sha256(canonical_bytes(text)).hexdigest()
 
 
 _last_dt = None
@@ -79,16 +127,28 @@ def _stamp():
 def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
                   thread_id=None, direction=DEFAULT_DIRECTION,
                   status=DEFAULT_STATUS, source=DEFAULT_SOURCE, simulated=False,
-                  work_item_id=None, intent=None, closure=None, closure_meta=None):
+                  work_item_id=None, intent=None, closure=None, closure_meta=None,
+                  idempotency_key=None):
     """Return a new message dict. Raises ValueError if actor or message is
     missing/empty, or if direction/status/intent is not one of the allowed
-    values. A new thread_id is generated when one is not supplied. Only a
-    non-empty packet_id, work_item_id, and intent are included. intent "chat"
-    marks plain conversation (never a work item); absent means actionable."""
+    values; raises MessageTooLarge (a ValueError subclass) if the canonical
+    content exceeds MESSAGE_MAX_BYTES. A new thread_id is generated when one
+    is not supplied. Only a non-empty packet_id, work_item_id, intent, and
+    idempotency_key are included. intent "chat" marks plain conversation
+    (never a work item); absent means actionable. The stored ``message`` field
+    is ALWAYS the canonical (newline-normalized) content, so authority parsing
+    and every later comparison read the same bytes that were counted and
+    validated -- never a clipped or differently-encoded preview."""
     if not actor or not str(actor).strip():
         raise ValueError("actor is required and must be non-empty")
     if not message or not str(message).strip():
         raise ValueError("message is required and must be non-empty")
+    message = canonical_content(message)
+    content_bytes = len(message.encode("utf-8"))
+    if content_bytes > MESSAGE_MAX_BYTES:
+        raise MessageTooLarge(
+            "message content is {} bytes, exceeding the {}-byte limit".format(
+                content_bytes, MESSAGE_MAX_BYTES))
     direction = (str(direction).strip() or DEFAULT_DIRECTION) if direction else DEFAULT_DIRECTION
     if direction not in DIRECTIONS:
         raise ValueError("direction must be one of: {}".format(", ".join(DIRECTIONS)))
@@ -113,7 +173,7 @@ def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
         "role": (str(role).strip() or DEFAULT_ROLE) if role else DEFAULT_ROLE,
         "direction": direction,
         "status": status,
-        "message": str(message).strip(),
+        "message": message,
         "source": (str(source).strip() or DEFAULT_SOURCE) if source else DEFAULT_SOURCE,
         "simulated": bool(simulated),
     }
@@ -127,6 +187,8 @@ def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
         msg["closure"] = closure
         if closure_meta:
             msg["closure_meta"] = closure_meta
+    if idempotency_key and str(idempotency_key).strip():
+        msg["idempotency_key"] = str(idempotency_key).strip()
     return msg
 
 
@@ -189,6 +251,88 @@ def read_messages(root, packet_id=None, thread_id=None, limit=None):
     if limit is not None and limit >= 0:
         messages = messages[-limit:]
     return messages
+
+
+def find_by_message_id(root, thread_id, message_id):
+    """Binding-scoped lookup for the composer's post-write re-read: the
+    caller must supply the thread the message is expected to belong to, so
+    this can never become a bare-id enumeration surface. Returns the message
+    or None."""
+    for m in read_messages(root, thread_id=thread_id):
+        if m.get("message_id") == message_id:
+            return m
+    return None
+
+
+def find_by_idempotency_key(root, thread_id, idempotency_key):
+    """Binding-scoped lookup: only within the given thread. Returns the
+    message or None."""
+    if not idempotency_key:
+        return None
+    for m in read_messages(root, thread_id=thread_id):
+        if m.get("idempotency_key") == idempotency_key:
+            return m
+    return None
+
+
+def _idempotency_lock_path(root, thread_id):
+    digest = hashlib.sha256((thread_id or "").encode("utf-8")).hexdigest()[:16]
+    return os.path.join(root, "locks", "idempotency", digest + ".lock")
+
+
+class _ThreadIdempotencyLock(object):
+    """A short-held, thread-scoped mutex around the idempotency check-and-
+    append critical section, so two concurrent or retried POSTs with the same
+    (thread_id, idempotency_key) can never both create a durable record."""
+
+    def __init__(self, root, thread_id):
+        self.path = _idempotency_lock_path(root, thread_id)
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                os.close(fd)
+                return self
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    raise OSError("idempotency lock unavailable (contended)")
+                time.sleep(0.01)
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+        return False
+
+
+def write_message_idempotent(root, message):
+    """Atomic check-and-append under a thread-scoped lock. If ``message``
+    carries an idempotency_key and a message with that key already exists in
+    the thread: identical work_item_id and canonical content -> returns the
+    EXISTING message (no new record; a safe retry); anything else differs ->
+    raises IdempotencyConflict(existing). Otherwise writes and returns the new
+    message. Returns (message, is_retry). Raises
+    clearwright_writer_lock.MaintenanceInProgress while an archive operation
+    holds exclusivity (propagated from write_message)."""
+    key = message.get("idempotency_key")
+    if not key:
+        write_message(root, message)
+        return message, False
+    thread_id = message.get("thread_id")
+    with _ThreadIdempotencyLock(root, thread_id):
+        existing = find_by_idempotency_key(root, thread_id, key)
+        if existing is not None:
+            same_target = existing.get("work_item_id") == message.get("work_item_id")
+            same_content = existing.get("message") == message.get("message")
+            if same_target and same_content:
+                return existing, True
+            raise IdempotencyConflict(existing)
+        write_message(root, message)
+        return message, False
 
 
 def _record(args, respond):

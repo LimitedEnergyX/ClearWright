@@ -87,10 +87,15 @@
           <div class="panel-head">
             <h2 id="comms-h">Local communications <span class="feed-badge local">real</span> <span class="help" tabindex="0" role="button" aria-label="About local communications">?<span class="tip">A compact recent feed of the real, durable, packet-linked messages sent through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The quick box below sends normal chat (never a work item); for readable threads, replies, follow-ups, and actionable requests, open Conversations in the top bar. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></h2>
           </div>
-          <form id="operator-chat-form" class="operator-chat">
-            <input id="operator-chat-input" type="text" maxlength="500" autocomplete="off"
-                   placeholder="Send Agents a Message" />
-            <button id="operator-chat-send" class="btn btn-primary" type="submit">Send</button>
+          <form id="operator-chat-form" class="operator-chat composer">
+            <div class="composer-banner" id="operator-chat-banner">New conversation</div>
+            <textarea id="operator-chat-input" class="composer-textarea" rows="1"
+                      placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"></textarea>
+            <div class="composer-footer">
+              <span class="composer-counter" id="operator-chat-counter" hidden></span>
+              <span class="composer-error" id="operator-chat-error" hidden role="alert"></span>
+              <button id="operator-chat-send" class="btn btn-primary" type="submit">Send</button>
+            </div>
           </form>
           <div class="comms" id="comms"><p class="muted comms-empty">No local messages yet. Send one with tools/clearwright_message.py or POST /api/messages.</p></div>
         </section>
@@ -109,10 +114,8 @@
           <div id="convo-summary"></div>
         </section>
 
-        <section class="panel" aria-labelledby="feed-h">
-          <div class="panel-head">
-            <h2 id="feed-h">Live agent feed <span class="help" tabindex="0" role="button" aria-label="About the live agent feed">?<span class="tip">Local events are real, sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/agent-events). Simulated lines are a demo fallback only. No copy/paste into this page is required, and no browser automation is needed to drive ClearWright.</span></span></h2>
-          </div>
+        <details class="panel panel-secondary" id="feed-panel">
+          <summary>Live agent feed <span class="help" tabindex="0" role="button" aria-label="About the live agent feed">?<span class="tip">Local events are real, sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/agent-events). Simulated lines are a demo fallback only. No copy/paste into this page is required, and no browser automation is needed to drive ClearWright. A durable diagnostic lane, collapsed by default so it does not compete with the primary work queue.</span></span></summary>
           <div class="feed-group">
             <div class="feed-grouplabel">Local events <span class="feed-badge local">real</span></div>
             <div class="feed" id="feed-real"><p class="muted feed-empty">No local events yet. Send one with tools/clearwright_agent_event.py or POST /api/agent-events.</p></div>
@@ -121,7 +124,7 @@
             <div class="feed-grouplabel">Simulated demo <span class="sim-tag">simulated</span></div>
             <div class="feed" id="feed"></div>
           </div>
-        </section>
+        </details>
       </aside>
     </div>
 
@@ -138,22 +141,29 @@
         <div class="conv-list" id="conv-list"><p class="muted">Loading conversations...</p></div>
         <div class="conv-main">
           <div id="conv-detail"><p class="muted">No conversation selected. Type below to start a new one.</p></div>
-          <form id="conv-composer" class="conv-composer">
-            <select id="conv-mode" class="conv-target" aria-label="Composer mode">
-              <option value="chat" selected>Message</option>
-              <option value="ask">Ask agent</option>
-              <option value="workitem">Create work item</option>
-              <option value="clearance">Request clearance</option>
-            </select>
-            <select id="conv-target" class="conv-target" aria-label="Message target hint">
-              <option value="">All</option>
-              <option value="@Claude ">Claude</option>
-              <option value="@Codex ">Codex</option>
-              <option value="[operator note] ">Operator note</option>
-            </select>
-            <input id="conv-input" type="text" maxlength="1000" autocomplete="off"
-                   placeholder="Send Agents a Message" />
-            <button id="conv-send" class="btn btn-primary" type="submit">Send</button>
+          <form id="conv-composer" class="conv-composer composer">
+            <div class="composer-banner" id="conv-banner">New conversation</div>
+            <div class="conv-composer-row">
+              <select id="conv-mode" class="conv-target" aria-label="Composer mode">
+                <option value="chat" selected>Message</option>
+                <option value="ask">Ask agent</option>
+                <option value="workitem">Create work item</option>
+                <option value="clearance">Request clearance</option>
+              </select>
+              <select id="conv-target" class="conv-target" aria-label="Message target hint">
+                <option value="">All</option>
+                <option value="@Claude ">Claude</option>
+                <option value="@Codex ">Codex</option>
+                <option value="[operator note] ">Operator note</option>
+              </select>
+            </div>
+            <textarea id="conv-input" class="composer-textarea" rows="1"
+                      placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"></textarea>
+            <div class="composer-footer">
+              <span class="composer-counter" id="conv-counter" hidden></span>
+              <span class="composer-error" id="conv-error" hidden role="alert"></span>
+              <button id="conv-send" class="btn btn-primary" type="submit">Send</button>
+            </div>
           </form>
           <p class="conv-target-hint">Message is normal chat: durable, but never a work item and never an Attention flag. Ask agent and Create work item make the message actionable; Request clearance files an RTA through the intake. Target is an intent hint only; participation is real only when a worker posts back through CW.</p>
         </div>

@@ -160,10 +160,11 @@ class UiTests(unittest.TestCase):
 
     def test_composer_placeholder_exact_and_thread_behavior(self):
         self.assertIn('id="conv-composer"', self.html)
-        self.assertEqual(self.html.count('placeholder="Send Agents a Message"'), 2)
+        self.assertEqual(self.html.count('placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"'), 2)
         # Continuing a selected thread, adopting the new thread id on create.
-        self.assertIn("if (selectedConvThread) body.thread_id = selectedConvThread;", self.appjs)
-        self.assertIn("selectedConvThread = res.thread_id", self.appjs)
+        self.assertIn("if (selectedConvThread) return { thread_id: selectedConvThread };", self.appjs)
+        self.assertIn("if (!selectedConvThread && result.thread_id) selectedConvThread = result.thread_id;",
+                      self.appjs)
 
     def test_copy_and_escalation_sources(self):
         self.assertIn("copy thread_id", self.appjs)

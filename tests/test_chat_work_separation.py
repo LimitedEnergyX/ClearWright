@@ -216,8 +216,11 @@ class UiTests(unittest.TestCase):
         self.assertIn('if (mode === "clearance")', self.appjs)
 
     def test_quick_operator_chat_posts_chat_intent(self):
-        # The compact quick box is normal chat, never a work item.
-        self.assertIn('message: text, intent: "chat"', self.appjs)
+        # The compact quick box is normal chat, never a work item. The
+        # composer's buildFields callback is what stamps intent: "chat" onto
+        # every send (see createComposer / initOperatorChatComposer).
+        self.assertIn('intent: "chat"', self.appjs)
+        self.assertIn("initOperatorChatComposer", self.appjs)
 
     def test_work_items_panel_declares_actionable_only(self):
         self.assertIn("Actionable work only", self.html)
@@ -232,7 +235,7 @@ class UiTests(unittest.TestCase):
     def test_other_views_intact(self):
         for token in ('id="conversations-view"', 'id="active-run-view"',
                       'id="history-view"', 'id="work-items"', 'id="health-chip"',
-                      'placeholder="Send Agents a Message"'):
+                      'placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"'):
             self.assertIn(token, self.html)
 
 

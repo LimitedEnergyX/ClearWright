@@ -19,19 +19,58 @@ it performs no destructive or outward-facing action itself.
 
     python tools/clearwright_use_cw.py <command> <queue_root> ... --json
 
-Commands: `start`, `plan`, `council`, `progress`, `incident`, `verify`,
-`complete`, `status`. Every command emits compact JSON and preserves
-`thread_id`, `work_item_id`, `packet_id`, and `council_id`.
+Commands: `preflight`, `start`, `plan`, `council`, `incident`, `verify`,
+`progress`, `complete`, `status`, `schema`. Every command emits compact JSON,
+preserves `thread_id`, `work_item_id`, `packet_id`, and `council_id`, and
+appends a metadata-only line to the queue's `invocation_log.jsonl` (including
+failed invocations; never prompts, artifact content, or secrets).
 
 ### Exit codes (the skill branches on these)
 
     0  completed / agreement threshold met -> continue
     2  revision or another review round required
-    3  operator required
-    4  reviewer unavailable
-    5  hard gate
+    3  operator required (incl. a classification conflict)
+    4  reviewer unavailable (attempt budget exhausted; not retryable by rerun)
+    5  hard gate (incl. preflight failure and packet over budget)
     6  required authority not granted (a governed change without clearance)
-    other nonzero  argument or runtime failure
+    7  usage or validation error (bad flags, invalid schema, round bounds)
+    8  runtime failure
+
+### Reliability layer
+
+- **`preflight`** checks readiness (key present as a boolean + source — never
+  the value — including the Windows User-scope fallback; Codex on PATH +
+  version; queue writable; budgets; round bounds) and exits 5 with exact
+  remediation steps. `start` re-runs the cheap checks implicitly and creates
+  nothing on failure (the invocation-log line is still written).
+- **Structured task envelope** (`start --envelope-file`, see `schema envelope`)
+  is the primary classification input: `excluded_actions` carry the operator's
+  guardrails and are never read as risk; a conflict between `intended_actions`
+  and the approved scope exits 3 instead of silently inheriting either
+  classification. Free-text `--request` remains as a lexical fallback with
+  exclusion-section stripping. `verification_required` is recorded at start
+  (governed/high-risk clamp to true).
+- **Attempt budget**: at most two adapter calls per reviewer per substantive
+  round (initial + one retry), persisted across reinvocations; changing the
+  packet or config never grants more attempts. Exhaustion returns exit 4;
+  continuing requires a new council or an explicit operator-authorized recovery
+  (`--grant-attempts <reviewer> --operator-message-id <durable operator
+  message>`), recorded on the council. Failed rounds are not counted toward the
+  2-5 substantive-round budget, and no command can create a sixth round
+  (`2 <= --min-rounds <= --max-rounds <= 5`).
+- **Packet budgets**: dispatch fails fast (exit 5, no attempt spent) when the
+  final assembled packet exceeds the phase input budget — plan/incident 32,000
+  and verify 96,000 ESTIMATED input tokens (`ceil(chars/3.0)` by default;
+  `CLEARWRIGHT_GPT_{PLAN,INCIDENT,VERIFY}_INPUT_BUDGET`,
+  `CLEARWRIGHT_TOKEN_ESTIMATE_DIVISOR`). Codex prompts travel via stdin (no
+  Windows argv ceiling) and its timeout scales with packet size
+  (`CLEARWRIGHT_CODEX_TIMEOUT_BASE/_PER_100KB/_CAP`). Estimates are labeled and
+  never reported as actual usage; actual GPT token usage is recorded when the
+  API returns it.
+- **`schema <envelope|verdict|reconciliation>`** prints each contract with rules
+  and a valid example, and **`--stage reconcile --dry-run`** validates a
+  reconciliation (schema + exact-ref binding against the real latest round) at
+  zero reviewer cost.
 
 ## Flow
 

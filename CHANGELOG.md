@@ -5,6 +5,32 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Council reliability pass (from the first full acceptance run). Codex prompts
+  now travel via stdin (never argv, which Windows caps at ~23 KB effective) and
+  the Codex timeout scales with packet size. The council engine is the sole
+  retry owner: adapters make exactly one call per invocation, each reviewer gets
+  at most two total adapter calls per substantive round (persisted across
+  reinvocations; a changed packet/config never resets the budget, it only gates
+  reuse of the cached validated result), failed rounds are not counted toward
+  the 2-5 substantive-round budget, and `2 <= min_rounds <= max_rounds <= 5` is
+  enforced in the engine itself. Recovery from an exhausted budget requires a
+  new council or an explicit operator-authorized grant anchored to a durable
+  operator message. Dispatch fails fast — before spending an attempt — when the
+  assembled packet exceeds the phase input budget (plan/incident 32K, verify
+  96K estimated input tokens; estimates labeled, actual GPT token usage
+  recorded when returned). New `preflight` (readiness with exact remediation;
+  implicit in `start`; the key is reported as a boolean + source — including a
+  Windows User-scope registry fallback — never a value), `schema`
+  (envelope/verdict/reconciliation contracts with rules and examples), and
+  reconcile `--dry-run` (schema + exact-ref binding validation at zero reviewer
+  cost). `start` accepts a structured task envelope as the primary
+  classification input: excluded_actions carry the operator's guardrails and
+  are never read as risk, intended-action/scope conflicts exit 3 instead of
+  silently inheriting a classification, and `verification_required` is recorded
+  at start (governed/high-risk clamp to true). Every command and every reviewer
+  attempt (including failures) appends a metadata-only line to
+  `invocation_log.jsonl` — never prompts, artifact content, or secrets. The
+  deterministic agreement rule is unchanged.
 - Executable "Use CW" skill. `tools/clearwright_use_cw.py` is one stable command
   surface (start / plan / council / progress / incident / verify / complete /
   status) that turns "Use CW to do X" into an automatic governed loop with no

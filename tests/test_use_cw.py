@@ -163,8 +163,10 @@ class CouncilExitCodeTests(unittest.TestCase):
         base = dict(queue_root=self.root, phase="plan", council_id=None,
                     thread_id=self.thread, work_item_id=self.wid, packet_id=None,
                     repo=None, plan_file=None, context_file=None, prompt="review this plan",
-                    reconciliation_file=None, stage="review", model=None,
-                    approved_scope="operator approved scope", timeout=30, json=True)
+                    reconciliation_file=None, stage="review", dry_run=False, model=None,
+                    approved_scope="operator approved scope",
+                    min_rounds=2, max_rounds=5, grant_attempts=None,
+                    operator_message_id=None, timeout=30, json=True)
         base.update(kw)
         return base
 

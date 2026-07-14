@@ -21,8 +21,13 @@ Secret handling (hard rules enforced here):
 
 Network and robustness:
   - Standard-library HTTP only (urllib); no SDK dependency is added.
-  - Bounded timeout; at most two retries on transient failures with bounded
-    exponential backoff (both injectable so tests never sleep or hit the network).
+  - Bounded timeout; exactly ONE API call per invocation. The Review Council
+    engine is the sole retry owner, so total API spend per reviewer per round
+    is bounded by the council's attempt budget and can never be multiplied by
+    hidden adapter retries.
+  - OPENAI_API_KEY resolves from the process environment, then the Windows
+    User-scope registry (set-after-launch variables are not inherited by
+    spawned processes); the value is never printed, logged, or persisted.
   - The transport is injectable, so unit tests validate parsing/validation/
     posting without any real network call.
 
@@ -47,7 +52,9 @@ DEFAULT_TIMEOUT = 60
 # A full structured verdict plus a reasoning model's internal tokens needs real
 # headroom; too small a cap truncates the JSON and fails validation.
 DEFAULT_MAX_OUTPUT_TOKENS = 3000
-MAX_RETRIES = 2
+# Bumped whenever the adapter's dispatch behavior changes; part of the council's
+# dispatch fingerprint so cached results are never reused across adapter changes.
+ADAPTER_VERSION = "gpt-adapter/2"
 
 # Error classes that are hard gates for the operator (never silently retried or
 # worked around): a missing key, or the configured model being unavailable.
@@ -137,13 +144,57 @@ def _is_transient(status):
     return status in (429, 500, 502, 503, 504)
 
 
+def _usage_tokens(resp_json):
+    """Actual token usage from a Responses API payload, when present. Returns
+    (input_tokens, output_tokens) with None where the provider did not report.
+    Estimates are never substituted here; absent means absent."""
+    usage = resp_json.get("usage") if isinstance(resp_json, dict) else None
+    if not isinstance(usage, dict):
+        return None, None
+    def _int(v):
+        return int(v) if isinstance(v, (int, float)) else None
+    return _int(usage.get("input_tokens")), _int(usage.get("output_tokens"))
+
+
+def resolve_api_key(env_get=os.environ.get, user_scope_get=None):
+    """Resolve OPENAI_API_KEY: process environment first, then the Windows
+    User-scope registry (HKCU\\Environment) — because a User-scope variable set
+    after a parent process started is NOT inherited by spawned children, which
+    otherwise fails every council as reviewer_unavailable with no clear cause.
+    Returns (key_or_None, source). The value is never logged or printed."""
+    key = env_get("OPENAI_API_KEY")
+    if key and str(key).strip():
+        return str(key).strip(), "process_env"
+    if user_scope_get is None:
+        def user_scope_get():
+            try:
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as h:
+                    value, _t = winreg.QueryValueEx(h, "OPENAI_API_KEY")
+                    return value
+            except OSError:
+                return None
+            except ImportError:
+                return None
+    try:
+        key = user_scope_get()
+    except Exception:  # noqa: BLE001 - a probe failure means "not found"
+        key = None
+    if key and str(key).strip():
+        return str(key).strip(), "windows_user_scope"
+    return None, None
+
+
 def call_gpt(context_text, model, *, key, timeout=DEFAULT_TIMEOUT,
              max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-             transport=_real_transport, sleep=time.sleep, max_retries=MAX_RETRIES):
-    """Perform the GPT call with bounded retries. Returns a dict with keys:
-    ok, text, actual_model, response_id, api_status, retry_count, error, detail,
-    input_chars, output_chars, elapsed_seconds. Never includes the key/headers.
-    """
+             transport=_real_transport):
+    """Perform exactly ONE GPT call. The Review Council engine is the sole
+    retry owner (one adapter invocation = one API call), so worst-case API
+    spend per reviewer per round is bounded by the council's attempt budget,
+    never multiplied by hidden adapter retries. Returns a dict with keys:
+    ok, text, actual_model, response_id, api_status, error, detail,
+    input_chars, output_chars, actual token usage, elapsed_seconds. Never
+    includes the key/headers."""
     headers = {
         "Authorization": "Bearer " + key,
         "Content-Type": "application/json",
@@ -160,48 +211,40 @@ def call_gpt(context_text, model, *, key, timeout=DEFAULT_TIMEOUT,
     input_chars = len(context_text or "")
 
     start = time.monotonic()
-    last = {"error": "transport_error", "detail": "no attempt made"}
-    for attempt in range(max_retries + 1):
-        try:
-            status, text = transport(OPENAI_RESPONSES_URL, dict(headers), body_bytes, timeout)
-        except Exception as exc:  # noqa: BLE001 - transport failure is transient
-            last = {"error": "transport_error", "detail": type(exc).__name__}
-            if attempt < max_retries:
-                sleep(0.5 * (2 ** attempt))
-                continue
-            break
-        try:
-            resp_json = json.loads(text) if text else {}
-        except ValueError:
-            resp_json = {}
-        if status == 200:
-            out = extract_output_text(resp_json)
-            return {
-                "ok": True,
-                "text": out,
-                "actual_model": (resp_json.get("model") if isinstance(resp_json, dict) else None),
-                "response_id": (resp_json.get("id") if isinstance(resp_json, dict) else None),
-                "api_status": status,
-                "retry_count": attempt,
-                "input_chars": input_chars,
-                "output_chars": len(out or ""),
-                "elapsed_seconds": round(time.monotonic() - start, 3),
-            }
-        error_class, detail = _classify_api_error(status, resp_json)
-        last = {"error": error_class, "detail": detail, "api_status": status}
-        if _is_transient(status) and attempt < max_retries:
-            sleep(0.5 * (2 ** attempt))
-            continue
-        break
-
+    try:
+        status, text = transport(OPENAI_RESPONSES_URL, dict(headers), body_bytes, timeout)
+    except Exception as exc:  # noqa: BLE001 - a transport failure is one failed call
+        return {
+            "ok": False, "error": "transport_error", "detail": type(exc).__name__,
+            "api_status": None, "input_chars": input_chars, "output_chars": 0,
+            "actual_input_tokens": None, "actual_output_tokens": None,
+            "elapsed_seconds": round(time.monotonic() - start, 3),
+        }
+    try:
+        resp_json = json.loads(text) if text else {}
+    except ValueError:
+        resp_json = {}
+    if status == 200:
+        out = extract_output_text(resp_json)
+        in_tok, out_tok = _usage_tokens(resp_json)
+        return {
+            "ok": True,
+            "text": out,
+            "actual_model": (resp_json.get("model") if isinstance(resp_json, dict) else None),
+            "response_id": (resp_json.get("id") if isinstance(resp_json, dict) else None),
+            "api_status": status,
+            "input_chars": input_chars,
+            "output_chars": len(out or ""),
+            "actual_input_tokens": in_tok,
+            "actual_output_tokens": out_tok,
+            "elapsed_seconds": round(time.monotonic() - start, 3),
+        }
+    error_class, detail = _classify_api_error(status, resp_json)
     return {
-        "ok": False,
-        "error": last.get("error", "api_error"),
-        "detail": last.get("detail", ""),
-        "api_status": last.get("api_status"),
-        "retry_count": attempt,
-        "input_chars": input_chars,
-        "output_chars": 0,
+        "ok": False, "error": error_class, "detail": detail, "api_status": status,
+        "transient": _is_transient(status),
+        "input_chars": input_chars, "output_chars": 0,
+        "actual_input_tokens": None, "actual_output_tokens": None,
         "elapsed_seconds": round(time.monotonic() - start, 3),
     }
 
@@ -217,7 +260,8 @@ def _telemetry(requested_model, call_result, council_id, round_no, phase, error=
         "elapsed_seconds": call_result.get("elapsed_seconds"),
         "input_chars": call_result.get("input_chars"),
         "output_chars": call_result.get("output_chars"),
-        "retry_count": call_result.get("retry_count"),
+        "actual_input_tokens": call_result.get("actual_input_tokens"),
+        "actual_output_tokens": call_result.get("actual_output_tokens"),
         "council_id": council_id,
         "round": round_no,
         "phase": phase,
@@ -232,7 +276,8 @@ def _review_body(verdict, telemetry):
               "model={actual_model}, response_id={response_id}, "
               "elapsed={elapsed_seconds}s, input_chars={input_chars}, "
               "output_chars={output_chars}, api_status={api_status}, "
-              "retries={retry_count}, council={council_id}, round={round}, "
+              "tokens_in={actual_input_tokens}, tokens_out={actual_output_tokens}, "
+              "council={council_id}, round={round}, "
               "phase={phase}.").format(**telemetry)
     head = ("verdict={verdict}, confidence={confidence}, risk={risk_level}"
             ).format(**verdict)
@@ -253,12 +298,14 @@ def review(root, context_text, *, thread_id, work_item_id=None, packet_id=None,
            council_id=None, round=None, phase="plan", model=None,
            timeout=DEFAULT_TIMEOUT, max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
            transport=_real_transport, key_getter=None, env_get=os.environ.get,
-           sleep=time.sleep, max_retries=MAX_RETRIES, note_on_failure=True):
-    """Run a real GPT structured review and post it into the thread, ONLY on a
-    validated success. Returns a compact machine-readable result. `transport`,
-    `key_getter`, `env_get`, and `sleep` are injectable so tests never hit the
-    network, sleep, or touch the real environment."""
-    key_getter = key_getter or (lambda: env_get("OPENAI_API_KEY"))
+           note_on_failure=True):
+    """Run ONE real GPT structured review and post it into the thread, ONLY on
+    a validated success. Exactly one API call per invocation; the Review
+    Council engine owns all retry policy. Returns a compact machine-readable
+    result. `transport`, `key_getter`, and `env_get` are injectable so tests
+    never hit the network or touch the real environment."""
+    if key_getter is None:
+        key_getter = lambda: resolve_api_key(env_get=env_get)[0]  # noqa: E731
     requested_model = resolve_model(model, env_get=env_get)
 
     key = key_getter()
@@ -275,7 +322,7 @@ def review(root, context_text, *, thread_id, work_item_id=None, packet_id=None,
 
     call = call_gpt(context_text, requested_model, key=str(key).strip(),
                     timeout=timeout, max_output_tokens=max_output_tokens,
-                    transport=transport, sleep=sleep, max_retries=max_retries)
+                    transport=transport)
 
     if not call.get("ok"):
         error = call.get("error", "api_error")
@@ -285,7 +332,7 @@ def review(root, context_text, *, thread_id, work_item_id=None, packet_id=None,
                   "GPT review did not complete ({}); no GPT participation claimed.".format(error),
                   thread_id, work_item_id, packet_id)
         return {"ok": False, "posted": False, "reviewer": "gpt", "error": error,
-                "detail": call.get("detail", ""),
+                "detail": call.get("detail", ""), "transient": call.get("transient", False),
                 "hard_gate": error in HARD_GATE_ERRORS, "telemetry": tel}
 
     text = call.get("text") or ""

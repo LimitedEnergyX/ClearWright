@@ -931,6 +931,92 @@ def build_history(root, packet_id=None, thread_id=None, actor=None,
     return {"packets": packets, "messages": messages, "events": events}
 
 
+def build_ledger(root, scope="active"):
+    """Read-only: ONE unified History ledger across every durable source --
+    packets, messages, and agent events -- as uniform rows
+    {at, type, work_item_id, thread_id, packet_id, council_id, actor, event,
+     status, archived, record}. scope: active (default) | archived | all.
+    Archived rows are read directly from their archive paths via the archive
+    index and labeled archived: true. The client filters further (type, actor,
+    status, date, ids, text); nothing here mutates state."""
+    rows = []
+
+    def message_row(m, archived):
+        body = m.get("message") or ""
+        council = None
+        cm = re.search(r"\bcw-council-\d{8}T\d+\b", body)
+        if cm:
+            council = cm.group(0)
+        rows.append({
+            "at": m.get("at"), "type": "message",
+            "work_item_id": m.get("work_item_id"),
+            "thread_id": m.get("thread_id"), "packet_id": m.get("packet_id"),
+            "council_id": council, "actor": m.get("actor"),
+            "event": body[:160], "status": m.get("status"),
+            "archived": archived, "record": m,
+        })
+
+    def packet_row(summary, archived):
+        rows.append({
+            "at": summary.get("last_event_at"),
+            "type": "packet", "work_item_id": None, "thread_id": None,
+            "packet_id": summary.get("packet_id"), "council_id": None,
+            "actor": summary.get("role"),
+            "event": (summary.get("action") or summary.get("filename") or "")[:160],
+            "status": summary.get("status"), "archived": archived,
+            "record": summary,
+        })
+
+    def event_row(e, archived):
+        rows.append({
+            "at": e.get("at"), "type": "agent_event", "work_item_id": None,
+            "thread_id": None, "packet_id": e.get("packet_id"),
+            "council_id": None, "actor": e.get("actor"),
+            "event": (e.get("event") or "")[:160] +
+                     ((" - " + e.get("note", ""))[:80] if e.get("note") else ""),
+            "status": None, "archived": archived, "record": e,
+        })
+
+    if scope in ("active", "all"):
+        for m in cwm.read_messages(root):
+            if not m.get("simulated"):
+                message_row(m, False)
+        for lane in LANES:
+            lane_dir = os.path.join(root, lane)
+            if not os.path.isdir(lane_dir):
+                continue
+            for name in sorted(os.listdir(lane_dir)):
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    packet_row(packet_summary(os.path.join(lane_dir, name), lane), False)
+                except (OSError, ValueError):
+                    continue
+        for e in cwae.read_events(root):
+            event_row(e, False)
+
+    if scope in ("archived", "all"):
+        idx = cwarch._read_json(cwarch.index_path(cwarch.archive_root(root))) or {}
+        for rid, entry in (idx.get("ids") or {}).items():
+            rtype = entry.get("type")
+            for path in entry.get("paths", []):
+                data = cwarch._read_json(path)
+                if data is None:
+                    continue
+                if rtype == "thread" and os.sep + "communications" + os.sep in path:
+                    message_row(data, True)
+                elif rtype == "clearance_packet":
+                    try:
+                        packet_row(packet_summary(path, "clearance_done"), True)
+                    except (OSError, ValueError):
+                        continue
+                elif rtype == "agent_event":
+                    event_row(data, True)
+
+    rows.sort(key=lambda r: r.get("at") or "", reverse=True)
+    return {"rows": rows, "scope": scope, "count": len(rows)}
+
+
 def parse_codex_telemetry(text):
     """Parse a Codex review footer ("Telemetry: exit=..., elapsed=...s,
     bytes=..., lines=..., timed_out=..., classification=...") into structured
@@ -1026,6 +1112,205 @@ def _run_status(msgs):
     if inbound and all(m.get("intent") == "chat" for m in inbound):
         return "chat"
     return "open"
+
+
+# The six operator-facing phases in order. Derived ONLY from the selected
+# task's own durable state (its councils, gate, claim, and messages) -- a
+# historical or concurrent task can never affect another task's phase display.
+TASK_PHASES = ("request", "plan_review", "authority", "execute", "verify", "complete")
+
+
+def build_task_state(root, thread_id):
+    """Read-only: the selected-task header + phase-stepper model. Returns
+    {thread_id, work_item_id, packet_id, title, status, phase, phase_attention,
+     councils, current_council, gate, claim, next_action, phases}."""
+    import clearwright_gate as cwg
+    run = build_active_run(root, thread_id=thread_id)
+    tid = run.get("thread_id")
+    empty = {"thread_id": thread_id, "found": False}
+    if not tid:
+        return empty
+    msgs = run["messages"]
+    wid = run.get("work_item_id")
+    inbound = next((m for m in msgs if m.get("direction") == "inbound"), msgs[0])
+    status = _run_status(msgs)
+
+    # If the thread's originating message derived a work item, the id may not
+    # appear on any message until claim; derive it the same way work items do.
+    if not wid:
+        origin = next((m for m in msgs if m.get("direction") == "inbound"
+                       and m.get("intent") != "chat"), None)
+        if origin:
+            wid = "message:" + origin.get("message_id", "")
+
+    councils = cwrc.list_councils(root, thread_id=tid)
+    plan_c = next((c for c in councils if c.get("phase") == "plan"), None)
+    verify_c = next((c for c in councils if c.get("phase") == "verify"), None)
+    current_council = councils[0] if councils else None
+
+    gate = None
+    if wid:
+        try:
+            gate = cwg.active_gate(root, wid)
+        except Exception:
+            gate = None
+
+    claim_msg = next((m for m in msgs if m.get("status") == "claimed"), None)
+    claim = {"claimed": claim_msg is not None,
+             "claimed_by": (claim_msg or {}).get("actor"),
+             "claimed_at": (claim_msg or {}).get("at")}
+
+    plan_agreed = bool(plan_c and plan_c.get("outcome") == "agreement_threshold_met")
+    verify_agreed = bool(verify_c and verify_c.get("outcome") == "agreement_threshold_met")
+    done = any(m.get("closure") in ("done", "closed_by_operator") for m in msgs) or \
+        status == "responded"
+
+    # Phase derivation, in precedence order. Authority (an unresolved gate)
+    # renders amber and static; it interrupts whatever phase was underway.
+    phase_attention = False
+    if done:
+        phase = "complete"
+    elif gate is not None:
+        phase = "authority"
+        phase_attention = True
+    elif verify_c and not verify_agreed:
+        phase = "verify"
+    elif plan_agreed and not verify_c:
+        phase = "execute"
+    elif plan_c and not plan_agreed:
+        phase = "plan_review"
+    else:
+        phase = "request"
+
+    if phase == "complete":
+        next_action = "None; the task is terminal"
+    elif phase == "authority":
+        next_action = ("Operator decision required: resolve gate {} "
+                       "(grant-proceed or close)").format((gate or {}).get("gate_id"))
+    elif phase == "verify":
+        next_action = "Run/rerun verification rounds to agreement, then complete"
+    elif phase == "execute":
+        next_action = "Execute inside the approved scope, then run verification"
+    elif phase == "plan_review":
+        next_action = "Continue plan council rounds and reconciliation to agreement"
+    elif status == "claimed":
+        next_action = "Draft the plan packet and start the plan council"
+    else:
+        next_action = "Claim the work item to begin"
+
+    # Overview data: the operator-approved scope and verification requirement
+    # from the persisted envelope, and the latest reconciliation / blockers
+    # from the most recent council's durable record.
+    envelope = {}
+    if wid and ":" in wid:
+        mid = wid.split(":", 1)[1]
+        env_path = os.path.join(root, "task_envelopes", mid + ".json")
+        envelope = load_json_safe(env_path) or {}
+    latest_recon = None
+    latest_blockers = []
+    if current_council:
+        full = cwrc.get_council(root, current_council["council_id"]) or {}
+        rounds = [r for r in full.get("rounds", []) if r.get("substantive", True)]
+        for r in reversed(rounds):
+            if r.get("reconciliation"):
+                latest_recon = {
+                    "round": r.get("round"),
+                    "summary": (r["reconciliation"].get("summary") or "")[:400],
+                    "revised_plan": (r["reconciliation"].get("revised_plan") or [])[:6],
+                    "ready_to_proceed": r["reconciliation"].get("ready_to_proceed"),
+                }
+                break
+        latest_blockers = ((full.get("outcome") or {}).get("unresolved_blockers")
+                           or [])[:6]
+
+    # Audit data: every gate (append-only history) and its authority records,
+    # plus the artifact ids/hashes any bound council pinned.
+    all_gates = []
+    if wid:
+        try:
+            all_gates = [{"gate_id": g.get("gate_id"),
+                          "council_id": g.get("council_id"),
+                          "phase": g.get("phase"), "outcome": g.get("outcome"),
+                          "created_at": g.get("created_at"),
+                          "disposition": g.get("disposition"),
+                          "authority": g.get("authority")}
+                         for g in cwg.load_gates(root, wid)]
+        except Exception:
+            all_gates = []
+    artifacts = []
+    seen_artifacts = set()
+    try:
+        import clearwright_artifacts as cwa_mod
+        for c in councils:
+            full = cwrc.get_council(root, c["council_id"]) or {}
+            for aid in ((full.get("council") or {}).get("artifact_ids") or []):
+                if aid in seen_artifacts:
+                    continue
+                seen_artifacts.add(aid)
+                try:
+                    rec = cwa_mod.get(root, aid)
+                    artifacts.append({"artifact_id": aid,
+                                      "sha256": rec.get("sha256"),
+                                      "original_path": rec.get("original_path")})
+                except Exception:
+                    artifacts.append({"artifact_id": aid})
+    except Exception:
+        pass
+
+    verification_required = bool(envelope.get("_audit", {}).get(
+        "verification_required", envelope.get("verification_required", False)))
+    completion_criteria = []
+    if verification_required:
+        completion_criteria.append("Verification council must reach agreement")
+    if gate is not None:
+        completion_criteria.append("Unresolved gate must be resolved by operator "
+                                   "authority or the item operator-closed")
+    if envelope.get("task_kind") in ("governed", "high_risk"):
+        completion_criteria.append("Clearance packet must be in clearance_done")
+    completion_criteria.append("Completion is recorded via complete "
+                               "(DONE) or operator-only close")
+
+    return {
+        "thread_id": tid, "found": True,
+        "work_item_id": wid, "packet_id": run.get("packet_id"),
+        "title": (inbound.get("message") or "")[:160],
+        "status": status,
+        "phase": phase, "phase_attention": phase_attention,
+        "phases": list(TASK_PHASES),
+        "councils": councils,
+        "current_council": current_council and {
+            "council_id": current_council.get("council_id"),
+            "phase": current_council.get("phase"),
+            "outcome": current_council.get("outcome"),
+            "rounds": current_council.get("current_round")},
+        "gate": gate and {"gate_id": gate.get("gate_id"),
+                          "council_id": gate.get("council_id"),
+                          "created_at": gate.get("created_at"),
+                          "disposition": gate.get("disposition")},
+        "gates": all_gates,
+        "claim": claim,
+        "next_action": next_action,
+        "overview": {
+            "approved_scope": envelope.get("approved_scope"),
+            "request": envelope.get("request"),
+            "verification_required": verification_required,
+            "latest_reconciliation": latest_recon,
+            "blockers": latest_blockers,
+            "completion_criteria": completion_criteria,
+        },
+        "artifacts": artifacts,
+    }
+
+
+def build_archive_index_summary(root):
+    """Read-only: the archived record ids (from the archive index) for the
+    queue's Archived group and History's archived scope."""
+    idx = cwarch._read_json(cwarch.index_path(cwarch.archive_root(root))) or {}
+    rows = [{"id": rid, "type": entry.get("type"),
+             "paths": len(entry.get("paths", []))}
+            for rid, entry in (idx.get("ids") or {}).items()]
+    rows.sort(key=lambda r: r["id"])
+    return {"archived": rows, "count": len(rows)}
 
 
 def build_runs(root, limit=None, status=None, actor=None, source=None,
@@ -1323,6 +1608,27 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(build_history(
                 QUEUE_ROOT, packet_id=q("packet_id"), thread_id=q("thread_id"),
                 actor=q("actor"), lane=q("lane"), status=q("status")))
+            return
+        if path == "/api/ledger":
+            # Read-only unified History ledger; ?scope=active|archived|all.
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            scope = urllib.parse.unquote(params.get("scope", "")) or "active"
+            if scope not in ("active", "archived", "all"):
+                scope = "active"
+            self._send_json(build_ledger(QUEUE_ROOT, scope=scope))
+            return
+        if path == "/api/task-state":
+            # Read-only selected-task header + phase model for one thread.
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            thread_id = urllib.parse.unquote(params.get("thread_id", "")) or None
+            self._send_json(build_task_state(QUEUE_ROOT, thread_id))
+            return
+        if path == "/api/archive-index":
+            self._send_json(build_archive_index_summary(QUEUE_ROOT))
             return
         if path == "/api/review-councils":
             # Read-only. The web server never runs GPT or Codex; it only reads

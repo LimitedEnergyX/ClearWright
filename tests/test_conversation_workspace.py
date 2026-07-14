@@ -149,12 +149,12 @@ class UiTests(unittest.TestCase):
         self.appjs = read(os.path.join(STATIC, "app.js"))
         self.css = read(os.path.join(STATIC, "style.css"))
 
-    def test_conversations_button_and_view_exist(self):
-        self.assertIn('id="conversations-btn"', self.html)
-        self.assertIn('id="conversations-view"', self.html)
-        self.assertIn('id="conv-list"', self.html)
+    def test_work_page_and_conversation_workspace_exist(self):
+        # The Conversations top-level view merged into the unified Work page:
+        # the queue region lists threads, the workspace renders the selection.
+        self.assertIn('id="nav-work"', self.html)
+        self.assertIn('id="queue-region"', self.html)
         self.assertIn('id="conv-detail"', self.html)
-        self.assertIn("function renderConvList", self.appjs)
         self.assertIn("function renderConvDetail", self.appjs)
         self.assertIn("/api/conversations", self.appjs)
 
@@ -188,8 +188,8 @@ class UiTests(unittest.TestCase):
         self.assertIn("nothing here is simulated", self.html)
 
     def test_other_views_intact(self):
-        for token in ('id="active-run-view"', 'id="history-view"', 'id="health-chip"',
-                      'id="pulse-inspector"', 'id="work-items"', 'id="comms"'):
+        for token in ('id="center-work"', 'id="history-view"', 'id="health-chip"',
+                      'id="pulse-inspector"', 'id="queue-region"', 'id="comms"'):
             self.assertIn(token, self.html)
 
 

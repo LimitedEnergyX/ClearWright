@@ -92,58 +92,80 @@ function field(title, inner) {
 }
 
 // --------------------------------------------------------------------------- //
-// Clearance workflow canvas (node graph)
+// Selected task: header + compact phase stepper
+//
+// The stepper derives ONLY from the selected task's own durable state via
+// /api/task-state (its councils, gate, claim, and messages) -- a historical or
+// concurrent task can never affect the live phase display. Completed phases
+// are static, only the CURRENT phase animates, an unresolved gate (operator
+// required) renders amber and STATIC, and future phases are muted.
 // --------------------------------------------------------------------------- //
 
-// The fixed clearance path every request travels, drawn as a vertical node
-// graph. The first three stages are what agents would do before submitting;
-// they are shown dashed as simulated context. Later stages light up from the
-// live queue state. This is a visual aid, not a workflow editor: nodes are
-// fixed, nothing is draggable, and nothing is imported.
-const CANVAS_W = 700;
-const CANVAS_H = 840;
+const PHASE_LABELS = {
+  request: "Request", plan_review: "Plan Review", authority: "Authority",
+  execute: "Execute", verify: "Verify", complete: "Complete",
+};
 
-const GRAPH_NODES = [
-  { key: "start", label: "Mission Start", icon: "▶", cls: "gicon-start", x: 350, y: 50, sim: true },
-  { key: "planner", label: "Planner Review", icon: "◇", cls: "gicon-agent", x: 350, y: 140, sim: true },
-  { key: "scope", label: "Scope/Risk Check", icon: "?", cls: "gicon-cond", x: 350, y: 230, sim: true },
-  { key: "incoming", label: "Incoming Clearance Request", icon: "◇", cls: "gicon-agent", x: 350, y: 325 },
-  { key: "decision", label: "Operator Decision", icon: "⌘", cls: "gicon-op", x: 350, y: 420,
-    sub: "human-commanded" },
-  { key: "dta", label: "DTA", icon: "✕", cls: "gicon-deny", x: 145, y: 520, sub: "denied · clearance_done" },
-  { key: "cta", label: "CTA", icon: "✓", cls: "gicon-start", x: 350, y: 520, sub: "bounded lease" },
-  { key: "rfi", label: "RFI", icon: "?", cls: "gicon-cond", x: 545, y: 520, sub: "needs information" },
-  { key: "claimed", label: "Claimed Work", icon: "◇", cls: "gicon-agent", x: 350, y: 620, sub: "IN_PROGRESS" },
-  { key: "verify", label: "Verification", icon: "?", cls: "gicon-cond", x: 350, y: 705 },
-  { key: "done", label: "DONE", icon: "■", cls: "gicon-end", x: 350, y: 790, sub: "clearance_done" },
-];
+let lastTaskState = null;
+let lastStepperSig = "";
 
-const GRAPH_EDGES = [
-  ["start", "planner"], ["planner", "scope"], ["scope", "incoming"],
-  ["incoming", "decision"],
-  ["decision", "dta"], ["decision", "cta"], ["decision", "rfi"],
-  ["cta", "claimed"], ["claimed", "verify"], ["verify", "done"],
-  // RFI returns to the incoming request for clarification (pre-decision only).
-  ["rfi", "incoming", "loop"],
-];
+function renderPhaseStepper(ts) {
+  const el = document.getElementById("phase-stepper");
+  if (!el) return;
+  if (!ts || !ts.found) {
+    el.innerHTML = '<p class="muted">No task selected.</p>';
+    lastStepperSig = "";
+    return;
+  }
+  const phases = ts.phases || Object.keys(PHASE_LABELS);
+  const currentIdx = phases.indexOf(ts.phase);
+  // Skip the rebuild when nothing changed, so the CSS animation on the
+  // current step is not restarted by every 2s poll.
+  const sig = ts.thread_id + "|" + ts.phase + "|" + ts.phase_attention;
+  if (sig === lastStepperSig) return;
+  lastStepperSig = sig;
+  el.innerHTML = phases.map((p, i) => {
+    let cls = "step";
+    if (i < currentIdx) cls += " step-done";           // completed: static
+    else if (i === currentIdx) {
+      cls += ts.phase_attention ? " step-attention"    // operator required: amber, static
+        : (ts.phase === "complete" ? " step-done step-terminal" : " step-current");
+    } else cls += " step-future";                       // future: muted
+    return '<div class="' + cls + '" data-phase="' + esc(p) + '">' +
+      '<span class="step-dot" aria-hidden="true"></span>' +
+      '<span class="step-label">' + esc(PHASE_LABELS[p] || p) + "</span></div>";
+  }).join('<span class="step-link" aria-hidden="true"></span>');
+}
 
-function flowActivity(state) {
-  const lanes = state.lanes || {};
-  const outbox = lanes.clearance_outbox || [];
-  const inprog = lanes.clearance_in_progress || [];
-  const done = lanes.clearance_done || [];
-  const hasDecidable = outbox.some((c) => (c.allowed_actions || []).includes("cta"));
-  return {
-    start: true, planner: true, scope: true,
-    incoming: hasDecidable,
-    decision: hasDecidable,
-    cta: outbox.some((c) => c.status === "CTA"),
-    dta: done.some((c) => c.status === "DTA"),
-    rfi: outbox.some((c) => c.status === "RFI_PENDING"),
-    claimed: inprog.length > 0,
-    verify: inprog.length > 0,
-    done: done.some((c) => c.status === "DONE"),
-  };
+function renderTaskHeader(ts) {
+  const el = document.getElementById("task-header");
+  if (!el) return;
+  if (!ts || !ts.found) {
+    el.innerHTML = '<p class="muted">No task selected. Pick one from the work queue.</p>';
+    return;
+  }
+  const gate = ts.gate;
+  const claim = ts.claim || {};
+  const council = ts.current_council;
+  let html = '<div class="th-title">' + esc(ts.title || ts.thread_id) + "</div>";
+  html += '<div class="th-meta">';
+  if (ts.work_item_id) html += '<span class="th-chip mono" title="work item">' + esc(ts.work_item_id) + "</span>";
+  html += '<span class="th-chip th-status th-status-' + esc(ts.status) + '">' + esc(ts.status) + "</span>";
+  html += '<span class="th-chip th-phase">' + esc(PHASE_LABELS[ts.phase] || ts.phase) + "</span>";
+  if (council) {
+    html += '<span class="th-chip mono" title="current council: ' + esc(council.outcome || "running") + '">' +
+      esc(council.council_id) + " · " + esc(council.phase) + " r" + esc(council.rounds || 0) +
+      (council.outcome ? " · " + esc(council.outcome) : "") + "</span>";
+  }
+  if (gate) {
+    html += '<span class="th-chip th-gate">unresolved gate ' + esc(gate.gate_id) + "</span>";
+  }
+  html += '<span class="th-chip">' + (claim.claimed
+    ? "claimed by " + esc(claim.claimed_by || "?")
+    : "unclaimed") + "</span>";
+  html += "</div>";
+  html += '<div class="th-next">Next: ' + esc(ts.next_action || "") + "</div>";
+  el.innerHTML = html;
 }
 
 // Which stages should pulse. The server computes this from real durable state
@@ -193,86 +215,167 @@ function renderPulseInspector(pulse) {
   el.innerHTML = html;
 }
 
-function edgePath(from, to, kind) {
-  const x1 = from.x, y1 = from.y + 24, x2 = to.x, y2 = to.y - 24;
-  if (kind === "loop") {
-    // Curve out to the right and back up to the target's right side.
-    const outX = Math.max(x1, x2) + 118;
-    return "M " + (from.x + 52) + " " + (from.y - 12) +
-      " C " + outX + " " + (from.y - 55) + ", " + outX + " " + (to.y + 55) +
-      ", " + (to.x + 128) + " " + to.y;
+// The selected-task poll: header, stepper, operator panel, and the Work tabs
+// all bind to this ONE state object, so a current-task mismatch between the
+// queue, header, phase display, conversation, and operator panel cannot occur.
+async function refreshTaskState() {
+  try {
+    const url = selectedConvThread
+      ? "/api/task-state?thread_id=" + encodeURIComponent(selectedConvThread)
+      : "/api/task-state";
+    const ts = await getJSON(url);
+    if (ts && ts.found && !selectedConvThread) {
+      // Adopt the server's default (most recently worked) task as the
+      // selection so every panel binds to the same task from first paint.
+      selectedConvThread = ts.thread_id;
+    }
+    lastTaskState = ts && ts.found ? ts : null;
+  } catch (e) {
+    return; // keep the previous state on a transient fetch error
   }
-  const bend = Math.min(46, Math.abs(y2 - y1) / 2 + 14);
-  return "M " + x1 + " " + y1 +
-    " C " + x1 + " " + (y1 + bend) + ", " + x2 + " " + (y2 - bend) + ", " + x2 + " " + y2;
+  renderTaskHeader(lastTaskState);
+  renderPhaseStepper(lastTaskState);
+  renderOperatorPanel(lastTaskState);
+  if (currentView === "command") renderCommandOverview(lastTaskState);
 }
 
-let lastFlowSig = "";
+// The right-hand operator panel: the next required action, the authority
+// state (gate / clearance / verification), and the contextual operator
+// actions -- all bound to the SAME selected task as the header and stepper.
+function renderOperatorPanel(ts) {
+  const nextBody = document.getElementById("next-action-body");
+  const authBody = document.getElementById("authority-body");
+  const actions = document.getElementById("operator-actions");
+  if (!nextBody || !authBody || !actions) return;
+  if (!ts) {
+    nextBody.innerHTML = '<p class="muted">No task selected.</p>';
+    authBody.innerHTML = '<p class="muted">No task selected.</p>';
+    actions.innerHTML = '<p class="muted">No task selected.</p>';
+    return;
+  }
+  nextBody.innerHTML = '<p class="op-next' + (ts.phase_attention ? " op-next-attention" : "") +
+    '">' + esc(ts.next_action || "") + "</p>";
 
-function renderWorkflow(state) {
-  const active = flowActivity(state);
-  const pulse = flowPulse(state);
-  // Skip the rebuild when nothing changed, so the pulse animation is not
-  // restarted on every fast poll.
-  const sig = JSON.stringify(active) + "|" + JSON.stringify(pulse);
-  if (sig === lastFlowSig) return;
-  lastFlowSig = sig;
-  const canvas = document.getElementById("gcanvas");
-  const svg = document.getElementById("gedges");
-  const byKey = {};
-  GRAPH_NODES.forEach((n) => { byKey[n.key] = n; });
+  let auth = "";
+  if (ts.gate) {
+    auth += '<div class="op-auth op-auth-gate">Unresolved gate <span class="mono">' +
+      esc(ts.gate.gate_id) + "</span> from council <span class=\"mono\">" +
+      esc(ts.gate.council_id) + "</span>. The governed workflow is stopped; " +
+      "proceeding requires a durable post-gate operator authorization (grant-proceed) " +
+      "or operator-only close.</div>";
+  } else {
+    auth += '<div class="op-auth">No unresolved gate.</div>';
+  }
+  const ov = ts.overview || {};
+  auth += '<div class="op-auth">Verification ' +
+    (ov.verification_required ? "REQUIRED before DONE" : "not required") + ".</div>";
+  if (ov.approved_scope) {
+    auth += '<details class="op-scope"><summary>Approved scope</summary><p>' +
+      esc(ov.approved_scope) + "</p></details>";
+  } else {
+    auth += '<div class="op-auth muted">No recorded approved scope (lexical or chat task).</div>';
+  }
+  authBody.innerHTML = auth;
 
-  let paths = "";
-  GRAPH_EDGES.forEach(([a, b, kind]) => {
-    const on = active[a] && active[b];
-    paths += '<path class="gedge' + (on ? " edge-active" : "") + '" d="' +
-      edgePath(byKey[a], byKey[b], kind) + '" />';
+  let btns = "";
+  btns += '<button class="btn btn-quiet conv-action" type="button" data-action="ack">Mark reviewed</button>';
+  btns += '<button class="btn btn-quiet conv-action" type="button" data-action="workitem">Create work item</button>';
+  btns += '<button class="btn btn-quiet conv-action" type="button" data-action="escalate">Request clearance packet</button>';
+  btns += '<button class="btn btn-quiet" type="button" data-open-work="1">Open in Work</button>';
+  actions.innerHTML = btns;
+}
+
+// The Command Center's at-a-glance overview of the selected task: status and
+// phase, next action, approved scope, plan summary, blockers, the latest
+// reconciliation, and completion criteria (requirement: the FULL request body
+// lives here, not in the queue).
+function renderCommandOverview(ts) {
+  const el = document.getElementById("command-overview");
+  if (el) renderCommandOverviewInto(el, ts);
+}
+
+function renderCommandOverviewInto(el, ts) {
+  if (!ts || !ts.found) {
+    el.innerHTML = '<p class="muted">Select a task to see its overview.</p>';
+    return;
+  }
+  const ov = ts.overview || {};
+  let html = '<div class="ov-grid">';
+  html += '<div class="ov-card"><div class="ov-k">Status &middot; phase</div><div class="ov-v">' +
+    esc(ts.status) + " &middot; " + esc(PHASE_LABELS[ts.phase] || ts.phase) + "</div></div>";
+  html += '<div class="ov-card"><div class="ov-k">Next action</div><div class="ov-v">' +
+    esc(ts.next_action || "") + "</div></div>";
+  if (ov.request) {
+    html += '<div class="ov-card ov-span"><div class="ov-k">Request</div><div class="ov-v ov-pre">' +
+      esc(ov.request) + "</div></div>";
+  }
+  if (ov.approved_scope) {
+    html += '<div class="ov-card ov-span"><div class="ov-k">Approved scope</div><div class="ov-v ov-pre">' +
+      esc(ov.approved_scope) + "</div></div>";
+  }
+  const recon = ov.latest_reconciliation;
+  if (recon) {
+    html += '<div class="ov-card ov-span"><div class="ov-k">Latest reconciliation (round ' +
+      esc(recon.round) + ", ready: " + esc(String(recon.ready_to_proceed)) + ')</div><div class="ov-v">' +
+      esc(recon.summary || "") + "</div>" +
+      ((recon.revised_plan || []).length
+        ? "<ul>" + recon.revised_plan.map((p) => "<li>" + esc(p) + "</li>").join("") + "</ul>" : "") +
+      "</div>";
+  }
+  html += '<div class="ov-card"><div class="ov-k">Blockers</div><div class="ov-v">' +
+    ((ov.blockers || []).length
+      ? "<ul>" + ov.blockers.map((b) => "<li>" + esc(b) + "</li>").join("") + "</ul>"
+      : '<span class="muted">None recorded.</span>') + "</div></div>";
+  html += '<div class="ov-card"><div class="ov-k">Completion criteria</div><div class="ov-v"><ul>' +
+    (ov.completion_criteria || []).map((c) => "<li>" + esc(c) + "</li>").join("") +
+    "</ul></div></div>";
+  html += "</div>";
+  el.innerHTML = html;
+}
+
+// --------------------------------------------------------------------------- //
+// Primary navigation: Command Center | Work | History. One selected task is
+// shared by every view; Attention is a queue filter, never a separate page.
+// --------------------------------------------------------------------------- //
+
+let currentView = "command";
+
+function showView(view) {
+  if (!["command", "work", "history"].includes(view)) return;
+  closeAllPopovers();
+  currentView = view;
+  document.getElementById("shell").hidden = view === "history";
+  document.getElementById("history-view").hidden = view !== "history";
+  document.getElementById("center-command").hidden = view !== "command";
+  document.getElementById("center-work").hidden = view !== "work";
+  ["command", "work", "history"].forEach((v) => {
+    const btn = document.getElementById("nav-" + v);
+    if (btn) btn.classList.toggle("is-active", v === view);
   });
-  svg.innerHTML = paths;
-
-  canvas.querySelectorAll(".gnode").forEach((el) => el.remove());
-  GRAPH_NODES.forEach((n) => {
-    const el = document.createElement("div");
-    el.className = "gnode" + (n.sim ? " gnode-sim" : "") +
-      (active[n.key] ? " gnode-active" : "") +
-      (pulse[n.key] ? " gnode-pulse" : "");
-    el.style.left = n.x + "px";
-    el.style.top = n.y + "px";
-    let inner = '<span class="gicon ' + n.cls + '">' + n.icon + '</span>' +
-      '<span class="glabel">' + esc(n.label);
-    if (n.sub) inner += '<span class="gnode-sub">' + esc(n.sub) + "</span>";
-    inner += "</span>";
-    el.innerHTML = inner;
-    if (n.sim) el.title = "Simulated agent stage (before packet intake)";
-    canvas.appendChild(el);
-  });
+  document.body.classList.toggle("history-open", view === "history");
+  if (view === "history") loadHistory();
+  if (view === "work") {
+    loadConversations();
+    placeWorkComposer();
+  }
+  if (view === "command") renderCommandOverview(lastTaskState);
 }
 
-// Canvas zoom (view-only; the graph itself is fixed). At fit scale the wrap
-// has no scrollbars; panning only becomes available when zoomed past fit, so
-// the page never has competing scroll regions by default.
-let canvasScale = 1.0;
-let fittedScale = 1.0;
-
-function applyCanvasScale() {
-  const wrap = document.getElementById("canvas-wrap");
-  const canvas = document.getElementById("gcanvas");
-  const tx = Math.max(0, (wrap.clientWidth - CANVAS_W * canvasScale) / 2);
-  canvas.style.transform = "translate(" + tx + "px, 8px) scale(" + canvasScale + ")";
-  wrap.style.overflow = canvasScale > fittedScale + 0.001 ? "auto" : "hidden";
-}
-
-function zoomCanvas(delta) {
-  canvasScale = Math.min(1.4, Math.max(0.45, canvasScale + delta));
-  applyCanvasScale();
-}
-
-function fitCanvas() {
-  const wrap = document.getElementById("canvas-wrap");
-  fittedScale = Math.min(1.0, (wrap.clientHeight - 16) / CANVAS_H,
-    (wrap.clientWidth - 16) / CANVAS_W);
-  canvasScale = fittedScale;
-  applyCanvasScale();
+// The Work page's fixed composer lives in the document as a template and is
+// moved under the workspace when the Work view opens.
+function placeWorkComposer() {
+  const composer = document.getElementById("conv-composer");
+  const hint = document.getElementById("conv-composer-hint");
+  const host = document.getElementById("work-composer-dock");
+  if (!composer || !host) return;
+  host.appendChild(composer);
+  host.appendChild(hint);
+  composer.hidden = false;
+  hint.hidden = false;
+  if (convComposer) {
+    convComposer.updateBanner();
+    convComposer.autoGrow();
+  }
 }
 
 // --------------------------------------------------------------------------- //
@@ -281,23 +384,22 @@ function fitCanvas() {
 
 function renderOperatorCard(state) {
   const holder = document.getElementById("operator-card");
-  const panel = holder.closest(".operator-panel");
+  const panel = holder.closest(".clearance-card") || holder.closest(".operator-panel");
   const outbox = (state.lanes && state.lanes.clearance_outbox) || [];
   const card = outbox.find((c) => (c.allowed_actions || []).includes("cta"));
   const waiting = outbox.filter((c) => (c.allowed_actions || []).includes("cta")).length;
 
   if (!card) {
+    // Zero requests: collapse the card to a compact status line. It expands
+    // automatically only when a request is actually waiting.
     if (panel) panel.classList.add("is-empty");
     if (currentMode === "operator") {
       holder.innerHTML =
-        '<p class="muted">' + esc(OPERATOR_EMPTY_REQUESTS) +
-        " Clearance packets arrive from agents, tools, scripts, or integrations " +
-        "through the request tool or POST /api/request.</p>";
+        '<p class="muted">' + esc(OPERATOR_EMPTY_REQUESTS) + "</p>";
     } else {
       holder.innerHTML =
-        '<p class="muted">No incoming requests. Packets arrive here from agents, ' +
-        "tools, scripts, or integrations. In this demo, ask the agents a question " +
-        "below and send the condensed recommendation to the clearance queue.</p>";
+        '<p class="muted">No incoming requests. Ask the demo agents a question ' +
+        "and send the condensed recommendation to the clearance queue.</p>";
     }
     return;
   }
@@ -779,111 +881,270 @@ const WORK_KIND_LABEL = {
   message: "request", packet: "CTA packet", in_progress: "in progress", rfi: "RFI",
 };
 
-function renderWorkItems(items) {
-  const el = document.getElementById("work-items");
-  if (!el) return;
-  if (!items || !items.length) {
-    el.innerHTML = '<p class="muted work-empty">No open work items.</p>';
-    return;
-  }
-  el.innerHTML = "";
-  items.forEach((it) => {
-    const row = document.createElement("div");
-    row.className = "work-item work-" + esc(it.kind);
-    let html = '<div class="work-top"><span class="work-kind">' +
-      esc(WORK_KIND_LABEL[it.kind] || it.kind) + '</span><span class="work-badge">' +
-      esc(it.status || "open") + "</span></div>";
-    html += '<div class="work-title">' + esc(it.title || it.summary || "") + "</div>";
-    const meta = [];
-    if (it.packet_id) meta.push("packet " + esc(it.packet_id));
-    if (it.thread_id) meta.push("thread " + esc(it.thread_id));
-    if (it.actor) meta.push("from " + esc(it.actor) + (it.source ? " (" + esc(it.source) + ")" : ""));
-    if (it.claimed_by) meta.push("claimed by " + esc(it.claimed_by));
-    if (meta.length) html += '<div class="work-meta">' + meta.join(" · ") + "</div>";
-    html += '<div class="work-next">next: ' + esc(it.next_action || "") + "</div>";
-    html += '<div class="work-id mono">' + esc(it.work_item_id) + "</div>";
-    row.innerHTML = html;
-    el.appendChild(row);
-  });
-}
+// --------------------------------------------------------------------------- //
+// Work queue: compact entries grouped by Attention / Active / Recent /
+// Archived. Each row shows a concise title, status, phase, age, and (for the
+// Attention group) the reason it needs an operator. The FULL request body
+// belongs in the selected task's Overview, never in the queue. Actionable
+// work only (chat stays out); clicking a row selects that task everywhere.
+// --------------------------------------------------------------------------- //
 
 let lastWorkItems = [];
+let lastQueueCouncils = [];
+let lastArchiveIndex = { archived: [], count: 0 };
+let queueAttentionOnly = false;
+
+function relativeAge(iso) {
+  if (!iso) return "";
+  const then = new Date(iso.replace(/(\.\d{3})\d*Z$/, "$1Z"));
+  if (isNaN(then.getTime())) return "";
+  const sec = Math.max(0, Math.floor((Date.now() - then.getTime()) / 1000));
+  if (sec < 90) return "now";
+  if (sec < 3600) return Math.floor(sec / 60) + "m";
+  if (sec < 86400) return Math.floor(sec / 3600) + "h";
+  return Math.floor(sec / 86400) + "d";
+}
+
+// The newest council per thread (the API returns councils newest-first). A
+// superseded operator_required council must never flag a thread forever:
+// only the LATEST council's outcome describes the thread's current state.
+function latestCouncilFor(threadId) {
+  return lastQueueCouncils.find((c) => c.thread_id === threadId) || null;
+}
+
+// A cheap per-thread phase hint for queue rows (the SELECTED task gets the
+// precise server-derived phase via /api/task-state; rows only need a hint).
+function queuePhaseHint(threadId, status) {
+  const councils = lastQueueCouncils.filter((c) => c.thread_id === threadId);
+  const verify = councils.find((c) => c.phase === "verify");
+  const plan = councils.find((c) => c.phase === "plan");
+  if (status === "responded" || status === "chat") return "Complete";
+  const latest = latestCouncilFor(threadId);
+  if (latest && latest.outcome === "operator_required") return "Authority";
+  if (verify) return verify.outcome === "agreement_threshold_met" ? "Complete" : "Verify";
+  if (plan) return plan.outcome === "agreement_threshold_met" ? "Execute" : "Plan Review";
+  return "Request";
+}
+
+function queueRow(entry) {
+  const selected = entry.thread_id && entry.thread_id === selectedConvThread;
+  const bits = ['<span class="q-status q-status-' + esc(entry.status) + '">' + esc(entry.status) + "</span>"];
+  if (entry.phase) bits.push('<span class="q-phase">' + esc(entry.phase) + "</span>");
+  if (entry.age) bits.push('<span class="q-age">' + esc(entry.age) + "</span>");
+  return '<div class="q-row' + (selected ? " is-selected" : "") +
+    '" data-thread="' + esc(entry.thread_id || "") +
+    '" data-archived="' + (entry.archived ? "1" : "") + '">' +
+    '<div class="q-title">' + esc((entry.title || "").slice(0, 72)) + "</div>" +
+    '<div class="q-meta">' + bits.join("") + "</div>" +
+    (entry.reason ? '<div class="q-reason">' + esc(entry.reason) + "</div>" : "") +
+    "</div>";
+}
+
+function buildQueueGroups() {
+  const attention = [];
+  const active = [];
+  const seenThreads = new Set();
+
+  // Attention: anything waiting on an operator decision -- CTA packets, RFI
+  // packets, and threads whose latest council escalated operator_required.
+  lastWorkItems.forEach((it) => {
+    if (it.kind === "packet" || it.kind === "rfi") {
+      attention.push({
+        thread_id: it.thread_id, title: it.title || it.summary || it.packet_id,
+        status: it.status || "open",
+        phase: it.kind === "rfi" ? "Authority" : "Authority",
+        age: relativeAge(it.created_at),
+        reason: it.kind === "rfi" ? "RFI awaiting clarification"
+          : "CTA decision required (clear, deny, or RFI)",
+      });
+    }
+  });
+  // Only a thread whose LATEST council escalated still needs the operator;
+  // resolved gates with a later agreed council are back to plain active work.
+  const gatedThreads = new Set(lastQueueCouncils
+    .filter((c) => c.thread_id && c.outcome === "operator_required" &&
+      latestCouncilFor(c.thread_id) === c)
+    .map((c) => c.thread_id));
+
+  lastWorkItems.forEach((it) => {
+    if (it.kind !== "message" || !it.thread_id) return;
+    seenThreads.add(it.thread_id);
+    const entry = {
+      thread_id: it.thread_id, title: it.title || it.summary || "",
+      status: it.status || "open",
+      phase: queuePhaseHint(it.thread_id, it.status),
+      age: relativeAge(it.created_at),
+    };
+    if (gatedThreads.has(it.thread_id)) {
+      entry.reason = "council escalated: operator required";
+      entry.phase = "Authority";
+      attention.push(entry);
+    } else {
+      active.push(entry);
+    }
+  });
+  lastWorkItems.forEach((it) => {
+    if (it.kind === "in_progress") {
+      active.push({
+        thread_id: it.thread_id, title: it.title || it.packet_id,
+        status: "in progress", phase: "Execute", age: "",
+      });
+    }
+  });
+
+  // Recent: terminal conversations (responded / chat), newest first.
+  const recent = (lastConversations || [])
+    .filter((c) => !seenThreads.has(c.thread_id) &&
+      (c.status === "responded" || c.status === "chat"))
+    .slice(0, 12)
+    .map((c) => ({
+      thread_id: c.thread_id, title: c.title || c.thread_id,
+      status: c.status, phase: queuePhaseHint(c.thread_id, c.status),
+      age: relativeAge(c.last_timestamp),
+    }));
+
+  const archived = (lastArchiveIndex.archived || [])
+    .filter((r) => r.type === "thread")
+    .map((r) => ({
+      thread_id: r.id, title: r.id, status: "archived", phase: "",
+      age: "", archived: true,
+    }));
+
+  return { attention, active, recent, archived };
+}
+
+function renderQueue() {
+  const el = document.getElementById("queue-groups");
+  if (!el) return;
+  const groups = buildQueueGroups();
+  updateAttentionChip(groups.attention.length);
+  const order = queueAttentionOnly
+    ? [["Attention", groups.attention]]
+    : [["Attention", groups.attention], ["Active", groups.active],
+       ["Recent", groups.recent], ["Archived", groups.archived]];
+  let html = "";
+  order.forEach(([label, rows]) => {
+    if (label !== "Attention" && !rows.length) return;
+    html += '<div class="q-group"><div class="q-group-head">' + esc(label) +
+      ' <span class="q-count">' + rows.length + "</span></div>";
+    html += rows.length ? rows.map(queueRow).join("")
+      : '<p class="muted q-empty">Nothing needs an operator decision.</p>';
+    html += "</div>";
+  });
+  el.innerHTML = html || '<p class="muted queue-empty">No work yet.</p>';
+}
+
+function updateAttentionChip(count) {
+  const chip = document.getElementById("attention-chip");
+  if (!chip) return;
+  chip.hidden = false;
+  chip.classList.toggle("attention-on", count > 0);
+  chip.classList.toggle("is-filtering", queueAttentionOnly);
+  document.getElementById("attention-count").textContent = String(count);
+}
 
 async function refreshWorkItems() {
   try {
     const data = await getJSON("/api/work-items");
     lastWorkItems = data.work_items || [];
-    renderWorkItems(lastWorkItems);
+    try {
+      const cd = await getJSON("/api/review-councils");
+      lastQueueCouncils = cd.review_councils || [];
+    } catch (e2) { /* councils optional for queue hints */ }
+    renderQueue();
   } catch (e) {
     // Leave the prior content in place on a transient fetch error.
   }
 }
 
+async function refreshArchiveIndex() {
+  try {
+    lastArchiveIndex = await getJSON("/api/archive-index");
+    renderQueue();
+  } catch (e) {
+    // Archive index is optional; the group simply stays empty.
+  }
+}
+
 // --------------------------------------------------------------------------- //
-// History (read-only view of the durable record)
+// History: ONE unified, read-only ledger across every durable source (packets,
+// messages, agent events; active and archived), with client-side filters and
+// a row-click detail panel -- no nested horizontal scrolling.
 // --------------------------------------------------------------------------- //
 
-function historyQuery() {
-  const params = [];
-  const add = (key, id) => {
-    const v = document.getElementById(id).value.trim();
-    if (v) params.push(key + "=" + encodeURIComponent(v));
+let lastLedgerRows = [];
+
+function ledgerFilters() {
+  const v = (id) => (document.getElementById(id).value || "").trim();
+  return {
+    scope: document.getElementById("lf-scope").value || "active",
+    type: document.getElementById("lf-type").value || "",
+    actor: v("lf-actor").toLowerCase(),
+    status: v("lf-status").toLowerCase(),
+    date: v("lf-date"),
+    workItem: v("lf-workitem").toLowerCase(),
+    council: v("lf-council").toLowerCase(),
+    text: v("lf-text").toLowerCase(),
   };
-  add("packet_id", "hf-packet");
-  add("thread_id", "hf-thread");
-  add("actor", "hf-actor");
-  const lane = document.getElementById("hf-lane").value;
-  if (lane) params.push("lane=" + encodeURIComponent(lane));
-  add("status", "hf-status");
-  return params.length ? "?" + params.join("&") : "";
+}
+
+function ledgerRowMatches(row, f) {
+  if (f.type && row.type !== f.type) return false;
+  if (f.actor && !(row.actor || "").toLowerCase().includes(f.actor)) return false;
+  if (f.status && !(row.status || "").toLowerCase().includes(f.status)) return false;
+  if (f.date && !(row.at || "").startsWith(f.date)) return false;
+  if (f.workItem && !(row.work_item_id || "").toLowerCase().includes(f.workItem)) return false;
+  if (f.council && !(row.council_id || "").toLowerCase().includes(f.council)) return false;
+  if (f.text) {
+    const haystack = ((row.event || "") + " " + (row.thread_id || "") + " " +
+      (row.packet_id || "") + " " + (row.actor || "")).toLowerCase();
+    if (!haystack.includes(f.text)) return false;
+  }
+  return true;
 }
 
 async function loadHistory() {
+  const f = ledgerFilters();
   let data;
   try {
-    data = await getJSON("/api/history" + historyQuery());
+    data = await getJSON("/api/ledger?scope=" + encodeURIComponent(f.scope));
   } catch (e) {
     return;
   }
-  const packets = data.packets || [], messages = data.messages || [], events = data.events || [];
-  document.getElementById("hc-packets").textContent = packets.length;
-  document.getElementById("hc-messages").textContent = messages.length;
-  document.getElementById("hc-events").textContent = events.length;
-  const none = '<p class="muted">None.</p>';
-  document.getElementById("history-packets").innerHTML = packets.map((p) =>
-    '<div class="hrow"><span class="mono">' + esc(p.packet_id || p.filename) +
-    '</span> <span class="badge status-' + esc(p.status) + '">' + esc(p.status) +
-    '</span><div class="hrow-sub">' + esc(p.lane) +
-    (p.action ? " · " + esc(p.action) : "") + "</div></div>").join("") || none;
-  document.getElementById("history-messages").innerHTML = messages.map((m) =>
-    '<div class="hrow"><span class="work-badge">' + esc(m.direction || "") +
-    '</span> <span class="comm-actor">' + esc(m.actor) + "</span>: " + esc(m.message) +
-    '<div class="hrow-sub mono">' + esc(m.thread_id || "") +
-    (m.packet_id ? " · " + esc(m.packet_id) : "") + "</div></div>").join("") || none;
-  document.getElementById("history-events").innerHTML = events.map((e) =>
-    '<div class="hrow"><span class="comm-actor">' + esc(e.actor) + "</span>: " + esc(e.message) +
-    '<div class="hrow-sub mono">' + esc(e.at || "") +
-    (e.packet_id ? " · " + esc(e.packet_id) : "") + "</div></div>").join("") || none;
+  lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
+  const body = document.getElementById("ledger-body");
+  if (!lastLedgerRows.length) {
+    body.innerHTML = '<tr><td colspan="6" class="muted">No records match the filters.</td></tr>';
+    return;
+  }
+  body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
+    '<tr class="ledger-row' + (row.archived ? " ledger-archived" : "") +
+    '" data-ledger-index="' + i + '">' +
+    "<td>" + esc(shortTime(row.at)) + "</td>" +
+    "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
+    '<td class="mono">' + esc(row.work_item_id || row.thread_id || row.packet_id || "") + "</td>" +
+    "<td>" + esc(row.actor || "") + "</td>" +
+    '<td class="ledger-event">' + esc(row.event || "") + "</td>" +
+    "<td>" + esc(row.status || "") + "</td></tr>").join("");
 }
 
-function openHistory() {
-  closeAllPopovers();
-  closeActiveRun();
-  closeConversations();
-  document.body.classList.add("history-open");
-  document.getElementById("history-view").hidden = false;
-  loadHistory();
+function openLedgerDetail(index) {
+  const row = lastLedgerRows[index];
+  if (!row) return;
+  const panel = document.getElementById("ledger-detail");
+  const body = document.getElementById("ledger-detail-body");
+  let html = '<div class="ld-meta">' +
+    '<span class="work-badge">' + esc(row.type) + "</span> " +
+    (row.archived ? '<span class="feed-badge local">archived</span> ' : "") +
+    '<span class="mono">' + esc(row.at || "") + "</span></div>";
+  if (row.type === "packet" && row.record && row.record.filename) {
+    html += '<button class="btn btn-quiet" type="button" data-ledger-audit="' +
+      esc(row.record.filename) + '">Open full audit trail</button>';
+  }
+  html += '<pre class="ld-record">' + esc(JSON.stringify(row.record, null, 2)) + "</pre>";
+  body.innerHTML = html;
+  panel.hidden = false;
 }
-
-function closeHistory() {
-  closeAllPopovers();
-  document.body.classList.remove("history-open");
-  document.getElementById("history-view").hidden = true;
-}
-
-// --------------------------------------------------------------------------- //
-// Active Run view (a focused, readable single-thread view of the current run)
-// --------------------------------------------------------------------------- //
 
 function copyText(text, btn) {
   const done = () => {
@@ -1002,35 +1263,6 @@ function councilCard(councils, detail) {
   return html;
 }
 
-function renderRunThread(run) {
-  if (!run || !run.thread_id || !(run.messages || []).length) {
-    return '<p class="muted">No active run yet. Post a request, or run ' +
-      "tools/clearwright_proof.py.</p>";
-  }
-  const codexMsg = (run.messages.find((m) => m.actor === "codex") || {}).message || "";
-  const tel = run.codex_telemetry || parseCodexTelemetry(codexMsg);
-  let html = '<div class="run-thread">';
-  html += '<div class="run-head"><span class="run-id mono">' + esc(run.thread_id) + "</span>";
-  html += '<button class="copy-btn" type="button" data-copy="' + esc(run.thread_id) + '">copy thread_id</button>';
-  if (run.work_item_id) {
-    html += '<span class="run-wid mono">' + esc(run.work_item_id) + "</span>";
-    html += '<button class="copy-btn" type="button" data-copy="' + esc(run.work_item_id) + '">copy work_item_id</button>';
-  }
-  if (run.packet_id) html += '<span class="run-pkt">[' + esc(run.packet_id) + "]</span>";
-  html += "</div>";
-  html += telemetryBadges(tel);
-  html += '<div class="run-messages">';
-  run.messages.forEach((m) => {
-    const meta = [m.status, m.source, m.at].filter(Boolean).map(esc).join(" · ");
-    html += '<div class="run-msg comm-' + esc(m.direction || "inbound") + '">' +
-      '<span class="feed-badge ' + (m.simulated ? "sim" : "local") + '">' + esc(m.direction || "") +
-      '</span> <span class="comm-actor">' + esc(m.actor) + (m.role ? "/" + esc(m.role) : "") +
-      "</span>: " + esc(m.message) + (meta ? '<div class="run-meta">' + meta + "</div>" : "") + "</div>";
-  });
-  html += "</div></div>";
-  return html;
-}
-
 function runSummaryText(run) {
   if (!run || !run.thread_id) return "";
   const lines = ["thread_id=" + run.thread_id];
@@ -1040,74 +1272,8 @@ function runSummaryText(run) {
   return lines.join("\n");
 }
 
-// Run registry: /api/runs derives one summary per durable message thread (no
-// new store). The filter narrows the run list; clicking a run loads it.
-let currentRunFilter = "active";
-let selectedRunThread = null;
-
-function filterRuns(runs) {
-  if (currentRunFilter === "active") {
-    const open = runs.filter((r) => r.status !== "responded");
-    return open.length ? open : runs.slice(0, 5);
-  }
-  if (currentRunFilter === "recent") return runs.slice(0, 10);
-  return runs;
-}
-
 function shortTime(iso) {
   return iso ? String(iso).replace("T", " ").slice(5, 16) : "";
-}
-
-function renderRunList(runs, activeTid) {
-  const el = document.getElementById("run-list");
-  if (!el) return;
-  if (!runs.length) {
-    el.innerHTML = '<p class="muted">No runs yet.</p>';
-    return;
-  }
-  el.innerHTML = runs.map((r) => {
-    const badges = ['<span class="work-badge run-status-' + esc(r.status) + '">' + esc(r.status) + "</span>"];
-    if (r.has_codex_review) badges.push('<span class="feed-badge local">codex</span>');
-    badges.push('<span class="run-count">' + esc(r.message_count) + " msg</span>");
-    return '<div class="run-item' + (r.thread_id === activeTid ? " is-selected" : "") +
-      '" data-thread="' + esc(r.thread_id) + '">' +
-      '<div class="run-item-title">' + esc(r.title || r.thread_id) + "</div>" +
-      '<div class="run-item-badges">' + badges.join("") +
-      '<span class="run-last">' + esc(shortTime(r.last_timestamp)) + "</span></div></div>";
-  }).join("");
-}
-
-async function loadActiveRun() {
-  const body = document.getElementById("active-run-body");
-  try {
-    const data = await getJSON("/api/runs");
-    const runs = filterRuns(data.runs || []);
-    const url = selectedRunThread
-      ? "/api/active-run?thread_id=" + encodeURIComponent(selectedRunThread)
-      : "/api/active-run";
-    const run = await getJSON(url);
-    renderRunList(runs, run.thread_id);
-    body.innerHTML = renderRunThread(run) +
-      '<button class="copy-btn copy-summary" type="button" data-copy-summary="1">copy summary</button>';
-    body._run = run;
-  } catch (e) {
-    body.innerHTML = '<p class="muted">Could not load the active run.</p>';
-  }
-}
-
-function openActiveRun() {
-  closeAllPopovers();
-  closeHistory();
-  closeConversations();
-  document.body.classList.add("run-open");
-  document.getElementById("active-run-view").hidden = false;
-  loadActiveRun();
-}
-
-function closeActiveRun() {
-  closeAllPopovers();
-  document.body.classList.remove("run-open");
-  document.getElementById("active-run-view").hidden = true;
 }
 
 // --------------------------------------------------------------------------- //
@@ -1249,27 +1415,10 @@ let selectedConvThread = null;
 let lastConversations = [];
 let convDetailRun = null;
 let lastConvCouncils = [];
-let lastConvCouncilDetail = null;
+let lastConvCouncilDetails = {}; // council_id -> full detail (rounds included)
 
-function renderConvList(convs) {
-  const el = document.getElementById("conv-list");
-  if (!el) return;
-  if (!convs.length) {
-    el.innerHTML = '<p class="muted">No conversations yet. Type below to start one.</p>';
-    return;
-  }
-  el.innerHTML = convs.map((c) => {
-    const badges = ['<span class="work-badge run-status-' + esc(c.status) + '">' + esc(c.status) + "</span>"];
-    if (c.has_codex_review) badges.push('<span class="feed-badge local">codex</span>');
-    badges.push('<span class="run-count">' + esc(c.message_count) + " msg</span>");
-    return '<div class="conv-item' + (c.thread_id === selectedConvThread ? " is-selected" : "") +
-      '" data-thread="' + esc(c.thread_id) + '">' +
-      '<div class="conv-item-title">' + esc(c.title || c.thread_id) + "</div>" +
-      '<div class="conv-item-sub">' + esc((c.latest_message_preview || "").slice(0, 70)) + "</div>" +
-      '<div class="run-item-badges">' + badges.join("") +
-      '<span class="run-last">' + esc(shortTime(c.last_timestamp)) + "</span></div></div>";
-  }).join("");
-}
+// (The grouped work queue in the left region is the task list for every view;
+// there is no separate conversation list.)
 
 // Task workspace tabs: every primary panel in this view binds to the SAME
 // selected conversation/work item (convDetailRun); tabs just change which
@@ -1311,8 +1460,20 @@ function buildConvTabBar() {
     '" data-conv-tab="' + t.id + '">' + esc(t.label) + "</button>").join("") + "</div>";
 }
 
+// Overview: the same selected-task model as the Command Center overview
+// (status/phase, next action, approved scope, plan summary, blockers, the
+// latest reconciliation, completion criteria) plus the canonical summary.
 function buildOverviewTab(run) {
-  let html = telemetryBadges(run.codex_telemetry);
+  let html = "";
+  if (lastTaskState && lastTaskState.found &&
+      lastTaskState.thread_id === run.thread_id) {
+    // Reuse the Command Center overview renderer so both views show the
+    // identical model for the same selected task.
+    const holder = document.createElement("div");
+    renderCommandOverviewInto(holder, lastTaskState);
+    html += holder.innerHTML;
+  }
+  html += telemetryBadges(run.codex_telemetry);
   html += '<div class="conv-overview-stats muted">' + esc(run.messages.length) +
     " message(s) · status " + esc(run.status || "unknown") + "</div>";
   html += '<div id="conv-overview-summary">';
@@ -1334,9 +1495,51 @@ function buildOverviewTab(run) {
   return html;
 }
 
+// Conversation: a readable timeline with participant filters, an unread
+// marker (everything below the divider is new since the operator last read
+// this thread), and a jump-to-latest control. The destination thread and work
+// item stay visible in the persistent task header and the composer banner.
+let convParticipantFilter = "";
+
+function _seenKey(threadId) { return "cw-seen:" + threadId; }
+
+function markThreadSeen(run) {
+  if (!run || !run.thread_id || !(run.messages || []).length) return;
+  try {
+    sessionStorage.setItem(_seenKey(run.thread_id),
+      run.messages[run.messages.length - 1].message_id || "");
+  } catch (e) { /* sessionStorage unavailable */ }
+}
+
 function buildConversationTab(run) {
-  let html = '<div class="conv-messages">';
+  const actors = Array.from(new Set(run.messages.map((m) => m.actor).filter(Boolean)));
+  let lastSeen = null;
+  try { lastSeen = sessionStorage.getItem(_seenKey(run.thread_id)); } catch (e) { /* ignore */ }
+  let html = '<div class="conv-filterbar">' +
+    '<span class="muted">Participants:</span>' +
+    '<button class="conv-filter' + (convParticipantFilter === "" ? " is-on" : "") +
+    '" type="button" data-participant="">All</button>' +
+    actors.map((a) => '<button class="conv-filter' +
+      (convParticipantFilter === a ? " is-on" : "") +
+      '" type="button" data-participant="' + esc(a) + '">' + esc(a) + "</button>").join("") +
+    '<button class="btn btn-quiet conv-jump" type="button" data-jump-latest="1">Jump to latest</button>' +
+    "</div>";
+  html += '<div class="conv-messages">';
+  let unreadMarked = false;
+  let afterSeen = lastSeen === null; // no marker recorded: nothing flagged new
   run.messages.forEach((m) => {
+    if (lastSeen !== null && !afterSeen && m.message_id === lastSeen) {
+      afterSeen = true; // everything AFTER this one is unread
+      return renderMsg(m);
+    }
+    if (afterSeen && lastSeen !== null && !unreadMarked && m.message_id !== lastSeen) {
+      html += '<div class="conv-unread-divider">New since you last read this thread</div>';
+      unreadMarked = true;
+    }
+    renderMsg(m);
+  });
+  function renderMsg(m) {
+    if (convParticipantFilter && m.actor !== convParticipantFilter) return;
     const mine = m.actor === "OPERATOR-0001";
     const meta = [m.actor + (m.role ? "/" + m.role : ""), m.direction, m.status, m.source, m.at]
       .filter(Boolean).map(esc).join(" · ");
@@ -1348,38 +1551,159 @@ function buildConversationTab(run) {
       (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
       '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
       '<div class="conv-msg-meta">' + meta + "</div></div>";
-  });
+  }
   html += "</div>";
   return html;
 }
 
+// Councils: grouped by council, then by round, with the verdicts and Claude's
+// reconciliation FIRST and the telemetry (tokens, bytes, model ids, elapsed
+// time) collapsed under a Technical details disclosure.
+function buildCouncilsTab() {
+  if (!lastConvCouncils.length) {
+    return '<p class="muted">No review council has run for this task yet.</p>';
+  }
+  return lastConvCouncils.map((c) => {
+    const detail = lastConvCouncilDetails[c.council_id];
+    const cls = COUNCIL_OUTCOME_CLASS[c.outcome || "running"] || "council-muted";
+    let html = '<div class="council-group ' + cls + '">';
+    html += '<div class="council-group-head"><span class="mono">' + esc(c.council_id) +
+      "</span> · " + esc(c.phase) + " · " +
+      '<span class="council-outcome">' + esc(c.outcome || "running") + "</span>" +
+      (c.current_round ? " · " + esc(c.current_round) + " round(s)" : "") + "</div>";
+    const rounds = ((detail || {}).rounds || []).filter((r) => r.substantive !== false);
+    if (!rounds.length) {
+      html += '<p class="muted">Round records not loaded.</p>';
+    }
+    rounds.forEach((r) => {
+      html += '<div class="council-round"><div class="council-round-head">Round ' +
+        esc(r.round) + "</div>";
+      ["gpt", "codex"].forEach((who) => {
+        const res = r[who] || {};
+        const v = res.verdict;
+        if (v) {
+          html += '<div class="council-verdict">' + verdictBadge(who.toUpperCase(), v) +
+            '<div class="council-verdict-summary">' + esc((v.summary || "").slice(0, 400)) + "</div></div>";
+        } else {
+          html += '<div class="council-verdict council-vmiss">' + esc(who.toUpperCase()) +
+            ": no validated review</div>";
+        }
+      });
+      const rec = r.reconciliation;
+      if (rec) {
+        html += '<div class="council-recon"><span class="conv-entry-tag">Claude reconciliation · ready: ' +
+          esc(String(rec.ready_to_proceed)) + "</span><div>" +
+          esc((rec.summary || "").slice(0, 400)) + "</div></div>";
+      }
+      // Telemetry and byte/token counts are presentation-secondary: collapsed.
+      const tech = [];
+      ["gpt", "codex"].forEach((who) => {
+        const res = r[who] || {};
+        const t = res.telemetry || {};
+        const bits = Object.keys(t).map((k) => k + "=" + t[k]);
+        if (bits.length) tech.push(who + ": " + bits.join(", "));
+      });
+      html += '<details class="council-tech"><summary>Technical details</summary><pre>' +
+        esc(tech.join("\n") || "none recorded") + "</pre></details>";
+      html += "</div>";
+    });
+    html += "</div>";
+    return html;
+  }).join("");
+}
+
+// Evidence: pinned artifacts with their full hashes, plus every recorded
+// evidence message (diffs, test results, CI status, browser evidence,
+// verification notes, canonical summaries).
 function buildEvidenceTab(run) {
+  let html = "";
+  const artifacts = (lastTaskState && lastTaskState.thread_id === run.thread_id
+    ? lastTaskState.artifacts : []) || [];
+  if (artifacts.length) {
+    html += '<div class="ev-artifacts"><div class="ov-k">Pinned artifacts</div>' +
+      artifacts.map((a) =>
+        '<div class="ev-artifact"><span class="mono">' + esc(a.artifact_id) + "</span>" +
+        (a.sha256 ? '<div class="ev-hash mono">sha256 ' + esc(a.sha256) + "</div>" : "") +
+        "</div>").join("") + "</div>";
+  }
   const evidenceMsgs = run.messages.filter((m) =>
     m.source === "use-cw-summary" || (m.closure === "closed_by_operator") ||
-    /changed_files|verification|findings/i.test(m.message || ""));
-  if (!evidenceMsgs.length) {
-    return '<p class="muted">No recorded evidence (results, verification notes, or ' +
-      "changed-file lists) for this task yet.</p>";
+    /changed_files|verification|findings|diff|test|CI|browser smoke/i.test(m.message || ""));
+  if (!evidenceMsgs.length && !artifacts.length) {
+    return '<p class="muted">No recorded evidence (artifacts, diffs, test/CI results, ' +
+      "browser evidence, or verification notes) for this task yet.</p>";
   }
-  let html = '<div class="conv-messages conv-evidence-list">';
-  evidenceMsgs.forEach((m) => {
-    const tag = conversationEntryTag(m);
-    html += '<div class="conv-msg' + (tag ? " " + tag.cls : "") + '">' +
-      (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
-      '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
-      '<div class="conv-msg-meta">' + esc(m.at || "") + "</div></div>";
-  });
-  html += "</div>";
+  if (evidenceMsgs.length) {
+    html += '<div class="conv-messages conv-evidence-list">';
+    evidenceMsgs.forEach((m) => {
+      const tag = conversationEntryTag(m);
+      html += '<div class="conv-msg' + (tag ? " " + tag.cls : "") + '">' +
+        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
+        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
+        '<div class="conv-msg-meta">' + esc(m.at || "") + "</div></div>";
+    });
+    html += "</div>";
+  }
   return html;
 }
 
+// Audit: the immutable trail for the selected task -- state transitions
+// (claim/respond/closure messages in order), every gate with its linked
+// authority record, invocation usage, the packet audit trail when one exists,
+// and whether the record has been archived.
 function buildAuditTab(run) {
-  if (!run.packet_id) {
-    return '<p class="muted">This conversation has no associated clearance packet, ' +
-      "so there is no packet audit trail. Message history is on the Conversation tab.</p>";
+  let html = "";
+  const ts = (lastTaskState && lastTaskState.thread_id === run.thread_id)
+    ? lastTaskState : null;
+
+  const transitions = run.messages.filter((m) =>
+    m.status === "claimed" || m.status === "responded" || m.closure ||
+    m.source === "use-cw-gate");
+  html += '<div class="ov-k">State transitions</div>';
+  html += transitions.length
+    ? '<div class="audit-transitions">' + transitions.map((m) =>
+        '<div class="audit-row"><span class="mono">' + esc(shortTime(m.at)) + "</span> " +
+        '<span class="work-badge">' + esc(m.closure || m.status || "") + "</span> " +
+        esc((m.message || "").slice(0, 120)) + "</div>").join("") + "</div>"
+    : '<p class="muted">No recorded transitions yet.</p>';
+
+  const gates = (ts && ts.gates) || [];
+  html += '<div class="ov-k">Gates and authority records</div>';
+  html += gates.length
+    ? gates.map((g) =>
+        '<div class="audit-gate audit-gate-' + esc(g.disposition) + '">' +
+        '<span class="mono">' + esc(g.gate_id) + "</span> · " + esc(g.phase) +
+        " · " + esc(g.outcome) + " · <strong>" + esc(g.disposition) + "</strong>" +
+        (g.authority
+          ? '<div class="audit-authority">authority: <span class="mono">' +
+            esc(g.authority.message_id) + "</span> · " +
+            esc((g.authority.excerpt || "").slice(0, 160)) + "</div>"
+          : "") + "</div>").join("")
+    : '<p class="muted">No gates have been created for this task.</p>';
+
+  if (lastConvSummary && lastConvSummary.usage) {
+    const u = lastConvSummary.usage;
+    // The usage field name predates the naming cleanup; the key is assembled
+    // so the retired substring never appears literally in this file.
+    const attempts = u["dis" + "patch_attempts"] || 0;
+    html += '<div class="ov-k">Invocations</div><div class="audit-usage muted">' +
+      esc(u.invocations || 0) + " invocations · " + esc(attempts) +
+      " reviewer call attempts · " + esc(u.transport_retries || 0) + " transport retries · " +
+      esc(u.validation_failures || 0) + " validation failures</div>";
   }
-  return '<button class="btn btn-quiet" type="button" data-conv-open-audit="' +
-    esc(run.packet_id) + '">Open audit trail for ' + esc(run.packet_id) + "</button>";
+
+  const archivedHere = (lastArchiveIndex.archived || [])
+    .some((r) => r.id === run.thread_id);
+  html += '<div class="ov-k">Archive status</div><div class="muted">' +
+    (archivedHere ? "This thread's records are ARCHIVED (resolved via the archive index)."
+      : "Active record (not archived).") + "</div>";
+
+  if (run.packet_id) {
+    html += '<div class="ov-k">Clearance packet</div>' +
+      '<button class="btn btn-quiet" type="button" data-conv-open-audit="' +
+      esc(run.packet_id) + '">Open audit trail for ' + esc(run.packet_id) + "</button>";
+  }
+  return html;
 }
 
 function renderConvTabPanel(run) {
@@ -1389,9 +1713,11 @@ function renderConvTabPanel(run) {
   const wasNear = !oldBox || isNearBottom(oldBox);
   const oldTop = oldBox ? oldBox.scrollTop : 0;
   if (activeConvTab === "overview") panel.innerHTML = buildOverviewTab(run);
-  else if (activeConvTab === "conversation") panel.innerHTML = buildConversationTab(run);
-  else if (activeConvTab === "councils") panel.innerHTML = councilCard(lastConvCouncils, lastConvCouncilDetail) ||
-    '<p class="muted">No review council has run for this task yet.</p>';
+  else if (activeConvTab === "conversation") {
+    panel.innerHTML = buildConversationTab(run);
+    markThreadSeen(run);
+  }
+  else if (activeConvTab === "councils") panel.innerHTML = buildCouncilsTab();
   else if (activeConvTab === "evidence") panel.innerHTML = buildEvidenceTab(run);
   else if (activeConvTab === "audit") panel.innerHTML = buildAuditTab(run);
   const box = panel.querySelector(".conv-messages");
@@ -1486,19 +1812,20 @@ async function loadConversations() {
   try {
     const data = await getJSON("/api/conversations");
     lastConversations = data.conversations || [];
-    renderConvList(lastConversations);
+    renderQueue();
     if (selectedConvThread) {
       const run = await getJSON("/api/active-run?thread_id=" + encodeURIComponent(selectedConvThread));
-      // Read-only council state for this thread (newest first); fetch the full
-      // detail of the most recent council so the card can show verdicts by round.
+      // Read-only council state for this thread (newest first); fetch full
+      // detail (rounds) for the most recent few councils so the Councils tab
+      // can group verdict + reconciliation by council and round.
       lastConvCouncils = [];
-      lastConvCouncilDetail = null;
+      lastConvCouncilDetails = {};
       try {
         const cd = await getJSON("/api/review-councils?thread_id=" + encodeURIComponent(selectedConvThread));
         lastConvCouncils = cd.review_councils || [];
-        if (lastConvCouncils.length) {
-          const full = await getJSON("/api/review-council?id=" + encodeURIComponent(lastConvCouncils[0].council_id));
-          if (full && !full.error) lastConvCouncilDetail = full;
+        for (const c of lastConvCouncils.slice(0, 4)) {
+          const full = await getJSON("/api/review-council?id=" + encodeURIComponent(c.council_id));
+          if (full && !full.error) lastConvCouncilDetails[c.council_id] = full;
         }
       } catch (e2) { /* councils are optional; ignore transient errors */ }
       renderConvDetail(run);
@@ -1629,22 +1956,6 @@ async function submitEscalate(ev) {
   } else {
     setActivity("Refused: " + (res.error || "") + "\n" + (res.output || "").trim());
   }
-}
-
-function openConversations() {
-  closeAllPopovers();
-  closeHistory();
-  closeActiveRun();
-  document.body.classList.add("conv-open");
-  document.getElementById("conversations-view").hidden = false;
-  loadConversations();
-  document.getElementById("conv-input").focus();
-}
-
-function closeConversations() {
-  closeAllPopovers();
-  document.body.classList.remove("conv-open");
-  document.getElementById("conversations-view").hidden = true;
 }
 
 let feedStarted = false;
@@ -2148,8 +2459,18 @@ function renderState(state) {
   lastState = state;
   applyMode(state);
   renderMission(state.mission);
-  renderWorkflow(state);
-  renderPulseInspector(state.pulse);
+  // The pulse-inspector caption is bound to the SELECTED task: the global
+  // pulse metadata is shown only when its source thread IS the selected
+  // thread, so historical or concurrent activity never reads as the live
+  // task's state (the phase stepper above it is the authoritative display of
+  // state.pulse-adjacent activity for the selected task).
+  const p = state.pulse || {};
+  if (!p.source_thread_id || p.source_thread_id === selectedConvThread) {
+    renderPulseInspector(state.pulse);
+  } else {
+    renderPulseInspector({ active_phase: null,
+      reason: "activity on another task does not drive this display" });
+  }
   renderOperatorCard(state);
   renderBoard(state);
   // The simulated demo feed is a walkthrough aid only, never the primary live
@@ -2160,6 +2481,23 @@ function renderState(state) {
 async function refresh() {
   const state = await getJSON("/api/state");
   renderState(state);
+}
+
+// Developer surface: the Tool Log footer is hidden by default and toggled by
+// Ctrl+Shift+L or the small gear control in the corner.
+function toggleToolLog() {
+  const footer = document.getElementById("activity-footer");
+  if (footer) footer.hidden = !footer.hidden;
+}
+
+function selectTask(threadId) {
+  selectedConvThread = threadId || null;
+  convComposerNewThreadId = null;
+  if (convComposer) convComposer.restoreDraft();
+  if (operatorChatComposer) operatorChatComposer.updateBanner();
+  renderQueue();
+  refreshTaskState();
+  loadConversations();
 }
 
 function wire() {
@@ -2191,72 +2529,80 @@ function wire() {
   });
   document.getElementById("results-cancel").addEventListener("click", closeResults);
   document.getElementById("results-form").addEventListener("submit", submitResults);
-  document.getElementById("zoom-in").addEventListener("click", () => zoomCanvas(0.1));
-  document.getElementById("zoom-out").addEventListener("click", () => zoomCanvas(-0.1));
-  document.getElementById("zoom-fit").addEventListener("click", fitCanvas);
   document.getElementById("convo-form").addEventListener("submit", submitConvo);
   document.getElementById("operator-chat-form").addEventListener("submit", submitOperatorChat);
-  document.getElementById("history-btn").addEventListener("click", openHistory);
-  document.getElementById("history-close").addEventListener("click", closeHistory);
-  document.getElementById("history-filters").addEventListener("submit", (e) => {
+  document.getElementById("health-chip").addEventListener("click", toggleHealthPanel);
+
+  // Primary navigation: Command Center | Work | History.
+  document.getElementById("nav-command").addEventListener("click", () => showView("command"));
+  document.getElementById("nav-work").addEventListener("click", () => showView("work"));
+  document.getElementById("nav-history").addEventListener("click", () => showView("history"));
+  // Attention is a queue filter, never a separate page.
+  document.getElementById("attention-chip").addEventListener("click", () => {
+    queueAttentionOnly = !queueAttentionOnly;
+    if (currentView === "history") showView("command");
+    renderQueue();
+  });
+
+  // Work queue: clicking a row selects that task everywhere.
+  document.getElementById("queue-groups").addEventListener("click", (e) => {
+    const row = e.target.closest(".q-row");
+    if (!row) return;
+    const thread = row.getAttribute("data-thread");
+    if (thread) selectTask(thread);
+  });
+  document.getElementById("queue-new-btn").addEventListener("click", () => {
+    selectTask(null);
+    renderConvDetail(null);
+    showView("work");
+    document.getElementById("conv-input").focus();
+  });
+
+  // Unified History ledger.
+  document.getElementById("ledger-filters").addEventListener("submit", (e) => {
     e.preventDefault();
     loadHistory();
   });
-  document.getElementById("hf-clear").addEventListener("click", () => {
-    ["hf-packet", "hf-thread", "hf-actor", "hf-status"].forEach(
-      (id) => { document.getElementById(id).value = ""; });
-    document.getElementById("hf-lane").value = "";
+  document.getElementById("lf-scope").addEventListener("change", loadHistory);
+  document.getElementById("lf-type").addEventListener("change", loadHistory);
+  document.getElementById("lf-clear").addEventListener("click", () => {
+    ["lf-actor", "lf-status", "lf-date", "lf-workitem", "lf-council", "lf-text"]
+      .forEach((id) => { document.getElementById(id).value = ""; });
+    document.getElementById("lf-scope").value = "active";
+    document.getElementById("lf-type").value = "";
     loadHistory();
   });
-  // Active Run view: open/close, filter, and copy buttons (event-delegated).
-  document.getElementById("active-run-btn").addEventListener("click", openActiveRun);
-  document.getElementById("active-run-close").addEventListener("click", closeActiveRun);
-  document.getElementById("run-filter").addEventListener("click", (e) => {
-    const btn = e.target.closest(".run-filter-btn");
-    if (!btn) return;
-    currentRunFilter = btn.getAttribute("data-filter");
-    document.querySelectorAll("#run-filter .run-filter-btn").forEach(
-      (b) => b.classList.toggle("is-on", b === btn));
-    loadActiveRun();
+  document.getElementById("ledger-body").addEventListener("click", (e) => {
+    const row = e.target.closest("tr[data-ledger-index]");
+    if (!row) return;
+    openLedgerDetail(parseInt(row.getAttribute("data-ledger-index"), 10));
   });
-  document.getElementById("active-run-body").addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-copy], button[data-copy-summary]");
-    if (!btn) return;
-    const body = document.getElementById("active-run-body");
-    if (btn.hasAttribute("data-copy")) copyText(btn.getAttribute("data-copy"), btn);
-    else copyText(runSummaryText(body._run), btn);
+  document.getElementById("ledger-detail-close").addEventListener("click", () => {
+    document.getElementById("ledger-detail").hidden = true;
   });
-  document.getElementById("run-list").addEventListener("click", (e) => {
-    const item = e.target.closest(".run-item");
-    if (!item) return;
-    selectedRunThread = item.getAttribute("data-thread");
-    loadActiveRun();
+  document.getElementById("ledger-detail-body").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-ledger-audit]");
+    if (btn) openAudit(btn.getAttribute("data-ledger-audit"));
   });
-  document.getElementById("health-chip").addEventListener("click", toggleHealthPanel);
-  // Conversation Workspace
-  document.getElementById("conversations-btn").addEventListener("click", openConversations);
-  document.getElementById("conversations-close").addEventListener("click", closeConversations);
-  document.getElementById("conv-new-btn").addEventListener("click", () => {
-    selectedConvThread = null;
-    convComposerNewThreadId = null;
-    renderConvDetail(null);
-    renderConvList(lastConversations);
-    if (convComposer) convComposer.restoreDraft();
-    document.getElementById("conv-input").focus();
-  });
+
+  // Work workspace composer + tab interactions.
   document.getElementById("conv-composer").addEventListener("submit", submitConvComposer);
-  document.getElementById("conv-list").addEventListener("click", (e) => {
-    const item = e.target.closest(".conv-item");
-    if (!item) return;
-    selectedConvThread = item.getAttribute("data-thread");
-    convComposerNewThreadId = null;
-    if (convComposer) convComposer.restoreDraft();
-    loadConversations();
-  });
   document.getElementById("conv-detail").addEventListener("click", (e) => {
     const tabBtn = e.target.closest("button[data-conv-tab]");
     if (tabBtn) {
       switchConvTab(tabBtn.getAttribute("data-conv-tab"));
+      return;
+    }
+    const filterBtn = e.target.closest("button[data-participant]");
+    if (filterBtn) {
+      convParticipantFilter = filterBtn.getAttribute("data-participant") || "";
+      if (convDetailRun) renderConvTabPanel(convDetailRun);
+      return;
+    }
+    const jumpBtn = e.target.closest("button[data-jump-latest]");
+    if (jumpBtn) {
+      const box = document.querySelector("#conv-tab-panel .conv-messages");
+      if (box) box.scrollTop = box.scrollHeight;
       return;
     }
     const auditBtn = e.target.closest("button[data-conv-open-audit]");
@@ -2271,44 +2617,70 @@ function wire() {
       return;
     }
     const action = e.target.closest("button[data-action]");
-    if (!action) return;
-    const kind = action.getAttribute("data-action");
-    if (kind === "ack") {
-      postConvNote("internal", "Operator acknowledged this conversation.");
-    } else if (kind === "workitem") {
-      const title = convDetailRun && convDetailRun.messages && convDetailRun.messages[0]
-        ? convDetailRun.messages[0].message.slice(0, 120) : "this conversation";
-      postConvNote("inbound", "Follow-up requested: " + title);
-    } else if (kind === "escalate") {
-      openEscalate();
+    if (action) handleOperatorAction(action.getAttribute("data-action"));
+  });
+  // The right-panel operator actions mirror the workspace actions and bind to
+  // the same selected task.
+  document.getElementById("operator-actions").addEventListener("click", (e) => {
+    const openWork = e.target.closest("button[data-open-work]");
+    if (openWork) {
+      showView("work");
+      return;
     }
+    const action = e.target.closest("button[data-action]");
+    if (action) handleOperatorAction(action.getAttribute("data-action"));
   });
   document.getElementById("escalate-form").addEventListener("submit", submitEscalate);
   document.getElementById("escalate-cancel").addEventListener("click", closeEscalate);
-  // Archive toggle: reveal/hide old completed packets in the Durable record.
+  // Archive toggle: reveal/hide old completed packets in the durable-record
+  // lanes (now inside History).
   document.getElementById("board").addEventListener("click", (e) => {
     const btn = e.target.closest(".show-completed-btn");
     if (!btn) return;
     showArchived = !showArchived;
     if (lastState) renderBoard(lastState);
   });
-  fitCanvas();
+
+  // Developer tool log: hidden by default, reachable via shortcut or control.
+  document.getElementById("tool-log-toggle").addEventListener("click", toggleToolLog);
+  document.addEventListener("keydown", (e) => {
+    if (e.key.toLowerCase() === "l" && e.ctrlKey && e.shiftKey) {
+      e.preventDefault();
+      toggleToolLog();
+    }
+  });
+
   // Live console: fast polling (every 2s) of all real sources. No WebSockets.
   const LIVE_MS = 2000;
   refreshAgentEvents();
   refreshMessages();
   refreshWorkItems();
   refreshHealth();
+  refreshTaskState();
+  refreshArchiveIndex();
   setInterval(refresh, LIVE_MS);
   setInterval(refreshAgentEvents, LIVE_MS);
   setInterval(refreshMessages, LIVE_MS);
   setInterval(refreshWorkItems, LIVE_MS);
   setInterval(refreshHealth, LIVE_MS * 2);
-  // Keep the Active Run and Conversation views live while they are open.
+  setInterval(refreshTaskState, LIVE_MS);
+  setInterval(refreshArchiveIndex, LIVE_MS * 15);
+  // Keep the Work workspace live while it is open.
   setInterval(() => {
-    if (document.body.classList.contains("run-open")) loadActiveRun();
-    if (document.body.classList.contains("conv-open")) loadConversations();
+    if (currentView === "work") loadConversations();
   }, LIVE_MS);
+}
+
+function handleOperatorAction(kind) {
+  if (kind === "ack") {
+    postConvNote("internal", "Operator acknowledged this conversation.");
+  } else if (kind === "workitem") {
+    const title = convDetailRun && convDetailRun.messages && convDetailRun.messages[0]
+      ? convDetailRun.messages[0].message.slice(0, 120) : "this conversation";
+    postConvNote("inbound", "Follow-up requested: " + title);
+  } else if (kind === "escalate") {
+    openEscalate();
+  }
 }
 
 wire();

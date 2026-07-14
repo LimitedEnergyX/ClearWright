@@ -116,14 +116,13 @@ class PopoverBehaviorTests(unittest.TestCase):
         self.assertIn('if (e.key === "Escape") closeAllPopovers();', self.appjs)
 
     def test_navigation_closes_popovers(self):
-        # Every view-open/close transition clears popovers.
-        for fn in ("openHistory", "closeHistory", "openActiveRun", "closeActiveRun",
-                  "openConversations", "closeConversations"):
-            idx = self.appjs.index("function " + fn)
-            body_start = self.appjs.index("{", idx)
-            body_end = self.appjs.index("\n}", body_start)
-            self.assertIn("closeAllPopovers()", self.appjs[body_start:body_end + 2],
-                         fn + " must close popovers on navigation")
+        # The unified view switcher is the single navigation path; it clears
+        # popovers on every Command Center / Work / History transition.
+        idx = self.appjs.index("function showView")
+        body_start = self.appjs.index("{", idx)
+        body_end = self.appjs.index("\n}", body_start)
+        self.assertIn("closeAllPopovers()", self.appjs[body_start:body_end + 2],
+                      "showView must close popovers on navigation")
 
     def test_only_one_popover_open_at_a_time(self):
         self.assertIn("Only one peer popover stays open: close every other one first.",

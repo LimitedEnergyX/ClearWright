@@ -193,11 +193,13 @@ class UiTests(unittest.TestCase):
         self.html = read(os.path.join(STATIC, "index.html"))
         self.appjs = read(os.path.join(STATIC, "app.js"))
 
-    def test_active_run_view_exists(self):
-        self.assertIn('id="active-run-view"', self.html)
-        self.assertIn('id="active-run-btn"', self.html)
-        self.assertIn("function renderRunThread", self.appjs)
-        self.assertIn("/api/active-run", self.appjs)
+    def test_task_workspace_replaces_active_run_view(self):
+        # The Active Run top-level view was folded into the unified Work page:
+        # one selected task binds the workspace, driven by /api/task-state.
+        self.assertIn('id="center-work"', self.html)
+        self.assertIn('id="nav-work"', self.html)
+        self.assertIn("function refreshTaskState", self.appjs)
+        self.assertIn("/api/task-state", self.appjs)
 
     def test_active_run_renders_ids_and_telemetry(self):
         self.assertIn("run.thread_id", self.appjs)
@@ -209,11 +211,13 @@ class UiTests(unittest.TestCase):
         self.assertIn("navigator.clipboard", self.appjs)
         self.assertIn("copy-btn", self.appjs)
 
-    def test_filters_exist(self):
-        self.assertIn('id="run-filter"', self.html)
-        self.assertIn('data-filter="active"', self.html)
-        self.assertIn('data-filter="recent"', self.html)
-        self.assertIn('data-filter="all"', self.html)
+    def test_queue_grouping_replaces_run_filters(self):
+        # Run filters became queue groups: Attention / Active / Recent /
+        # Archived, plus the topbar Attention chip acting as a filter.
+        self.assertIn("function buildQueueGroups", self.appjs)
+        for group in ("attention", "active", "recent", "archived"):
+            self.assertIn(group, self.appjs)
+        self.assertIn('id="attention-chip"', self.html)
 
     def test_placeholder_and_comms_and_history_intact(self):
         self.assertIn('placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"', self.html)
@@ -226,8 +230,12 @@ class UiTests(unittest.TestCase):
         self.assertIn("simulated agents", self.html)
         self.assertIn("Simulated demo", self.html)
 
-    def test_pulse_tooltip_clarifies_activity(self):
-        self.assertIn("Pulse shows recent activity, not permanent packet state", self.html)
+    def test_pulse_is_scoped_to_the_selected_task(self):
+        # The pulse inspector reflects only the selected task; activity on
+        # other tasks must never animate the stepper or the inspector.
+        self.assertIn('id="pulse-inspector"', self.html)
+        self.assertIn("activity on another task does not drive this display",
+                      self.appjs)
 
 
 class RegressionTests(unittest.TestCase):

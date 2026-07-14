@@ -5,6 +5,39 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Artifact & operator layer (PR 2 of the acceptance-hardening design). New
+  `tools/clearwright_artifacts.py`: artifacts are registered and pinned under
+  `review_artifacts/` with the FULL sha256 as identity (short ids are display
+  aliases with collision detection), re-verified before every dispatch
+  (tampering is a hard stop), and derived renderings carry their own hashes
+  linked to the original. Reviewer delivery is capability-aware: GPT (text-only)
+  always receives its capability statement and gets the full line-numbered
+  artifact inline when the phase budget allows, else a bounded excerpt pack
+  whose manifest states it is the only evidence it may rely on; Codex receives
+  the absolute pinned path + expected hash and reads from disk (empirically
+  verified: the read-only sandbox restricts writes, not reads). New
+  `blocked_by_capability` reconciliation disposition: the reviewer is right and
+  the harness cannot comply — requires a limitation statement + evidence, never
+  counts as resolved, escalates `operator_required` immediately, and can never
+  coexist with `ready_to_proceed` (the agreement invariants are preserved and
+  strengthened). `verification_required` is now enforced at completion: DONE is
+  permitted only when verification was not required or the bound verify council
+  reached agreement — absence of a council never bypasses it (envelope records
+  are persisted for lexical starts too). New OPERATOR-ONLY `close` command:
+  CLOSED_BY_OPERATOR / `accepted_with_verification_incomplete`, requiring a
+  closure-specific authority record (an inbound operator message, created after
+  the failed outcome, naming the work item or verify council and explicitly
+  authorizing closure — the original task approval is not sufficient); it is
+  never DONE and never changes the council outcome. Attempt-recovery grants are
+  now retry-specific and additive: the authority record must name the council,
+  the reviewer, and explicitly authorize attempts, be created after exhaustion,
+  and grants record how many attempts were added — they never touch the
+  substantive round ceiling. The harness now generates and posts the canonical
+  concise summary at terminal events (durable `use-cw-summary` message +
+  `summaries/<id>.json` + `status --summary` + read-only `GET /api/work-summary`);
+  the skill presents it and never authors governance status. New
+  `retrospective` command reports usage/failures from the invocation log.
+  Skill v1.2.0.
 - Council reliability pass (from the first full acceptance run). Codex prompts
   now travel via stdin (never argv, which Windows caps at ~23 KB effective) and
   the Codex timeout scales with packet size. The council engine is the sole

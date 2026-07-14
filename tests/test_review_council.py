@@ -421,8 +421,10 @@ class CouncilEngineTests(unittest.TestCase):
         council.run_round(self.root, c, "BASE CONTEXT", gpt_fn=self.gpt_fn(capture=cap),
                           codex_fn=self.codex_fn(capture=cap))
         contexts = {who: ctx for who, ctx in cap}
-        # Both reviewers saw the same base context; neither saw the other's output.
-        self.assertEqual(contexts["gpt"], "BASE CONTEXT")
+        # Both reviewers saw the same base context; neither saw the other's
+        # output. GPT's packet additionally carries its capability statement.
+        self.assertIn("BASE CONTEXT", contexts["gpt"])
+        self.assertIn("you receive text only", contexts["gpt"])
         self.assertEqual(contexts["codex"], "BASE CONTEXT")
 
     def test_reconciliation_is_persisted_and_needs_evidence(self):
@@ -540,35 +542,67 @@ class CouncilEngineTests(unittest.TestCase):
                           gpt_fn=self.gpt_fn(), codex_fn=failing)
         self.assertEqual(len(calls), 2)  # changed fingerprint earned nothing
 
-    def test_operator_grant_resets_budget_and_is_recorded(self):
-        # The ONLY in-council budget reset: an explicit operator-authorized
-        # grant anchored to a durable inbound operator message.
+    def _grant_msg(self, c, reviewer="codex"):
+        # A COMPLIANT retry-specific authority record: names the council, the
+        # reviewer, and explicitly authorizes an additional attempt.
+        return server.do_message(self.root, {
+            "actor": "OPERATOR-0001", "role": "operator", "direction": "inbound",
+            "intent": "chat",
+            "message": "Authorize one additional {} transport attempt for council "
+                       "{}, current round, after the prior attempts failed.".format(
+                           reviewer, c["council_id"])})
+
+    def test_operator_grant_is_additive_recorded_and_retry_specific(self):
+        # The ONLY way to extend an attempt budget: an explicit, retry-specific
+        # operator grant. It ADDS attempts (auditable count); it never resets.
         calls = []
         c = self.new_council()
         failing = self.codex_fn(posted=False, capture=calls)
         council.run_round(self.root, c, "ctx", sleep=lambda *_: None,
                           gpt_fn=self.gpt_fn(), codex_fn=failing)
         self.assertEqual(len(calls), 2)
-        # An arbitrary/unknown message id is refused.
         c2 = council.load_council(self.root, c["council_id"])
-        refused = council.grant_attempts(self.root, c2, "codex", "msg-nope")
-        self.assertFalse(refused["ok"])
-        # A real inbound operator message authorizes the grant.
-        op = server.do_message(self.root, {
+        # Refused: unknown message id.
+        self.assertFalse(council.grant_attempts(self.root, c2, "codex", "msg-nope")["ok"])
+        # Refused: a real operator message that does NOT name the council/reviewer
+        # or authorize retries (e.g. the original task approval).
+        vague = server.do_message(self.root, {
             "actor": "OPERATOR-0001", "role": "operator", "direction": "inbound",
-            "intent": "chat", "message": "Recovery authorized: retry codex for this round."})
+            "intent": "chat", "message": "Task approved, proceed with the review."})
+        refused = council.grant_attempts(self.root, c2, "codex",
+                                         vague["message"]["message_id"])
+        self.assertFalse(refused["ok"])
+        # Accepted: a compliant retry-specific record, created after exhaustion.
+        op = self._grant_msg(c2)
         granted = council.grant_attempts(self.root, c2, "codex",
                                          op["message"]["message_id"])
         self.assertTrue(granted["ok"])
         c3 = council.load_council(self.root, c["council_id"])
         key = "r1:codex"
-        self.assertEqual(c3["attempt_state"][key]["calls"], 0)
-        self.assertEqual(c3["attempt_state"][key]["grants"][0]["operator_message_id"],
+        state = c3["attempt_state"][key]
+        self.assertEqual(state["calls"], 2)  # additive: calls are never erased
+        self.assertEqual(state["grants"][0]["extra_attempts"], 1)
+        self.assertEqual(state["grants"][0]["operator_message_id"],
                          op["message"]["message_id"])
-        # Fresh budget: two more calls are possible.
+        # One (and only one) more call is possible.
         council.run_round(self.root, c3, "ctx", sleep=lambda *_: None,
                           gpt_fn=self.gpt_fn(), codex_fn=failing)
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 3)
+        c4 = council.load_council(self.root, c["council_id"])
+        council.run_round(self.root, c4, "ctx", sleep=lambda *_: None,
+                          gpt_fn=self.gpt_fn(), codex_fn=failing)
+        self.assertEqual(len(calls), 3)  # grant consumed; still capped
+
+    def test_grant_refused_before_exhaustion_and_never_extends_rounds(self):
+        c = self.new_council()
+        op = self._grant_msg(c)
+        # Budget not exhausted yet -> grant refused.
+        refused = council.grant_attempts(self.root, c, "codex",
+                                         op["message"]["message_id"])
+        self.assertFalse(refused["ok"])
+        self.assertIn("not exhausted", refused["error"])
+        # Grants never touch the substantive round ceiling.
+        self.assertEqual(c["max_rounds"], 5)
 
     def test_cached_review_is_reused_not_respent(self):
         # After an aborted dispatch, re-running the SAME dispatch reuses the
@@ -580,9 +614,7 @@ class CouncilEngineTests(unittest.TestCase):
                           codex_fn=self.codex_fn(posted=False, capture=ccalls))
         self.assertEqual(len(gcalls), 1)
         c2 = council.load_council(self.root, c["council_id"])
-        op = server.do_message(self.root, {
-            "actor": "OPERATOR-0001", "role": "operator", "direction": "inbound",
-            "intent": "chat", "message": "Recovery authorized for codex."})
+        op = self._grant_msg(c2)
         council.grant_attempts(self.root, c2, "codex", op["message"]["message_id"])
         c3 = council.load_council(self.root, c["council_id"])
         report = council.run_round(self.root, c3, "ctx", sleep=lambda *_: None,

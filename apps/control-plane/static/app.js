@@ -1051,6 +1051,12 @@ function conversationEntryTag(m) {
   if (m.source === "review-council") {
     return { cls: "conv-entry-reconcile", label: "Claude reconciliation" };
   }
+  if (m.source === "use-cw-summary") {
+    return { cls: "conv-entry-summary", label: "CW canonical summary · harness-generated" };
+  }
+  if (m.closure === "closed_by_operator") {
+    return { cls: "conv-entry-closure", label: "closed by operator · verification incomplete · not DONE" };
+  }
   return null;
 }
 

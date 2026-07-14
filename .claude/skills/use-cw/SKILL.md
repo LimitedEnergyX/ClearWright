@@ -8,7 +8,7 @@ description: >-
   Council on the result, and record completion. Use when the operator says "Use
   CW", "review this with CW", "run this through CW", "govern this through CW",
   "check this with GPT and Codex", or invokes /use-cw.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Use CW
@@ -76,6 +76,14 @@ Then: `start <queue> --envelope-file <path> --json`.
    whole repositories. The assembled packet must fit the phase input budget
    (plan/incident 32K, verify 96K estimated tokens) or dispatch fails fast (exit
    5) without spending an attempt.
+
+   **Artifacts:** when the thing under review is a document/page/file rather
+   than a diff, register it with `--artifact <absolute path>` on the council
+   command (repeatable; remembered by the council across rounds). CW pins it,
+   owns the hash, delivers it capability-aware — full line-numbered inline to
+   GPT when it fits the budget, a bounded excerpt pack + manifest when it does
+   not, and the absolute pinned path + expected hash to Codex to read from
+   disk. NEVER paste a large artifact into the context packet yourself.
 3. **council (planning)** — loop:
    - `council <queue> --council-id <id?> --thread-id <id> --work-item-id <id> --phase plan --stage review --plan-file <ctx> --repo <repo> --approved-scope "<scope>" --json`
      runs one real GPT + Codex round.
@@ -84,6 +92,11 @@ Then: `start <queue> --envelope-file <path> --json`.
      **with evidence**, bind a resolution to each final-round
      `required_change`/`blocking_finding` by exact ref (e.g.
      `gpt.required_changes[0]` — no annotations), set `ready_to_proceed` honestly.
+   - When a reviewer is RIGHT but the harness cannot satisfy the requirement,
+     bind that ref with disposition `blocked_by_capability` (requires a
+     `limitation` statement + evidence). It escalates `operator_required`
+     immediately — never grind rounds against an impossibility, and never mark
+     it `rejected` (the reviewer is not wrong).
    - **Validate first at zero cost:** `... --stage reconcile --dry-run
      --reconciliation-file <recon> --json` (exit 0 = valid and fully bound).
    - Then submit without `--dry-run`.
@@ -102,9 +115,22 @@ Then: `start <queue> --envelope-file <path> --json`.
    passed or agreement is blocked) with the actual diff, files changed, and
    test/CI/smoke results; reconcile; fix scoped findings and rerun.
 7. **complete** — `complete <queue> --work-item-id <id> --result-file <path> --json`
-   records the final response and marks the work item done. For a governed
-   change, pass `--packet-id`; exit 6 means the clearance packet is not in
-   `clearance_done` (operator authority not granted) — stop.
+   records the final response and marks the work item done. DONE is permitted
+   only when verification was not required, or the bound verify council reached
+   agreement; exit 3 (`verification_incomplete`) means run/finish verification —
+   never work around it. For a governed change, pass `--packet-id`; exit 6 means
+   the clearance packet is not in `clearance_done` — stop. On every terminal
+   event the HARNESS generates and posts the canonical summary: **present that
+   summary to the operator; never author or rewrite governance status yourself**
+   (`status <queue> --summary <work_item_id>` returns it).
+
+**`close` is operator-only.** You must NEVER invoke `close` autonomously. It
+exists so the human can close a work item whose verification did not pass,
+without presenting it as DONE, and it requires a closure-specific authority
+record: an inbound operator message, written AFTER the failed outcome, naming
+the work item or verify council and explicitly authorizing the closure. If the
+operator wants to accept unverified work, ask them to post that message in CW,
+then give them the exact `close` command to run — do not run it for them.
 
 ## Reviewer attempts and exit 4
 

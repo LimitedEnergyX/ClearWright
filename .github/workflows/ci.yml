@@ -64,6 +64,9 @@ jobs:
       - name: Compile clearwright_use_cw
         run: python -m py_compile tools/clearwright_use_cw.py
 
+      - name: Compile clearwright_artifacts
+        run: python -m py_compile tools/clearwright_artifacts.py
+
       - name: Compile install_use_cw_skill
         run: python -m py_compile tools/install_use_cw_skill.py
 

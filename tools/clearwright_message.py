@@ -44,6 +44,10 @@ DEFAULT_STATUS = "posted"
 DIRECTIONS = ("inbound", "outbound", "internal")
 STATUSES = ("posted", "read", "claimed", "responded")
 INTENTS = ("chat", "request")
+# Terminal closure markers on a closing message. "done" is governed completion;
+# "closed_by_operator" is an explicit operator decision that is NOT DONE and
+# never overrides the underlying council outcome.
+CLOSURES = ("done", "closed_by_operator")
 
 
 _last_dt = None
@@ -73,7 +77,7 @@ def _stamp():
 def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
                   thread_id=None, direction=DEFAULT_DIRECTION,
                   status=DEFAULT_STATUS, source=DEFAULT_SOURCE, simulated=False,
-                  work_item_id=None, intent=None):
+                  work_item_id=None, intent=None, closure=None, closure_meta=None):
     """Return a new message dict. Raises ValueError if actor or message is
     missing/empty, or if direction/status/intent is not one of the allowed
     values. A new thread_id is generated when one is not supplied. Only a
@@ -92,6 +96,11 @@ def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
     intent = str(intent).strip() if intent and str(intent).strip() else None
     if intent is not None and intent not in INTENTS:
         raise ValueError("intent must be one of: {}".format(", ".join(INTENTS)))
+    closure = str(closure).strip() if closure and str(closure).strip() else None
+    if closure is not None and closure not in CLOSURES:
+        raise ValueError("closure must be one of: {}".format(", ".join(CLOSURES)))
+    if closure_meta is not None and not isinstance(closure_meta, dict):
+        raise ValueError("closure_meta must be an object")
     stamp = _stamp()
     thread = str(thread_id).strip() if thread_id and str(thread_id).strip() else "thr-" + stamp
     msg = {
@@ -112,6 +121,10 @@ def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
         msg["work_item_id"] = str(work_item_id).strip()
     if intent is not None:
         msg["intent"] = intent
+    if closure is not None:
+        msg["closure"] = closure
+        if closure_meta:
+            msg["closure_meta"] = closure_meta
     return msg
 
 

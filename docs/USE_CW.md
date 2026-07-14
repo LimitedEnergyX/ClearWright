@@ -72,6 +72,41 @@ failed invocations; never prompts, artifact content, or secrets).
   reconciliation (schema + exact-ref binding against the real latest round) at
   zero reviewer cost.
 
+### Artifact & operator layer
+
+- **Artifacts** (`--artifact <path>`, repeatable; remembered by the council):
+  registered and pinned under `review_artifacts/` with the FULL sha256 as the
+  identity, re-verified before every dispatch (tampering is a hard stop).
+  Delivery is capability-aware — GPT gets the full line-numbered artifact
+  inline under budget, else a bounded excerpt pack with a manifest naming the
+  full artifact's hash and stating the excerpts are the only evidence it may
+  rely on; Codex gets the absolute pinned path + expected hash to read from
+  disk. Derived renderings carry their own hashes linked to the original.
+- **`blocked_by_capability`** reconciliation disposition: the reviewer is right
+  and the harness cannot comply. Requires a limitation statement + evidence,
+  never counts as resolved, escalates `operator_required` immediately, and can
+  never coexist with `ready_to_proceed: true`.
+- **Completion gate**: DONE is permitted only when verification was not
+  required, or the bound verify council reached agreement. An unpassed council
+  — or required verification that was never run — refuses DONE (exit 3,
+  `verification_incomplete`).
+- **`close` (operator-only)**: `CLOSED_BY_OPERATOR` /
+  `accepted_with_verification_incomplete` — the human closes without a false
+  DONE. Requires a closure-specific authority record: an inbound operator
+  message created after the failed outcome, naming the work item or verify
+  council and explicitly authorizing closure. Never invoked autonomously; the
+  underlying council outcome is unchanged; history and evidence remain intact.
+- **Canonical summary**: generated and posted by the HARNESS at terminal events
+  (a durable `use-cw-summary` message, `summaries/<id>.json`,
+  `status --summary`, and read-only `GET /api/work-summary`). The skill presents
+  it and never authors governance status. **`retrospective`** reports
+  usage/failures from the invocation log.
+- **Recovery grants** are retry-specific and additive: the operator's authority
+  message must name the council and reviewer and explicitly authorize attempts,
+  be created after exhaustion, and each grant records how many attempts it
+  added (`--grant-count`, default 1). Grants never affect the 2-5 substantive
+  round ceiling.
+
 ## Flow
 
 1. **start** — creates or continues a conversation and, for actionable work,

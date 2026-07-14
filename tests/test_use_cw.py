@@ -151,11 +151,28 @@ class ProgressCompleteTests(unittest.TestCase):
         self.assertEqual(code, ucw.EXIT_USAGE)
         self.assertFalse(res["ok"])
 
-    def test_complete_records_done(self):
+    def test_complete_refused_when_required_verification_never_ran(self):
+        # "Do a small thing." classified actionable -> verification_required is
+        # recorded true at start; absence of a verify council never bypasses it.
         res, code = run(ucw.cmd_complete, queue_root=self.root, work_item_id=self.wid,
-                        packet_id=None, result="Finished and verified.", result_file=None)
+                        packet_id=None, result="Finished.", result_file=None)
+        self.assertEqual(code, ucw.EXIT_OPERATOR)
+        self.assertEqual(res["status"], "verification_incomplete")
+        self.assertTrue(res["verification_required"])
+
+    def test_complete_records_done_when_verification_not_required(self):
+        res0, _ = run(ucw.cmd_start, queue_root=self.root, envelope_file=None,
+                      request="Summarize the design notes.", request_file=None,
+                      kind="analysis", thread_id=None, packet_id=None,
+                      approved_scope="analysis only", actor="claude")
+        # analysis is chat-adjacent but actionable=False for verification; it
+        # still creates a work item (kind != chat).
+        wid = res0["work_item_id"]
+        res, code = run(ucw.cmd_complete, queue_root=self.root, work_item_id=wid,
+                        packet_id=None, result="Finished and recorded.", result_file=None)
         self.assertEqual(code, ucw.EXIT_OK)
         self.assertEqual(res["status"], "done")
+        self.assertFalse(res["verification_required"])
 
     def test_complete_governed_without_clearance_is_authority_stop(self):
         res, code = run(ucw.cmd_complete, queue_root=self.root, work_item_id=self.wid,

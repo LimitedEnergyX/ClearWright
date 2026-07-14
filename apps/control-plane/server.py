@@ -182,6 +182,13 @@ def load_json(path):
         return json.load(fh)
 
 
+def load_json_safe(path):
+    try:
+        return load_json(path)
+    except (OSError, ValueError):
+        return None
+
+
 def find_packet(root, filename):
     """Locate a packet by base filename across the lanes. Returns (path, lane)
     or (None, None). basename guards against path traversal."""
@@ -1244,6 +1251,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "council not found"}, code=404)
                 return
             self._send_json(full)
+            return
+        if path == "/api/work-summary":
+            # Read-only: the harness-generated canonical summary for a work item.
+            import urllib.parse
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            wid = urllib.parse.unquote(params.get("work_item_id", "")) or ""
+            mid = wid.split(":", 1)[1] if ":" in wid else wid
+            summary = load_json_safe(os.path.join(QUEUE_ROOT, "summaries", mid + ".json")) \
+                if mid else None
+            if summary is None:
+                self._send_json({"error": "no summary recorded"}, code=404)
+                return
+            self._send_json({"summary": summary})
             return
         if path.startswith("/static/") or path in ("/app.js", "/style.css"):
             self._send_static(path)

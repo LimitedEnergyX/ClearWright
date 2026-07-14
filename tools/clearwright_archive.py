@@ -602,12 +602,17 @@ def _completion_log_path(mdir, opid):
     return os.path.join(mdir, "pending-{}.log".format(opid))
 
 
-def write_journal(mdir, opid, plan, plan_hash):
+def write_journal(mdir, opid, plan, plan_hash, approval=None):
     os.makedirs(mdir, exist_ok=True)
     planned = [{"id": e["id"], "type": e["type"], "src": e["src"],
                "dst": e["dst"], "sha256": e["sha256"]} for e in plan["entries"]]
     journal = {"schema_version": JOURNAL_SCHEMA_VERSION, "opid": opid,
               "created_at": _now_iso(), "approved_plan_sha256": plan_hash,
+              # Approval lineage rides IN the journal so a recovery that
+              # finalizes an interrupted run keeps the manifest-to-approval
+              # audit link instead of degrading to approval_id null.
+              "approval_id": (approval or {}).get("approval_id"),
+              "operator_message_id": (approval or {}).get("operator_message_id"),
               "planned": planned}
     _atomic_write(_journal_path(mdir, opid, "pending"), journal)
     return journal
@@ -685,7 +690,9 @@ def build_manifest(root, journal, approval):
     return {"schema_version": JOURNAL_SCHEMA_VERSION, "opid": journal["opid"],
            "generated_at": _now_iso(),
            "approved_plan_sha256": approval.get("approved_plan_sha256"),
-           "approval_id": approval.get("approval_id"), "records": rows}
+           "approval_id": approval.get("approval_id"),
+           "operator_message_id": approval.get("operator_message_id"),
+           "records": rows}
 
 
 def index_path(aroot):
@@ -755,8 +762,11 @@ def recover_pending(root):
                 continue
             try:
                 execute_journal(mdir, journal)
+                # The journal carries the approval lineage of the interrupted
+                # run, so recovery finalizes with the original audit link.
                 approval = {"approved_plan_sha256": journal.get("approved_plan_sha256"),
-                           "approval_id": None}
+                           "approval_id": journal.get("approval_id"),
+                           "operator_message_id": journal.get("operator_message_id")}
                 finalize_journal(root, mdir, journal, approval)
                 results.append({"opid": journal["opid"], "status": "completed"})
             except ArchiveError as exc:
@@ -945,7 +955,8 @@ def execute(root, inventory_path=DEFAULT_INVENTORY_PATH,
             return {"ok": False, "error": "inventory_drifted_since_dry_run",
                     "plan_hash": plan_hash,
                     "fresh_plan_hash": fresh.get("plan_hash")}
-        journal = write_journal(mdir, opid, fresh["plan"], plan_hash)
+        journal = write_journal(mdir, opid, fresh["plan"], plan_hash,
+                               approval=approval)
         execute_journal(mdir, journal)
         manifest = finalize_journal(root, mdir, journal, approval)
         return {"ok": True, "opid": opid, "moved": len(manifest["records"]),

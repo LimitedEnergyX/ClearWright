@@ -36,6 +36,19 @@ def queue(prefix, tc):
     return root
 
 
+def stub_preflight(tc):
+    """start runs an implicit preflight (key present, codex on PATH). CI has
+    neither, so tests exercising start stub the probes; preflight behavior
+    itself is tested separately with explicit injections."""
+    import clearwright_gpt_review as gpt_mod
+    import clearwright_codex_review as ccr_mod
+    orig_key, orig_exe = gpt_mod.resolve_api_key, ccr_mod.codex_executable
+    gpt_mod.resolve_api_key = lambda *a, **k: ("test-key-present", "process_env")
+    ccr_mod.codex_executable = lambda: "codex-stub"
+    tc.addCleanup(setattr, gpt_mod, "resolve_api_key", orig_key)
+    tc.addCleanup(setattr, ccr_mod, "codex_executable", orig_exe)
+
+
 def run(func, **kw):
     """Call a wrapper command with a Namespace and capture (result, exit_code)."""
     kw.setdefault("json", True)
@@ -83,6 +96,7 @@ class StartTests(unittest.TestCase):
 
     def setUp(self):
         self.root = queue("ucw_start_", self)
+        stub_preflight(self)
 
     def test_actionable_creates_and_claims_work_item(self):
         res, code = run(ucw.cmd_start, queue_root=self.root,
@@ -119,6 +133,7 @@ class ProgressCompleteTests(unittest.TestCase):
 
     def setUp(self):
         self.root = queue("ucw_pc_", self)
+        stub_preflight(self)
         res, _ = run(ucw.cmd_start, queue_root=self.root, request="Do a small thing.",
                      request_file=None, kind=None, thread_id=None, packet_id=None,
                      approved_scope="scope", actor="claude")
@@ -153,6 +168,7 @@ class CouncilExitCodeTests(unittest.TestCase):
 
     def setUp(self):
         self.root = queue("ucw_council_", self)
+        stub_preflight(self)
         res, _ = run(ucw.cmd_start, queue_root=self.root, request="Plan a change.",
                      request_file=None, kind=None, thread_id=None, packet_id=None,
                      approved_scope="operator approved scope", actor="claude")
@@ -163,8 +179,10 @@ class CouncilExitCodeTests(unittest.TestCase):
         base = dict(queue_root=self.root, phase="plan", council_id=None,
                     thread_id=self.thread, work_item_id=self.wid, packet_id=None,
                     repo=None, plan_file=None, context_file=None, prompt="review this plan",
-                    reconciliation_file=None, stage="review", model=None,
-                    approved_scope="operator approved scope", timeout=30, json=True)
+                    reconciliation_file=None, stage="review", dry_run=False, model=None,
+                    approved_scope="operator approved scope",
+                    min_rounds=2, max_rounds=5, grant_attempts=None,
+                    operator_message_id=None, timeout=30, json=True)
         base.update(kw)
         return base
 

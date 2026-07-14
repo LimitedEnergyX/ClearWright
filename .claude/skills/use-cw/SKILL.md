@@ -8,7 +8,7 @@ description: >-
   Council on the result, and record completion. Use when the operator says "Use
   CW", "review this with CW", "run this through CW", "govern this through CW",
   "check this with GPT and Codex", or invokes /use-cw.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Use CW
@@ -25,69 +25,103 @@ Parse the single JSON response and branch on the **exit code**:
 
     0  completed / agreement threshold met  -> continue
     2  revision or another review round required
-    3  operator required
-    4  reviewer unavailable
-    5  hard gate
+    3  operator required (incl. classification conflict)
+    4  reviewer unavailable (attempt budget exhausted -- do NOT hammer; see below)
+    5  hard gate (incl. preflight failure, packet over budget)
     6  required authority not granted (governed change without clearance)
-    other nonzero  argument or runtime failure
+    7  usage or validation error (bad flags, invalid schema, round bounds)
+    8  runtime failure
 
 Use absolute paths and `--json`. Never print, paste, or store `OPENAI_API_KEY`;
-the GPT adapter reads it from the environment. The queue root is the durable
-ClearWright queue (for this operator, `D:/AI-Agents/ClearWright/runtime/queues/active`).
+the GPT adapter resolves it from the environment (including the Windows
+User scope) itself. The queue root is the durable ClearWright queue (for this
+operator, `D:/AI-Agents/ClearWright/runtime/queues/active`).
 
 ## Preconditions
 
-1. Check readiness first: `GET /api/health` (or `status`). Confirm
-   `openai_api_key_configured` is true and `codex_cli_on_path` is true before a
-   real council. If the key is missing, that is a hard gate: stop and give the
-   operator exact steps to set `OPENAI_API_KEY` in their environment (never ask
-   them to paste it to you), then retry.
+1. Run `preflight <queue> --json` first (and note that `start` re-runs the cheap
+   checks itself and exits 5 creating nothing if they fail). Exit 5 means stop:
+   present the `remediation` steps to the operator verbatim, then retry after
+   they act. Never ask the operator to paste the key to you.
 
-## Classify the request
+## Start with a structured envelope
 
-- **chat only** -> answer normally; `start` records it as chat (never a work item).
-- **analysis/research** -> may run a planning council without executing changes.
-- **actionable** -> `start` creates and claims a work item.
-- **governed** (deploy, publish, schema/migration, delete, force-push, secrets,
-  billing, production) -> requires a clearance packet / operator authority before
-  execution. Agreement never substitutes for it.
-- **high risk** -> treat as governed and stop for the operator on any hard gate.
+Build a **task envelope** (see `schema envelope`) instead of prose classification:
+
+    {"task_kind": "analysis",
+     "request": "<the operator's ask>",
+     "approved_scope": "<what the operator authorized>",
+     "intended_actions": ["fetch page", "inspect source", "produce report"],
+     "excluded_actions": ["edit files", "deploy", "publish"],
+     "operator_authority_source": "<which operator instruction authorizes this>",
+     "verification_required": true}
+
+Then: `start <queue> --envelope-file <path> --json`.
+
+- `excluded_actions` are the operator's guardrails — list every prohibition
+  there; they are **never** read as risk.
+- kinds: **chat** (no work item) · **analysis** · **actionable** (work item
+  created + claimed) · **governed / high_risk** (requires a clearance packet;
+  agreement never substitutes for it).
+- A conflict between `intended_actions` and the approved scope exits 3 — resolve
+  it with the operator; never reclassify to make it pass.
+- `verification_required` is recorded at start (governed/high-risk always true).
 
 ## Workflow
 
-1. **start** — `start <queue> --request-file <path> --approved-scope "<scope>" --json`.
-   Records the operator request and approved scope; for actionable work, returns
-   `thread_id` and a claimed `work_item_id`.
+1. **start** — as above; returns `thread_id` and a claimed `work_item_id`.
 2. **plan the council** — draft a bounded context packet (operator request, scope,
    constraints, your proposed plan, expected files, relevant excerpts/diffs,
    risks, open questions, explicit review questions). Do NOT include secrets or
-   whole repositories.
+   whole repositories. The assembled packet must fit the phase input budget
+   (plan/incident 32K, verify 96K estimated tokens) or dispatch fails fast (exit
+   5) without spending an attempt.
 3. **council (planning)** — loop:
    - `council <queue> --council-id <id?> --thread-id <id> --work-item-id <id> --phase plan --stage review --plan-file <ctx> --repo <repo> --approved-scope "<scope>" --json`
      runs one real GPT + Codex round.
-   - Read both structured verdicts. Write a reconciliation JSON: accept valid
-     findings, reject incorrect ones **with evidence**, bind a resolution to each
-     final-round `required_change`/`blocking_finding` by ref (e.g.
-     `gpt.required_changes[0]`), set `ready_to_proceed` honestly.
-   - `council ... --stage reconcile --council-id <id> --reconciliation-file <recon> --json`.
-   - Repeat 2–5 rounds until exit 0 (agreement), or stop on 3/4/5.
+   - Read both structured verdicts. Write a reconciliation JSON (see
+     `schema reconciliation`): accept valid findings, reject incorrect ones
+     **with evidence**, bind a resolution to each final-round
+     `required_change`/`blocking_finding` by exact ref (e.g.
+     `gpt.required_changes[0]` — no annotations), set `ready_to_proceed` honestly.
+   - **Validate first at zero cost:** `... --stage reconcile --dry-run
+     --reconciliation-file <recon> --json` (exit 0 = valid and fully bound).
+   - Then submit without `--dry-run`.
+   - Repeat 2-5 rounds until exit 0 (agreement), or stop on 3/5.
 4. **proceed** — only on exit 0, and only inside the approved scope. Use the tools
-   available in your environment (filesystem/shell, Desktop Commander, Chrome
-   MCP, git, python, ClearWright helpers); pick the least-risky effective path.
-   Post progress with `progress <queue> --work-item-id <id> --message-file <path> --json`.
+   available in your environment; pick the least-risky effective path. Post
+   progress with `progress <queue> --work-item-id <id> --message-file <path> --json`.
 5. **incident** — on a routine glitch, gather bounded evidence and run
    `incident <queue> --work-item-id <id> --phase incident --plan-file <incident-ctx> --json`
    (then reconcile). Proceed if the focused rule is met and the fix stays in
    scope. Ask the operator only on a hard gate, unresolved disagreement,
-   reviewer failure after retries, or scope expansion.
+   reviewer failure after the attempt budget, or scope expansion.
 6. **verify** — before DONE, run
-   `verify <queue> --work-item-id <id> --phase verify --plan-file <evidence-ctx> --repo <repo> --json`
-   with the actual diff, files changed, and test/CI/smoke results; reconcile;
-   fix scoped findings and rerun.
+   `verify <queue> --thread-id <id> --work-item-id <id> --phase verify --plan-file <evidence-ctx> --repo <repo> --approved-scope "<scope>" --json`
+   (a NEW verify council requires `--thread-id`, and `--approved-scope` must be
+   passed or agreement is blocked) with the actual diff, files changed, and
+   test/CI/smoke results; reconcile; fix scoped findings and rerun.
 7. **complete** — `complete <queue> --work-item-id <id> --result-file <path> --json`
    records the final response and marks the work item done. For a governed
    change, pass `--packet-id`; exit 6 means the clearance packet is not in
    `clearance_done` (operator authority not granted) — stop.
+
+## Reviewer attempts and exit 4
+
+Each reviewer gets at most **two adapter calls per substantive round**, persisted
+across invocations — reinvoking the same round does NOT retry, and changing the
+packet does not earn more attempts. On exit 4:
+
+1. Diagnose the cause from `statuses` and the invocation log.
+2. Fix the cause, then either start a **new council**, or ask the operator to
+   authorize a recovery and pass
+   `--grant-attempts <reviewer> --operator-message-id <id of the operator's
+   durable authorizing message>`.
+3. Never loop retries; never fabricate a reviewer result.
+
+Rounds where a reviewer failed are NOT counted toward the 2-5 round budget.
+`--min-rounds`/`--max-rounds` are available within `2 <= min <= max <= 5`; no
+command can create a sixth substantive round.
 
 ## Authority and hard gates
 
@@ -97,8 +131,9 @@ about routine details. Stop and ask the operator only for: secrets/credentials,
 missing API provisioning, destructive deletion, force-push, unapproved
 deploy/publish, repo settings/visibility/license/release/tag changes,
 billing/payments, access-control changes, private-data exposure, unclear scope,
-a required RTA/CTA not granted, or unresolved blockers after five rounds. When
-you must stop, give the operator the exact numbered steps and wait.
+a required RTA/CTA not granted, a classification conflict, or unresolved
+blockers after the round budget. When you must stop, give the operator the exact
+numbered steps and wait.
 
 Never fake GPT or Codex. Never claim participation without a real, successful,
 recorded reviewer result. Never touch the private demo target.

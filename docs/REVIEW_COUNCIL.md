@@ -74,7 +74,24 @@ carry evidence, so dissent is never summarized away:
 - `--stage review` runs one round. Round one is independent: GPT does not see
   Codex's output and vice versa. Before any reviewer call, a basic secret scan
   runs on the context packet; a probable secret is a hard gate and no reviewer
-  is called.
+  is called. The assembled packet is also checked against the phase input
+  budget (plan/incident 32K, verify 96K estimated input tokens) and dispatch
+  fails fast — before any attempt is spent — when it cannot be delivered.
+- **The engine is the sole retry owner.** One adapter invocation is exactly one
+  API/CLI call. Each reviewer gets at most TWO total adapter calls per
+  substantive round (initial + one retry with bounded backoff), persisted on
+  the council record across reinvocations; a changed dispatch fingerprint
+  (packet, model, config) never resets the budget — it only gates reuse of the
+  cached validated result, so a real review from an aborted round is never
+  re-spent. Exhaustion returns `reviewer_unavailable`; continuing requires a
+  new council or an explicit operator-authorized recovery grant
+  (`--grant-attempts` anchored to a durable inbound operator message, recorded
+  on the council). A round in which a reviewer failed is NOT counted toward the
+  round budget; only rounds where both reviewers produced validated reviews
+  are substantive. The bounds `2 <= min_rounds <= max_rounds <= 5` are enforced
+  in the engine itself — no caller can create a sixth substantive round.
+- **Codex transport**: the prompt travels via stdin (never argv, which Windows
+  caps at ~23 KB effective), and the Codex timeout scales with packet size.
 - `--stage reconcile --reconciliation-file <path>` attaches Claude's
   reconciliation to the latest round, posts it durably, and re-evaluates.
 

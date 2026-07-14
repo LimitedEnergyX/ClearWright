@@ -157,7 +157,7 @@ class GptAdapterTests(unittest.TestCase):
 
     def _gpt(self, **kw):
         base = dict(thread_id=self.thread, key_getter=lambda: FAKE_KEY,
-                    sleep=lambda *_a, **_k: None, note_on_failure=False, model="gpt-5.6-terra")
+                    note_on_failure=False, model="gpt-5.6-terra")
         base.update(kw)
         return gpt.review(self.root, base.pop("context", "please review"), **base)
 
@@ -223,12 +223,30 @@ class GptAdapterTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertEqual(res["error"], "invalid_verdict")
 
-    def test_transient_retry_limited_to_two(self):
+    def test_adapter_makes_exactly_one_call_council_owns_retries(self):
+        # The council engine is the sole retry owner: one adapter invocation is
+        # exactly ONE transport call, even on a transient 5xx. Hidden adapter
+        # retries would silently multiply the council's attempt budget.
         calls = []
         res = self._gpt(transport=gpt_transport(make_verdict("gpt"), status=500, calls=calls))
         self.assertFalse(res["ok"])
-        # 1 initial attempt + 2 retries = 3 transport calls, no more.
-        self.assertEqual(len(calls), 3)
+        self.assertTrue(res.get("transient"))
+        self.assertEqual(len(calls), 1)
+
+    def test_key_resolves_from_windows_user_scope_fallback(self):
+        # A User-scope variable set after the parent process launched is not
+        # inherited; the adapter falls back to the User scope, never printing it.
+        key, source = gpt.resolve_api_key(env_get=lambda *_: None,
+                                          user_scope_get=lambda: FAKE_KEY)
+        self.assertEqual(key, FAKE_KEY)
+        self.assertEqual(source, "windows_user_scope")
+        key2, source2 = gpt.resolve_api_key(env_get=lambda *_: "sk-fromenv-000000000000000000",
+                                            user_scope_get=lambda: FAKE_KEY)
+        self.assertEqual(source2, "process_env")
+        key3, source3 = gpt.resolve_api_key(env_get=lambda *_: None,
+                                            user_scope_get=lambda: None)
+        self.assertIsNone(key3)
+        self.assertIsNone(source3)
 
     def test_transport_exception_is_bounded_and_safe(self):
         def boom(url, headers, body_bytes, timeout):
@@ -276,13 +294,28 @@ class CodexStructuredTests(unittest.TestCase):
                                      runner=runner, available_fn=lambda: True,
                                      note_on_failure=False, **kw)
 
-    def test_codex_cmd_skips_git_repo_check(self):
-        # Regression: Codex must run read-only against any directory, including
-        # a non-git / untrusted target (the JARVIS run fast-exited without this).
-        cmd = ccr.build_codex_cmd("some prompt")
+    def test_codex_cmd_uses_stdin_never_argv(self):
+        # The prompt travels via STDIN (`-`), never argv: Windows caps the
+        # command line at 32,767 chars (~23 KB effective), which silently
+        # limited how much evidence a council could carry. Also keep read-only
+        # and the untrusted-directory fix.
+        cmd = ccr.build_codex_cmd()
+        self.assertEqual(cmd[-1], "-")
         self.assertIn("--skip-git-repo-check", cmd)
         self.assertIn("read-only", cmd)
-        self.assertEqual(cmd[-1], "some prompt")
+        big = "x" * 100_000
+        self.assertNotIn(big, " ".join(cmd))  # a large prompt never enters argv
+
+    def test_codex_timeout_scales_with_packet_size(self):
+        env = lambda name: None  # noqa: E731 - defaults
+        self.assertEqual(ccr.effective_timeout(0, env_get=env), 120)
+        self.assertEqual(ccr.effective_timeout(100_000, env_get=env), 180)
+        self.assertEqual(ccr.effective_timeout(260_000, env_get=env), 300)
+        self.assertEqual(ccr.effective_timeout(10_000_000, env_get=env), 600)  # capped
+        custom = {"CLEARWRIGHT_CODEX_TIMEOUT_BASE": "60",
+                  "CLEARWRIGHT_CODEX_TIMEOUT_PER_100KB": "10",
+                  "CLEARWRIGHT_CODEX_TIMEOUT_CAP": "90"}.get
+        self.assertEqual(ccr.effective_timeout(500_000, env_get=custom), 90)
 
     def test_codex_reviewer_self_label_is_coerced(self):
         v = make_verdict("codex")
@@ -409,11 +442,16 @@ class CouncilEngineTests(unittest.TestCase):
                 "unresolved_blockers": [], "rejected_findings": [
                     {"finding": "x", "reason": "no", "evidence": []}]})
 
+    def _dispatch(self, c, gv="approve", cv="approve", gconf=0.9, cconf=0.9,
+                  gpost=True, cpost=True, ghard=False, greq=None, creq=None):
+        return council.run_round(
+            self.root, c, "ctx", sleep=lambda *_: None,
+            gpt_fn=self.gpt_fn(gv, gconf, posted=gpost, hard_gate=ghard, req=greq),
+            codex_fn=self.codex_fn(cv, cconf, posted=cpost, req=creq))
+
     def _round(self, c, gv="approve", cv="approve", gconf=0.9, cconf=0.9,
                recon=None, gpost=True, cpost=True, ghard=False, greq=None, creq=None):
-        council.run_round(self.root, c, "ctx",
-                          gpt_fn=self.gpt_fn(gv, gconf, posted=gpost, hard_gate=ghard, req=greq),
-                          codex_fn=self.codex_fn(cv, cconf, posted=cpost, req=creq))
+        self._dispatch(c, gv, cv, gconf, cconf, gpost, cpost, ghard, greq, creq)
         c2 = council.load_council(self.root, c["council_id"])
         if recon is not None:
             council.attach_reconciliation(self.root, c2, recon)
@@ -456,17 +494,138 @@ class CouncilEngineTests(unittest.TestCase):
         out = self._round(c, gconf=0.5, recon=self.ready_recon())
         self.assertEqual(out["outcome"], "needs_revision")
 
-    def test_missing_reviewer_is_reviewer_unavailable(self):
+    def test_failed_reviewer_aborts_round_without_counting_it(self):
+        # A reviewer that never validates does NOT commit a round: the round is
+        # not counted toward min/max, and the dispatch report says so. The other
+        # reviewer's real review is cached, not re-spent.
         c = self.new_council()
-        self._round(c)
-        out = self._round(c, cpost=False, recon=self.ready_recon())
-        self.assertEqual(out["outcome"], "reviewer_unavailable")
+        self._round(c)  # round 1 committed
+        report = self._dispatch(c, cpost=False)
+        self.assertFalse(report["committed"])
+        self.assertIn("codex", report.get("exhausted", []))
+        c2 = council.load_council(self.root, c["council_id"])
+        rounds = council.load_rounds(self.root, c["council_id"])
+        self.assertEqual(council.substantive_round_count(rounds), 1)  # not counted
+        # The GPT review from the aborted dispatch is cached for reuse.
+        self.assertTrue(any(k.endswith(":gpt") for k in c2.get("pending_results", {})))
+
+    def test_attempt_budget_is_two_total_calls_and_persists(self):
+        # Max two adapter calls per reviewer per round, persisted across
+        # reinvocations: the third invocation makes NO further calls.
+        calls = []
+        c = self.new_council()
+        self._round(c)  # round 1 committed
+        failing = self.codex_fn(posted=False, capture=calls)
+        r1 = council.run_round(self.root, c, "ctx", sleep=lambda *_: None,
+                               gpt_fn=self.gpt_fn(), codex_fn=failing)
+        self.assertFalse(r1["committed"])
+        self.assertEqual(len(calls), 2)  # initial + one retry, in one invocation
+        c2 = council.load_council(self.root, c["council_id"])
+        r2 = council.run_round(self.root, c2, "ctx", sleep=lambda *_: None,
+                               gpt_fn=self.gpt_fn(), codex_fn=failing)
+        self.assertFalse(r2["committed"])
+        self.assertEqual(len(calls), 2)  # STILL two: budget persisted, no new call
+
+    def test_fingerprint_change_does_not_reset_attempt_budget(self):
+        # Changing the packet (a new context = new fingerprint) must not grant
+        # additional attempts: budgets are per (reviewer, round), full stop.
+        calls = []
+        c = self.new_council()
+        failing = self.codex_fn(posted=False, capture=calls)
+        council.run_round(self.root, c, "ctx one", sleep=lambda *_: None,
+                          gpt_fn=self.gpt_fn(), codex_fn=failing)
+        self.assertEqual(len(calls), 2)
+        c2 = council.load_council(self.root, c["council_id"])
+        council.run_round(self.root, c2, "ctx two CHANGED", sleep=lambda *_: None,
+                          gpt_fn=self.gpt_fn(), codex_fn=failing)
+        self.assertEqual(len(calls), 2)  # changed fingerprint earned nothing
+
+    def test_operator_grant_resets_budget_and_is_recorded(self):
+        # The ONLY in-council budget reset: an explicit operator-authorized
+        # grant anchored to a durable inbound operator message.
+        calls = []
+        c = self.new_council()
+        failing = self.codex_fn(posted=False, capture=calls)
+        council.run_round(self.root, c, "ctx", sleep=lambda *_: None,
+                          gpt_fn=self.gpt_fn(), codex_fn=failing)
+        self.assertEqual(len(calls), 2)
+        # An arbitrary/unknown message id is refused.
+        c2 = council.load_council(self.root, c["council_id"])
+        refused = council.grant_attempts(self.root, c2, "codex", "msg-nope")
+        self.assertFalse(refused["ok"])
+        # A real inbound operator message authorizes the grant.
+        op = server.do_message(self.root, {
+            "actor": "OPERATOR-0001", "role": "operator", "direction": "inbound",
+            "intent": "chat", "message": "Recovery authorized: retry codex for this round."})
+        granted = council.grant_attempts(self.root, c2, "codex",
+                                         op["message"]["message_id"])
+        self.assertTrue(granted["ok"])
+        c3 = council.load_council(self.root, c["council_id"])
+        key = "r1:codex"
+        self.assertEqual(c3["attempt_state"][key]["calls"], 0)
+        self.assertEqual(c3["attempt_state"][key]["grants"][0]["operator_message_id"],
+                         op["message"]["message_id"])
+        # Fresh budget: two more calls are possible.
+        council.run_round(self.root, c3, "ctx", sleep=lambda *_: None,
+                          gpt_fn=self.gpt_fn(), codex_fn=failing)
+        self.assertEqual(len(calls), 4)
+
+    def test_cached_review_is_reused_not_respent(self):
+        # After an aborted dispatch, re-running the SAME dispatch reuses the
+        # validated review from cache instead of calling the adapter again.
+        gcalls, ccalls = [], []
+        c = self.new_council()
+        council.run_round(self.root, c, "ctx", sleep=lambda *_: None,
+                          gpt_fn=self.gpt_fn(capture=gcalls),
+                          codex_fn=self.codex_fn(posted=False, capture=ccalls))
+        self.assertEqual(len(gcalls), 1)
+        c2 = council.load_council(self.root, c["council_id"])
+        op = server.do_message(self.root, {
+            "actor": "OPERATOR-0001", "role": "operator", "direction": "inbound",
+            "intent": "chat", "message": "Recovery authorized for codex."})
+        council.grant_attempts(self.root, c2, "codex", op["message"]["message_id"])
+        c3 = council.load_council(self.root, c["council_id"])
+        report = council.run_round(self.root, c3, "ctx", sleep=lambda *_: None,
+                                   gpt_fn=self.gpt_fn(capture=gcalls),
+                                   codex_fn=self.codex_fn(capture=ccalls))
+        self.assertTrue(report["committed"])
+        self.assertEqual(len(gcalls), 1)  # GPT was NOT called again
+        self.assertEqual(report["attempts"]["gpt"], 0)  # reused from cache
 
     def test_hard_gate_short_circuits(self):
         c = self.new_council()
-        out = self._round(c, gpost=False, ghard=True)
+        report = self._dispatch(c, gpost=False, ghard=True)
+        self.assertTrue(report["hard_gate"])
+        out = council.evaluate(council.load_council(self.root, c["council_id"]),
+                               council.load_rounds(self.root, c["council_id"]))
         self.assertEqual(out["outcome"], "hard_gate")
         self.assertTrue(out["hard_gate"])
+        # A hard-gate record is an audit entry, not a substantive round.
+        rounds = council.load_rounds(self.root, c["council_id"])
+        self.assertEqual(council.substantive_round_count(rounds), 0)
+
+    def test_round_clamp_enforced_in_engine(self):
+        for mn, mx in ((1, 3), (2, 6), (3, 2), (0, 0), (2, 9)):
+            with self.subTest(min_rounds=mn, max_rounds=mx):
+                with self.assertRaises(ValueError):
+                    council.create_council(self.root, thread_id=self.thread,
+                                           min_rounds=mn, max_rounds=mx)
+        ok = council.create_council(self.root, thread_id=self.thread,
+                                    min_rounds=2, max_rounds=5)
+        self.assertEqual((ok["min_rounds"], ok["max_rounds"]), (2, 5))
+
+    def test_packet_over_budget_fails_fast_without_spending_attempts(self):
+        cap = []
+        c = self.new_council()
+        big = "y" * (32000 * 4)  # ~42K estimated tokens > 32K plan budget
+        report = council.run_round(self.root, c, big, sleep=lambda *_: None,
+                                   gpt_fn=self.gpt_fn(capture=cap),
+                                   codex_fn=self.codex_fn(capture=cap))
+        self.assertTrue(report.get("packet_undeliverable"))
+        self.assertFalse(report["committed"])
+        self.assertEqual(cap, [])  # no reviewer attempt was spent
+        c2 = council.load_council(self.root, c["council_id"])
+        self.assertEqual(c2.get("attempt_state", {}), {})
 
     def test_max_rounds_forces_operator_required(self):
         c = self.new_council(min_rounds=2, max_rounds=3)

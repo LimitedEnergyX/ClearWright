@@ -36,9 +36,11 @@ Exit codes:
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
+import time
 
 import clearwright_message as cwm
 import clearwright_verdict as cwv
@@ -48,7 +50,81 @@ import clearwright_codex_review as codex_adapter
 COUNCILS_DIR = "review_councils"
 DEFAULT_MIN_ROUNDS = 2
 DEFAULT_MAX_ROUNDS = 5
+# Product boundary: 2 to 5 substantive rounds, enforced here in the engine so
+# no caller, wrapper, skill, or direct invocation can create a sixth round.
+MIN_ROUNDS_FLOOR = 2
+MAX_ROUNDS_CEILING = 5
 CONFIDENCE_FLOOR = 0.70
+
+# Attempt budget: at most TWO total adapter calls per reviewer per substantive
+# round (initial + one retry), persisted across command reinvocations. Changing
+# the dispatch fingerprint (packet, timeout, model, config) does NOT grant more
+# attempts — the fingerprint only gates result-cache REUSE. After exhaustion the
+# outcome is reviewer_unavailable; continuing requires a new council or an
+# explicit operator-authorized recovery grant recorded durably on the council.
+MAX_ATTEMPTS_PER_ROUND = 2
+ATTEMPT_BACKOFF_SECONDS = 2.0
+
+# Reviewer capability declarations (part of the dispatch fingerprint; the
+# artifact-aware packaging layer builds on these).
+REVIEWER_CAPABILITIES = {
+    "gpt": {"can_read_files": False, "transport": "https-inline"},
+    "codex": {"can_read_files": True, "transport": "stdin-prompt"},
+}
+
+# Phase input budgets for the GPT (inline-text) reviewer, measured on the FINAL
+# assembled packet in ESTIMATED input tokens. Estimates are labeled as such and
+# never reported as actual usage.
+PHASE_BUDGET_DEFAULTS = {"plan": 32000, "incident": 32000, "verify": 96000}
+
+
+def clamp_rounds(min_rounds, max_rounds):
+    """Validate the product boundary 2 <= min_rounds <= max_rounds <= 5.
+    Raises ValueError on violation; there is no override."""
+    mn, mx = int(min_rounds), int(max_rounds)
+    if not (MIN_ROUNDS_FLOOR <= mn <= mx <= MAX_ROUNDS_CEILING):
+        raise ValueError(
+            "round bounds must satisfy {} <= min_rounds <= max_rounds <= {}".format(
+                MIN_ROUNDS_FLOOR, MAX_ROUNDS_CEILING))
+    return mn, mx
+
+
+def phase_input_budget(phase, env_get=os.environ.get):
+    name = "CLEARWRIGHT_GPT_{}_INPUT_BUDGET".format(str(phase or "plan").upper())
+    default = PHASE_BUDGET_DEFAULTS.get(phase, PHASE_BUDGET_DEFAULTS["plan"])
+    try:
+        return int(env_get(name) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def estimate_tokens(char_count, env_get=os.environ.get):
+    """Conservative ESTIMATE of input tokens from characters (ceil(chars/3.0)
+    by default; divisor configurable). Never a substitute for provider-reported
+    actual usage."""
+    try:
+        divisor = float(env_get("CLEARWRIGHT_TOKEN_ESTIMATE_DIVISOR") or 3.0)
+    except (TypeError, ValueError):
+        divisor = 3.0
+    if divisor <= 0:
+        divisor = 3.0
+    return int(math.ceil((char_count or 0) / divisor))
+
+
+def log_invocation(root, record):
+    """Append one metadata-only line to the invocation log. Records every
+    dispatch attempt including aborted ones — the run that motivated this had
+    eight invisible failures. Never logs prompts, artifact content, credentials,
+    headers, or key values; logging failures never break the run."""
+    rec = {"invocation_id": "inv-" + cwm._stamp(), "at": cwm._now_iso()}
+    rec.update({k: v for k, v in record.items() if v is not None})
+    try:
+        path = os.path.join(root, "invocation_log.jsonl")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+    return rec
 
 # A real reviewer result must carry the matching provenance source, so a stored
 # round cannot be hand-shaped to look like a validated reviewer run.
@@ -135,6 +211,7 @@ def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
                    phase="plan", min_rounds=DEFAULT_MIN_ROUNDS,
                    max_rounds=DEFAULT_MAX_ROUNDS, model=None, council_id=None,
                    approved_scope=None):
+    min_rounds, max_rounds = clamp_rounds(min_rounds, max_rounds)
     council_id = council_id or new_council_id()
     council = {
         "council_id": council_id,
@@ -154,6 +231,10 @@ def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
         "approved_scope_sha256": _scope_hash(approved_scope),
         "created_at": cwm._now_iso(),
         "rounds": [],
+        # Attempt budget and validated-result cache, persisted so reinvoking a
+        # round can never reset the budget or re-spend a real review.
+        "attempt_state": {},
+        "pending_results": {},
     }
     _atomic_write_json(os.path.join(council_dir(root, council_id), "council.json"), council)
     return council
@@ -254,7 +335,9 @@ def evaluate(council, rounds):
     never be overridden."""
     min_rounds = int(council.get("min_rounds", DEFAULT_MIN_ROUNDS))
     max_rounds = int(council.get("max_rounds", DEFAULT_MAX_ROUNDS))
-    completed = len(rounds)
+    # Only committed substantive rounds count toward min/max; hard-gate and
+    # secret-scan records are audit entries (they can still short-circuit below).
+    completed = substantive_round_count(rounds)
 
     base = {
         "council_id": council.get("council_id"),
@@ -274,22 +357,28 @@ def evaluate(council, rounds):
         "unresolved_blockers": [],
     }
 
-    if completed == 0:
+    # Hard gate (missing key / model unavailable / secret) short-circuits even
+    # when the gate record is a non-substantive audit round.
+    if rounds:
+        gate = rounds[-1]
+        gate_gpt = gate.get("gpt")
+        if (gate_gpt and gate_gpt.get("hard_gate")) or gate.get("hard_gate"):
+            base.update({"outcome": "hard_gate", "hard_gate": True,
+                         "reason": (gate_gpt or {}).get("error")
+                         or gate.get("hard_gate_reason") or "hard gate"})
+            return base
+
+    substantive = [r for r in rounds if r.get("substantive", True)]
+    if not substantive:
         base.update({"outcome": "needs_revision", "reason": "no review rounds yet"})
         return base
 
-    latest = rounds[-1]
+    latest = substantive[-1]
     gpt = latest.get("gpt")
     codex = latest.get("codex")
     recon = latest.get("reconciliation")
     base["gpt_status"] = _reviewer_status(gpt, "gpt")
     base["codex_status"] = _reviewer_status(codex, "codex")
-
-    # Hard gate (missing key / model unavailable / secret) short-circuits.
-    if (gpt and gpt.get("hard_gate")) or latest.get("hard_gate"):
-        base.update({"outcome": "hard_gate", "hard_gate": True,
-                     "reason": (gpt or {}).get("error") or latest.get("hard_gate_reason") or "hard gate"})
-        return base
 
     gpt_ok = base["gpt_status"] == "review" and bool(gpt and gpt.get("verdict"))
     codex_ok = base["codex_status"] == "review" and bool(codex and codex.get("verdict"))
@@ -439,48 +528,245 @@ def _augment_context(base_context, rounds):
     return "\n".join(lines)
 
 
+def substantive_round_count(rounds):
+    """Committed substantive rounds only (secret-scan / hard-gate records are
+    audit entries, not review rounds). Legacy round files predate the flag and
+    default to substantive."""
+    return len([r for r in rounds if r.get("substantive", True)])
+
+
+def dispatch_fingerprint(reviewer, context_sha256, requested_model, phase,
+                         adapter_version, artifact_hashes=()):
+    """Identity of one exact dispatch. Gates result-cache REUSE only — it never
+    grants attempts. Covers everything that could change what the reviewer saw:
+    assembled context hash, artifact hashes, reviewer, requested model, adapter
+    version/config, phase, and the reviewer's capability declaration."""
+    blob = json.dumps({
+        "context_sha256": context_sha256,
+        "artifacts": sorted(artifact_hashes or ()),
+        "reviewer": reviewer,
+        "requested_model": requested_model,
+        "adapter_version": adapter_version,
+        "phase": phase,
+        "capability": REVIEWER_CAPABILITIES.get(reviewer, {}),
+    }, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _attempt_key(round_no, reviewer):
+    return "r{}:{}".format(round_no, reviewer)
+
+
+def _persist_council(root, council):
+    _atomic_write_json(os.path.join(council_dir(root, council["council_id"]),
+                                    "council.json"), council)
+
+
+def _validated(result):
+    return bool(result) and result.get("ok") is True and result.get("posted") is True \
+        and result.get("validated") is True and isinstance(result.get("verdict"), dict)
+
+
+def grant_attempts(root, council, reviewer, operator_message_id):
+    """Operator-authorized recovery: reset the attempt budget for one reviewer
+    on the CURRENT (next) round, anchored to a durable inbound operator-authored
+    message. This explicit, recorded operator action is the ONLY in-council
+    budget reset — fingerprint changes never grant attempts."""
+    if reviewer not in REVIEWER_CAPABILITIES:
+        return {"ok": False, "error": "unknown reviewer {!r}".format(reviewer)}
+    match = [m for m in cwm.read_messages(root)
+             if m.get("message_id") == operator_message_id]
+    if not match:
+        return {"ok": False, "error": "operator message {!r} not found".format(operator_message_id)}
+    m = match[0]
+    if m.get("direction") != "inbound" or (m.get("role") or "").lower() != "operator":
+        return {"ok": False,
+                "error": "referenced message is not an inbound operator authority record"}
+    round_no = len(council.get("rounds", [])) + 1
+    key = _attempt_key(round_no, reviewer)
+    state = council.setdefault("attempt_state", {}).setdefault(
+        key, {"calls": 0, "grants": []})
+    state.setdefault("grants", []).append({
+        "operator_message_id": operator_message_id, "at": cwm._now_iso(),
+        "calls_before_grant": state.get("calls", 0)})
+    state["calls"] = 0
+    _persist_council(root, council)
+    return {"ok": True, "round": round_no, "reviewer": reviewer,
+            "operator_message_id": operator_message_id}
+
+
 def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
-              gpt_fn=None, codex_fn=None):
-    """Run one review round: GPT and Codex review the same context independently
-    (round one: neither sees the other). Stores and returns the round dict.
-    A basic secret scan runs before any reviewer call; a probable secret is a
-    hard gate and no reviewer is called."""
+              gpt_fn=None, codex_fn=None, sleep=time.sleep):
+    """Dispatch one review round under the persistent attempt budget and return
+    a dispatch report (NOT a round record):
+
+      {"committed": bool, "substantive": bool, "round": n, "statuses": {...},
+       "attempts": {...}, "hard_gate": bool, "packet_undeliverable": bool,
+       "reason": str}
+
+    Rules enforced here:
+      - at most MAX_ATTEMPTS_PER_ROUND total adapter calls per reviewer per
+        substantive round, persisted across reinvocations; a changed dispatch
+        fingerprint never resets the budget (it only gates cache reuse);
+      - the engine is the sole retry owner (one adapter call per attempt, with
+        a bounded backoff between attempts);
+      - a validated result from an aborted round is cached and reused when the
+        SAME dispatch (exact fingerprint) is re-run, so a real review is never
+        re-spent;
+      - a round is committed (and counts toward min/max) only when BOTH
+        reviewers produced validated reviews;
+      - a probable secret in the context, or a reviewer hard gate, records a
+        non-substantive audit round and stops;
+      - an assembled packet over the phase input budget fails fast BEFORE any
+        attempt is spent."""
     gpt_fn = gpt_fn or _default_gpt
     codex_fn = codex_fn or _default_codex
+    council_id = council["council_id"]
+    phase = council.get("phase")
+    prior_rounds = load_rounds(root, council_id)
     round_no = len(council.get("rounds", [])) + 1
-
-    context = _augment_context(base_context, load_rounds(root, council["council_id"])) \
-        if round_no > 1 else base_context
+    context = _augment_context(base_context, prior_rounds) \
+        if substantive_round_count(prior_rounds) > 0 else base_context
 
     hits = secret_scan(context)
     if hits:
-        round_data = {"round": round_no, "phase": council.get("phase"),
-                      "at": cwm._now_iso(), "gpt": None, "codex": None,
+        round_data = {"round": round_no, "phase": phase, "at": cwm._now_iso(),
+                      "substantive": False, "gpt": None, "codex": None,
                       "reconciliation": None, "hard_gate": True,
                       "hard_gate_reason": "possible secret(s) in context: " + ", ".join(hits)}
-        return save_round(root, council, round_data)
+        save_round(root, council, round_data)
+        return {"committed": True, "substantive": False, "round": round_no,
+                "hard_gate": True, "statuses": {}, "attempts": {},
+                "reason": round_data["hard_gate_reason"]}
 
+    # Budget fail-fast on the FINAL assembled inline packet, before any attempt.
+    packet_chars = len(gpt_adapter.INSTRUCTION) + len(context)
+    est_tokens = estimate_tokens(packet_chars)
+    budget = phase_input_budget(phase)
+    if est_tokens > budget:
+        return {"committed": False, "substantive": False, "round": round_no,
+                "packet_undeliverable": True, "statuses": {}, "attempts": {},
+                "estimated_input_tokens": est_tokens, "budget": budget,
+                "reason": ("assembled packet (~{} estimated input tokens) exceeds the "
+                           "{} phase budget of {}; no reviewer attempt was spent. "
+                           "Shrink the packet or raise CLEARWRIGHT_GPT_{}_INPUT_BUDGET."
+                           ).format(est_tokens, phase, budget, str(phase or "plan").upper())}
+
+    ctx_sha = hashlib.sha256(context.encode("utf-8")).hexdigest()
+    packet_bytes = len(context.encode("utf-8"))
+    requested_model = model or council.get("model")
     kw = dict(thread_id=council.get("thread_id"),
               work_item_id=council.get("work_item_id"),
               packet_id=council.get("packet_id"),
-              council_id=council["council_id"], round_no=round_no,
-              phase=council.get("phase"))
-    gpt_result = gpt_fn(root, context, model=model, timeout=timeout, **kw)
-    codex_result = codex_fn(root, context, repo=repo, timeout=timeout, **kw)
+              council_id=council_id, round_no=round_no, phase=phase)
 
-    round_data = {"round": round_no, "phase": council.get("phase"),
-                  "at": cwm._now_iso(),
-                  # Bind the round to the exact context reviewed, so agreement is
-                  # auditable against a specific plan revision (not a moving target).
-                  "context_sha256": hashlib.sha256(context.encode("utf-8")).hexdigest(),
-                  "gpt": gpt_result, "codex": codex_result, "reconciliation": None}
-    return save_round(root, council, round_data)
+    codex_timeout = max(int(timeout or 0),
+                        codex_adapter.effective_timeout(packet_bytes, base=timeout))
+    plan = [
+        ("gpt", gpt_fn, gpt_adapter.ADAPTER_VERSION, dict(model=requested_model, timeout=timeout)),
+        ("codex", codex_fn, codex_adapter.ADAPTER_VERSION, dict(repo=repo, timeout=codex_timeout)),
+    ]
+
+    attempt_state = council.setdefault("attempt_state", {})
+    pending = council.setdefault("pending_results", {})
+    results, statuses, attempts_used, fingerprints = {}, {}, {}, {}
+
+    for reviewer, fn, adapter_version, extra in plan:
+        key = _attempt_key(round_no, reviewer)
+        fp = dispatch_fingerprint(reviewer, ctx_sha, requested_model, phase, adapter_version)
+        fingerprints[reviewer] = fp
+
+        cached = pending.get(key)
+        if cached and cached.get("fingerprint") == fp and _validated(cached.get("result")):
+            results[reviewer] = cached["result"]
+            statuses[reviewer] = "review"
+            attempts_used[reviewer] = 0  # reused, no new call
+            continue
+
+        state = attempt_state.setdefault(key, {"calls": 0, "grants": []})
+        result = None
+        while state.get("calls", 0) < MAX_ATTEMPTS_PER_ROUND:
+            if state.get("calls", 0) > 0:
+                sleep(ATTEMPT_BACKOFF_SECONDS)
+            state["calls"] = state.get("calls", 0) + 1
+            state["last_fingerprint"] = fp
+            _persist_council(root, council)
+            t0 = time.monotonic()
+            result = fn(root, context, **extra, **kw)
+            tel = (result or {}).get("telemetry") or {}
+            log_invocation(root, {
+                "command": "council-dispatch", "phase": phase, "stage": "review",
+                "council_id": council_id, "work_item_id": council.get("work_item_id"),
+                "reviewer": reviewer, "round": round_no, "attempt": state["calls"],
+                "duration_s": round(time.monotonic() - t0, 3),
+                "packet_bytes": packet_bytes, "estimated_input_tokens": est_tokens,
+                "actual_input_tokens": tel.get("actual_input_tokens"),
+                "actual_output_tokens": tel.get("actual_output_tokens"),
+                "error_class": (None if _validated(result) else
+                                (result or {}).get("error") or (result or {}).get("classification")),
+            })
+            if (result or {}).get("hard_gate"):
+                break
+            if _validated(result):
+                pending[key] = {"fingerprint": fp, "result": result, "at": cwm._now_iso()}
+                _persist_council(root, council)
+                break
+        results[reviewer] = result
+        attempts_used[reviewer] = attempt_state.get(key, {}).get("calls", 0)
+        if result is None:
+            statuses[reviewer] = "attempts_exhausted"
+        elif result.get("hard_gate"):
+            statuses[reviewer] = "hard_gate"
+        elif _validated(result):
+            statuses[reviewer] = "review"
+        else:
+            statuses[reviewer] = "attempts_exhausted"
+
+    if any((r or {}).get("hard_gate") for r in results.values() if r):
+        gated = [rev for rev, r in results.items() if (r or {}).get("hard_gate")]
+        round_data = {"round": round_no, "phase": phase, "at": cwm._now_iso(),
+                      "substantive": False, "context_sha256": ctx_sha,
+                      "gpt": results.get("gpt"), "codex": results.get("codex"),
+                      "reconciliation": None, "hard_gate": True,
+                      "hard_gate_reason": "reviewer hard gate: " + ", ".join(
+                          "{} ({})".format(rev, (results[rev] or {}).get("error"))
+                          for rev in gated)}
+        save_round(root, council, round_data)
+        return {"committed": True, "substantive": False, "round": round_no,
+                "hard_gate": True, "statuses": statuses, "attempts": attempts_used,
+                "reason": round_data["hard_gate_reason"]}
+
+    if all(statuses.get(rev) == "review" for rev, _f, _v, _e in plan):
+        round_data = {"round": round_no, "phase": phase, "at": cwm._now_iso(),
+                      "substantive": True, "context_sha256": ctx_sha,
+                      "fingerprints": fingerprints, "attempts": attempts_used,
+                      "gpt": results["gpt"], "codex": results["codex"],
+                      "reconciliation": None}
+        save_round(root, council, round_data)
+        for rev, _f, _v, _e in plan:
+            pending.pop(_attempt_key(round_no, rev), None)
+            attempt_state.pop(_attempt_key(round_no, rev), None)
+        _persist_council(root, council)
+        return {"committed": True, "substantive": True, "round": round_no,
+                "hard_gate": False, "statuses": statuses, "attempts": attempts_used,
+                "reason": "round committed"}
+
+    _persist_council(root, council)
+    exhausted = [rev for rev, st in statuses.items() if st == "attempts_exhausted"]
+    return {"committed": False, "substantive": False, "round": round_no,
+            "hard_gate": False, "statuses": statuses, "attempts": attempts_used,
+            "exhausted": exhausted,
+            "reason": ("reviewer attempt budget exhausted for: {}; the round was not "
+                       "counted. Continue with a new council or an explicit "
+                       "operator-authorized recovery grant.").format(", ".join(exhausted))
+            if exhausted else "reviewer unavailable; round not counted"}
 
 
 def attach_reconciliation(root, council, reconciliation):
     """Validate and attach Claude's reconciliation to the latest round, and post
     it durably into the conversation. Raises VerdictError on invalid input."""
-    rounds = load_rounds(root, council["council_id"])
+    rounds = [r for r in load_rounds(root, council["council_id"])
+              if r.get("substantive", True)]
     if not rounds:
         raise cwv.VerdictError("no round to reconcile yet")
     normalized = cwv.validate_reconciliation(reconciliation)
@@ -620,16 +906,34 @@ def _phase_command(args):
         if not args.thread_id:
             print("REFUSED: a new council requires --thread-id", file=sys.stderr)
             return 2
-        council = create_council(
-            root, thread_id=args.thread_id, work_item_id=args.work_item_id,
-            packet_id=args.packet_id, phase=args.phase,
-            min_rounds=args.min_rounds, max_rounds=args.max_rounds, model=args.model,
-            approved_scope=args.approved_scope)
+        try:
+            council = create_council(
+                root, thread_id=args.thread_id, work_item_id=args.work_item_id,
+                packet_id=args.packet_id, phase=args.phase,
+                min_rounds=args.min_rounds, max_rounds=args.max_rounds, model=args.model,
+                approved_scope=args.approved_scope)
+        except ValueError as exc:
+            print("REFUSED: {}".format(exc), file=sys.stderr)
+            return 2
     else:
         council = set_approved_scope(root, council, args.approved_scope)
 
-    if len(council.get("rounds", [])) >= int(council.get("max_rounds", DEFAULT_MAX_ROUNDS)):
-        outcome = evaluate(council, load_rounds(root, council["council_id"]))
+    if getattr(args, "grant_attempts", None):
+        if not getattr(args, "operator_message_id", None):
+            print("REFUSED: --grant-attempts requires --operator-message-id "
+                  "(a durable inbound operator authority record)", file=sys.stderr)
+            return 2
+        reviewers = ["gpt", "codex"] if args.grant_attempts == "both" else [args.grant_attempts]
+        for reviewer in reviewers:
+            granted = grant_attempts(root, council, reviewer, args.operator_message_id)
+            if not granted.get("ok"):
+                print("REFUSED: {}".format(granted.get("error")), file=sys.stderr)
+                return 2
+        council = load_council(root, council["council_id"])
+
+    rounds = load_rounds(root, council["council_id"])
+    if substantive_round_count(rounds) >= int(council.get("max_rounds", DEFAULT_MAX_ROUNDS)):
+        outcome = evaluate(council, rounds)
         if outcome["outcome"] != "agreement_threshold_met":
             outcome["outcome"] = "operator_required"
             outcome["operator_required"] = True
@@ -642,9 +946,29 @@ def _phase_command(args):
         print("REFUSED: provide --context-file/--plan-file or --prompt", file=sys.stderr)
         return 2
 
-    run_round(root, council, context, model=args.model, repo=args.repo, timeout=args.timeout)
+    report = run_round(root, council, context, model=args.model, repo=args.repo,
+                       timeout=args.timeout)
     council = load_council(root, council["council_id"])
+
+    if report.get("packet_undeliverable"):
+        payload = {"council_id": council["council_id"], "phase": council.get("phase"),
+                   "outcome": "hard_gate", "hard_gate": True,
+                   "error_class": "packet_undeliverable",
+                   "estimated_input_tokens": report.get("estimated_input_tokens"),
+                   "budget": report.get("budget"), "reason": report.get("reason")}
+        return _emit(payload, args.json)
+    if not report.get("committed"):
+        payload = {"council_id": council["council_id"], "phase": council.get("phase"),
+                   "outcome": "reviewer_unavailable",
+                   "round_attempted": report.get("round"),
+                   "statuses": report.get("statuses"), "attempts": report.get("attempts"),
+                   "reason": report.get("reason")}
+        save_outcome(root, council["council_id"], dict(payload, ready_to_proceed=False,
+                                                       operator_required=False, hard_gate=False))
+        return _emit(payload, args.json)
+
     outcome = evaluate(council, load_rounds(root, council["council_id"]))
+    outcome["attempts"] = report.get("attempts")
     save_outcome(root, council["council_id"], outcome)
     return _emit(outcome, args.json)
 
@@ -703,8 +1027,15 @@ def build_parser():
         p.add_argument("--model", default=None, metavar="NAME")
         p.add_argument("--approved-scope", default=None, metavar="TEXT",
                        help="Operator-approved scope, recorded on the council for audit.")
-        p.add_argument("--min-rounds", type=int, default=DEFAULT_MIN_ROUNDS)
-        p.add_argument("--max-rounds", type=int, default=DEFAULT_MAX_ROUNDS)
+        p.add_argument("--min-rounds", type=int, default=DEFAULT_MIN_ROUNDS,
+                       help="Substantive-round floor (bounds: 2 <= min <= max <= 5).")
+        p.add_argument("--max-rounds", type=int, default=DEFAULT_MAX_ROUNDS,
+                       help="Substantive-round ceiling (bounds: 2 <= min <= max <= 5).")
+        p.add_argument("--grant-attempts", default=None, choices=["gpt", "codex", "both"],
+                       help="Operator-authorized recovery: reset the attempt budget "
+                            "for the current round. Requires --operator-message-id.")
+        p.add_argument("--operator-message-id", default=None, metavar="ID",
+                       help="Durable inbound operator message authorizing the grant.")
         p.add_argument("--timeout", type=int, default=90, metavar="SECONDS")
         p.add_argument("--json", action="store_true", help="Compact JSON output.")
         p.set_defaults(func=_phase_command, phase=name)

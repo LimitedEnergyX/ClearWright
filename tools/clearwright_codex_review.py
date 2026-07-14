@@ -102,26 +102,50 @@ def classify(available, telemetry, output):
     return "non_substantive"
 
 
-def build_codex_cmd(prompt):
-    """The Codex CLI invocation: read-only sandbox, and skip the trusted-git-repo
-    check so a review can run against any target directory (a plain folder, or a
-    repo Codex does not already trust). read-only keeps it unable to edit files,
-    so skipping the trust check does not grant write access."""
-    return ["codex", "exec", "-s", "read-only", "--skip-git-repo-check", prompt]
+# Bumped whenever the adapter's dispatch behavior changes; part of the council's
+# dispatch fingerprint so cached results are never reused across adapter changes.
+ADAPTER_VERSION = "codex-adapter/2"
+
+
+def build_codex_cmd():
+    """The Codex CLI invocation: read-only sandbox, skip the trusted-git-repo
+    check so a review can run against any target directory, and read the prompt
+    from STDIN (the explicit `-` argument). The prompt is deliberately NOT an
+    argv argument: Windows CreateProcess caps the command line at 32,767 chars
+    (~23 KB effective), which silently limited how much evidence a council
+    could carry. stdin has no such ceiling. read-only keeps Codex unable to
+    edit files, so skipping the trust check grants no write access."""
+    return ["codex", "exec", "-s", "read-only", "--skip-git-repo-check", "-"]
+
+
+def effective_timeout(packet_bytes, base=None, env_get=os.environ.get):
+    """Codex timeout scaled to packet size, so evidence-sized packets are not
+    punished by a flat default: base + per-100KB increment, capped. All three
+    knobs are env-configurable."""
+    def _int(name, default):
+        try:
+            return int(env_get(name) or default)
+        except (TypeError, ValueError):
+            return default
+    base = base if base is not None else _int("CLEARWRIGHT_CODEX_TIMEOUT_BASE", 120)
+    per = _int("CLEARWRIGHT_CODEX_TIMEOUT_PER_100KB", 60)
+    cap = _int("CLEARWRIGHT_CODEX_TIMEOUT_CAP", 600)
+    import math
+    return min(cap, base + per * math.ceil((packet_bytes or 0) / 100_000))
 
 
 def run_codex(prompt, timeout, cwd=None):
-    """Invoke the local Codex CLI read-only, non-interactively, with stdin from
-    the null device and a hard timeout. Returns (output, telemetry). Never
-    raises on timeout; the telemetry records timed_out. (Not unit-tested; the
+    """Invoke the local Codex CLI read-only and non-interactively, passing the
+    prompt via STDIN (with EOF, so the old "waiting on stdin" hang cannot
+    occur), with a hard timeout. Returns (output, telemetry). Never raises on
+    timeout; the telemetry records timed_out. (Not unit-tested; the
     classification/posting logic around it is.)"""
-    cmd = build_codex_cmd(prompt)
+    cmd = build_codex_cmd()
     start = time.monotonic()
     try:
-        with open(os.devnull, "rb") as devnull:
-            proc = subprocess.run(
-                cmd, stdin=devnull, capture_output=True, text=True,
-                timeout=timeout, cwd=cwd, encoding="utf-8", errors="replace")
+        proc = subprocess.run(
+            cmd, input=(prompt or ""), capture_output=True, text=True,
+            timeout=timeout, cwd=cwd, encoding="utf-8", errors="replace")
         elapsed = time.monotonic() - start
         output = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
         return output, build_telemetry(output, proc.returncode, elapsed, timed_out=False)

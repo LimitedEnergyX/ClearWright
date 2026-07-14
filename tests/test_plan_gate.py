@@ -171,6 +171,23 @@ class GateLifecycleTests(unittest.TestCase):
         with self.assertRaises(cwg.GateError):
             self._gate()
 
+    def test_canonical_summary_reflects_gate_and_authority(self):
+        gate = self._gate()
+        summary = ucw.build_canonical_summary(self.root, self.wid, "operator_required")
+        self.assertIsNotNone(summary["gate"])
+        self.assertEqual(summary["gate"]["gate_id"], gate["gate_id"])
+        self.assertEqual(summary["gate"]["disposition"], "unresolved")
+        self.assertIsNone(summary["gate"]["authority"])
+
+        time.sleep(0.01)
+        auth = operator_msg(self.root, self.thread, self.wid,
+                            "I authorize proceeding on " + self.wid)
+        run(ucw.cmd_grant_proceed, queue_root=self.root, work_item_id=self.wid,
+            operator_message_id=auth["message_id"])
+        summary2 = ucw.build_canonical_summary(self.root, self.wid, "in_progress")
+        self.assertEqual(summary2["gate"]["disposition"], "resolved")
+        self.assertEqual(summary2["gate"]["authority"]["message_id"], auth["message_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

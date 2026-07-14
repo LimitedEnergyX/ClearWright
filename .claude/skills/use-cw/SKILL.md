@@ -8,7 +8,7 @@ description: >-
   Council on the result, and record completion. Use when the operator says "Use
   CW", "review this with CW", "run this through CW", "govern this through CW",
   "check this with GPT and Codex", or invokes /use-cw.
-version: 1.3.0
+version: 1.4.0
 ---
 
 # Use CW
@@ -51,6 +51,7 @@ Parse the single JSON response and branch on the **exit code**:
     6  required authority not granted (governed change without clearance)
     7  usage or validation error (bad flags, invalid schema, round bounds)
     8  runtime failure
+    9  unresolved plan gate -- STOP; see "Plan-level gates" below
 
 Use absolute paths and `--json`. Never print, paste, or store `OPENAI_API_KEY`;
 the GPT adapter resolves it from the environment (including the Windows
@@ -86,6 +87,34 @@ Then: `start <queue> --envelope-file <path> --json`.
 - A conflict between `intended_actions` and the approved scope exits 3 — resolve
   it with the operator; never reclassify to make it pass.
 - `verification_required` is recorded at start (governed/high-risk always true).
+- Optional `review_profile`: `"code"` (default; 2-5 rounds) or `"editorial"`
+  (target 2, default max 3; pass `--max-rounds` up to 5 to raise it). Use
+  editorial for messaging/copy/design review, code for everything else.
+
+## Plan-level gates (exit 9) -- STOP, do not implement
+
+When a plan or incident council you ran ends `operator_required` or
+`hard_gate`, CW creates a durable, unresolved **gate** on the work item.
+While it is unresolved, `progress`, every council call, `verify`, and
+`complete` all refuse with exit 9. This is fail-closed by design: **do not
+implement, do not route around it through a different command, and do not
+treat the original task request as authority for it** (it never satisfies a
+gate created after it).
+
+Report the escalation to the operator and stop. If the operator gives you a
+new, explicit, post-gate authorization to proceed, resolve the SAME gate with:
+
+    grant-proceed <queue> --work-item-id <id> --operator-message-id <id of a
+    durable inbound operator message created AFTER the gate, naming the work
+    item or gating council, and explicitly authorizing proceeding> --json
+
+A later gate on the same work item always needs its own new authority; the
+resolution of an earlier gate never carries forward. `close` may still
+terminate a plan-gated item (operator-only, unchanged); it records
+`closed_unresolved`, never `resolved` -- it is a cancellation, not proceed
+authority. CW can stop the governed workflow completely, but it cannot
+physically prevent an out-of-band edit outside CW by a process running under
+the same OS user; treat that as the honest limit of what this gate enforces.
 
 ## Workflow
 

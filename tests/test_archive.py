@@ -535,6 +535,43 @@ class NoServerWriteRouteTests(unittest.TestCase):
         self.assertNotIn("/api/archive", post_body)
 
 
+class ActiveRecordFilteringTests(ArchiveTestBase):
+    """Local Council site active-record filtering: once a thread is archived,
+    it disappears from the live Conversations/Active Run list (server.build_runs,
+    which reads only the active communications/ store) while still resolving
+    through the archive-aware fallback."""
+
+    def test_archived_thread_excluded_from_build_runs_but_still_resolvable(self):
+        _seed_message(self.root, "thr-filter", "f1", self.old, body="Smoke test.")
+        _seed_message(self.root, "thr-filter", "f2", self.old + timedelta(minutes=1),
+                      direction="outbound", body="done")
+        before = server.build_runs(self.root)
+        self.assertTrue(any(r["thread_id"] == "thr-filter" for r in before))
+
+        inventory = cwa.build_inventory(
+            [{"id": "thr-filter", "type": "thread", "reason": "smoke"}])
+        inv_dir = tempfile.mkdtemp(prefix="inv_filter_")
+        self.addCleanup(shutil.rmtree, inv_dir, ignore_errors=True)
+        inv_path = os.path.join(inv_dir, "inv.json")
+        with open(inv_path, "w", encoding="utf-8") as fh:
+            json.dump(inventory, fh)
+        plan = cwa.dry_run(self.root, inventory_path=inv_path, now=self.now)
+        auth = _seed_message(self.root, "thr-auth-filter", "authf", self.now,
+                             body="I authorize archive execution for hash " +
+                             plan["plan_hash"])
+        cwa.write_approval(self.root, plan["plan_hash"], auth["message_id"],
+                           "OPERATOR-0001")
+        result = cwa.execute(self.root, inventory_path=inv_path, now=self.now)
+        self.assertTrue(result["ok"], result)
+
+        after = server.build_runs(self.root)
+        self.assertFalse(any(r["thread_id"] == "thr-filter" for r in after),
+                         "an archived thread must not appear in the live run list")
+        # Still resolvable through the archive-aware fallback.
+        archived_messages = cwa.read_archived_messages(self.root, "thr-filter")
+        self.assertEqual(len(archived_messages), 2)
+
+
 class IndexRebuildTests(ArchiveTestBase):
 
     def test_rebuild_index_reconstructs_from_manifests(self):

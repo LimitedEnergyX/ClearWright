@@ -5,6 +5,34 @@ will be added when releases begin.
 
 ## Unreleased
 
+- ClearWright hardening and Local Council site redesign (skill v1.4.0).
+  **Plan-level gate enforcement**: a plan or incident council that ends
+  `operator_required`/`hard_gate` now creates a durable, unresolved gate on
+  the work item; the governed workflow (progress, every council call,
+  verify, complete) fails closed with a new exit 9 until a durable, post-gate
+  operator message explicitly authorizes proceeding (`grant-proceed`); the
+  original task request never satisfies a later gate; the gate and its
+  linked authority now surface in both the conversation timeline and the
+  canonical summary. **Council efficiency and review profiles**:
+  `review_profile: code|editorial` on the task envelope, prompt-only role
+  lanes and scoped follow-up-round guidance that never touch the
+  deterministic agreement rule. **Archive layer**: a journaled, crash-safe
+  archive command (dry-run and hash-bound-approval execute) moves old
+  terminal and smoke/proof records into `runtime/queues/archive/<YYYY-MM>/`
+  with zero data loss, archive-aware reads, a shared writer/archive
+  mutual-exclusion primitive (`clearwright_writer_lock`), and automatic
+  invocation-log rotation; see `docs/ARCHIVE_OPERATION.md`. **Local Council
+  site redesign**: a task workspace (Overview/Conversation/Councils/
+  Evidence/Audit tabs bound to one selected item), a shared popover manager
+  (outside-click/Escape/navigation dismissal, single-popover, focus
+  restore) applied to System Health, Tool Log and the Live agent feed
+  collapsed by default, and a compact empty-request state. **Message
+  payload integrity**: both operator composers are multiline
+  auto-growing textareas with one canonical content contract, a documented
+  65536-byte limit enforced identically client/server, atomic thread-scoped
+  idempotency, binding-scoped post-write verification, and draft
+  preservation across navigation and retries; see
+  `docs/LOCAL_COMMUNICATIONS.md`. The public website is untouched.
 - Streamlined Desktop "Use CW" workflow (from the passed acceptance run). The
   skill (v1.3.0) codifies standing defaults so the operator is no longer asked
   settled questions: read-only means no changes to the target product, repo,
@@ -94,7 +122,7 @@ will be added when releases begin.
   skill lives at `.claude/skills/use-cw/SKILL.md`, installed by the safe
   `tools/install_use_cw_skill.py` (backup, atomic, verify). `OPENAI_API_KEY` is
   never printed or stored. See [docs/USE_CW.md](docs/USE_CW.md). No new
-  dependency; no PLEX.
+  dependency; no changes to the private demo target.
 - Automated GPT and Codex Review Council. ClearWright now coordinates real,
   independent reviews of a plan and decides deterministically whether Claude may
   proceed, with no manual copy/paste. New `tools/clearwright_gpt_review.py`

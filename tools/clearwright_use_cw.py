@@ -693,6 +693,20 @@ def build_canonical_summary(root, work_item_id, status, extra=None):
         pass
 
     line, action = OUTCOME_LINES.get(status, (status, "See records"))
+    # Gate + linked authority: the summary is the operator's one place to see
+    # whether a plan-level gate is unresolved (governed workflow stopped) or
+    # was resolved/closed and by which durable authority record.
+    gates = cwg.load_gates(root, work_item_id)
+    latest_gate = gates[-1] if gates else None
+    gate_summary = None
+    if latest_gate:
+        gate_summary = {
+            "gate_id": latest_gate.get("gate_id"),
+            "council_id": latest_gate.get("council_id"),
+            "disposition": latest_gate.get("disposition"),
+            "created_at": latest_gate.get("created_at"),
+            "authority": latest_gate.get("authority"),
+        }
     summary = {
         "summary_version": 1, "generated_by": "harness",
         "generated_at": cwm._now_iso(),
@@ -709,6 +723,7 @@ def build_canonical_summary(root, work_item_id, status, extra=None):
         "material_findings": material,
         "unresolved_blockers": unresolved[:6],
         "capability_blocked_refs": capability_blocked,
+        "gate": gate_summary,
         "recommended_next_action": action,
         "usage": usage,
     }

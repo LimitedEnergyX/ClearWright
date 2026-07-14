@@ -195,7 +195,7 @@ class UiTests(unittest.TestCase):
     def test_operator_stays_real_only(self):
         self.assertIn('id="convo-panel"', self.html)  # simulated convo demo-only
         self.assertIn("simulated agents", self.html)
-        self.assertIn('placeholder="Send Agents a Message"', self.html)
+        self.assertIn('placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"', self.html)
 
 
 class RegressionTests(unittest.TestCase):

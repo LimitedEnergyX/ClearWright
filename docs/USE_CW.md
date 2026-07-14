@@ -35,6 +35,82 @@ failed invocations; never prompts, artifact content, or secrets).
     6  required authority not granted (a governed change without clearance)
     7  usage or validation error (bad flags, invalid schema, round bounds)
     8  runtime failure
+    9  unresolved plan gate (see "Plan-level gate enforcement" below)
+
+### Plan-level gate enforcement
+
+When a plan or incident Review Council bound to a work item ends
+`operator_required` or `hard_gate`, the wrapper creates a durable, unresolved
+**gate** on that work item's canonical subject
+(`tools/clearwright_gate.py`). While the gate is unresolved, the governed
+workflow is fail-closed: `progress`, every `council`/`plan`/`incident`/`verify`
+call, and `complete` all refuse with exit 9 and a machine-readable
+`unresolved_gate` payload naming the gate, the gating council, and numbered
+remediation. The refusal is enforced at the shared choke points every durable
+writer goes through — the wrapper commands, the CLI/worker/HTTP work
+functions (`clearwright_work.py`), message writes
+(`clearwright_message.write_message`), and the council engine's own
+persistence — so an agent cannot route around the gate through a different
+entry point.
+
+Resolving a gate requires `grant-proceed`:
+
+    python tools/clearwright_use_cw.py grant-proceed <queue_root> \
+      --work-item-id <id> --operator-message-id <id of a durable inbound
+      operator message> --json
+
+That message must be created **strictly after** the gate (the timestamp check
+means the original task request can never satisfy a later gate), must name
+the work item, its canonical subject, or the gating council under a
+word-boundary id-token rule, and must match an allowlisted proceed phrase with
+intent-safe matching: a phrase that is negated in a short preceding window
+(`not`, `no`, `never`, `do not`, `don't`, `cannot`, `won't`) or that appears
+inside quotation marks never qualifies. Resolving the gate does not grant
+authority to take any action beyond the operator's approved scope; it only
+unblocks the governed path.
+
+`close` (operator-only, unchanged in every other respect) may still close a
+work item that is plan-gated, recording the gate `closed_unresolved` — never
+`resolved` — so a cancellation can never be read as proceed authority.
+
+**The honest boundary**: this stops the governed workflow completely — every
+command above refuses, and no summary, verification, or completion can be
+recorded for a gated item. It cannot physically prevent a same-Windows-user
+process from editing files outside ClearWright's own governed paths.
+
+### Council efficiency and review profiles
+
+A task envelope may declare `"review_profile": "editorial"` (default is
+`"code"`). `code` keeps the existing 2–5 substantive-round budget; `editorial`
+targets 2 rounds and defaults its ceiling to 3 (the operator raises it to as
+many as 5 with an explicit `--max-rounds`; the `2 <= min <= max <= 5` clamp is
+unchanged either way).
+
+Two pieces of **prompt-only** guidance are added to the reviewer context —
+they steer attention and set an explicit bar for what counts as blocking, but
+they never touch `evaluate()`, the verdict schema, reconciliation validation,
+or the deterministic agreement rule itself (a fixture regression in
+`tests/test_council_profiles.py` proves `evaluate()` is byte-for-byte
+unchanged with or without this guidance):
+
+- **Role lanes** (editorial profile): GPT is asked to focus on messaging,
+  factual claims, clarity, positioning, audience, and semantic consistency;
+  Codex on implementation consistency, source and citation accuracy, HTML and
+  structural integrity, accessibility, security, and diff/artifact
+  verification, and asked not to spend a round on routine taste feedback.
+  Either reviewer may still raise a genuinely critical issue outside its lane.
+- **Scoped follow-up rounds** (round 2+, any profile): reviewers are asked to
+  judge whether prior findings are resolved and whether the changed sections
+  introduced regressions, rather than restarting a full critique. A new
+  finding on unchanged material is recorded either way; it is treated as
+  blocking only for safety, factual accuracy, security, legal risk, or a
+  material contradiction, and otherwise as advisory (backlog). No finding is
+  ever machine-deleted, suppressed, or downgraded — this is guidance to the
+  reviewer, who still classifies its own finding.
+
+Round dispatch stays sequential (parallel GPT/Codex dispatch was designed and
+then dropped for this mission rather than complicating the audit ordering
+guarantees; see the design history in the PR).
 
 ### Reliability layer
 

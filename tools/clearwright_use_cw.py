@@ -42,6 +42,8 @@ import sys
 import clearwright_message as cwm
 import clearwright_work as cww
 import clearwright_review_council as cwrc
+import clearwright_gate as cwg
+import clearwright_writer_lock as cwl
 
 EXIT_OK = 0
 EXIT_REVISION = 2
@@ -51,6 +53,7 @@ EXIT_HARD_GATE = 5
 EXIT_AUTHORITY = 6
 EXIT_USAGE = 7
 EXIT_RUNTIME = 8
+EXIT_GATE = 9
 
 OUTCOME_EXIT = {
     "agreement_threshold_met": EXIT_OK,
@@ -262,6 +265,11 @@ def cmd_start(args):
         kind, method = args.kind, "explicit_kind"
 
     verification_required, vr_source = _resolve_verification_required(envelope, kind)
+    review_profile = "code"
+    if envelope is not None:
+        rp = str(envelope.get("review_profile") or "").strip().lower()
+        if rp in cwrc.REVIEW_PROFILES:
+            review_profile = rp
     intent = "chat" if kind == "chat" else "request"
     res = _do_message(args.queue_root, text, intent, args.thread_id, args.packet_id)
     if not res.get("ok"):
@@ -284,6 +292,7 @@ def cmd_start(args):
         "classification_conflict": conflict, "conflict_detail": conflict_detail,
         "verification_required": verification_required,
         "verification_required_source": vr_source,
+        "review_profile": review_profile,
         "envelope_sha256": envelope_sha, "received_at": cwm._now_iso(),
         "thread_id": thread_id, "message_id": message_id})
 
@@ -295,7 +304,7 @@ def cmd_start(args):
            "verification_required": verification_required,
            "verification_required_source": vr_source,
            "requires_clearance": kind in ("governed", "high_risk"),
-           "preflight": "ok"}
+           "review_profile": review_profile, "preflight": "ok"}
     if intent == "chat":
         out["note"] = "chat is not work; no work item created"
         return _emit(out, EXIT_OK if not conflict else EXIT_OPERATOR, args.json)
@@ -324,12 +333,56 @@ def _do_message(root, text, intent, thread_id, packet_id):
     return {"ok": True, "message": msg, "thread_id": msg["thread_id"]}
 
 
+def _gate_refusal(args, work_item_id):
+    """If the work item's canonical subject has an unresolved gate, return an
+    (payload, EXIT_GATE) emit; else None. Governed write paths call this first."""
+    if not work_item_id:
+        return None
+    gate = cwg.active_gate(args.queue_root, work_item_id)
+    if gate is None:
+        return None
+    return _emit(dict(cwg.refusal_payload(gate), command="gate"),
+                 EXIT_GATE, args.json)
+
+
+def _maybe_create_gate(root, council, outcome):
+    """Create a durable unresolved gate when a plan or incident council bound to
+    a work item ends operator_required or hard_gate. Verify councils use the
+    completion gate instead. Never raises into the council path."""
+    wid = council.get("work_item_id")
+    phase = council.get("phase")
+    if not wid or phase not in ("plan", "incident"):
+        return
+    if outcome.get("outcome") not in ("operator_required", "hard_gate"):
+        return
+    try:
+        if cwg.active_gate(root, wid) is None:
+            cwg.create_gate(root, wid, council.get("council_id"), phase,
+                            outcome.get("outcome"))
+    except cwg.GateError:
+        pass
+
+
 def _council(args, phase):
     """Shared council driver for plan/council/incident/verify. Runs a review
     round or attaches a reconciliation, then returns the outcome + exit code."""
     root = args.queue_root
     stage = getattr(args, "stage", "review")
 
+    refusal = _gate_refusal(args, getattr(args, "work_item_id", None))
+    if refusal is not None:
+        return refusal
+    try:
+        return _council_body(args, phase, root, stage)
+    except cwl.MaintenanceInProgress:
+        return _emit({"ok": False, "command": "council",
+                      "error": "maintenance_in_progress",
+                      "reason": "an archive operation currently holds "
+                                "exclusivity over this queue root"},
+                     EXIT_RUNTIME, args.json)
+
+
+def _council_body(args, phase, root, stage):
     try:
         cwrc.clamp_rounds(getattr(args, "min_rounds", cwrc.DEFAULT_MIN_ROUNDS),
                           getattr(args, "max_rounds", cwrc.DEFAULT_MAX_ROUNDS))
@@ -373,6 +426,7 @@ def _council(args, phase):
         outcome = cwrc.evaluate(cwrc.load_council(root, council["council_id"]),
                                 cwrc.load_rounds(root, council["council_id"]))
         cwrc.save_outcome(root, council["council_id"], outcome)
+        _maybe_create_gate(root, council, outcome)
         _maybe_post_council_summary(root, council, outcome)
         return _emit(_council_result(outcome), OUTCOME_EXIT.get(outcome["outcome"], EXIT_RUNTIME), args.json)
 
@@ -382,12 +436,18 @@ def _council(args, phase):
         if not args.thread_id:
             return _emit({"ok": False, "error": "a new council requires --thread-id"},
                          EXIT_USAGE, args.json)
+        profile = _review_profile(root, args.work_item_id)
+        eff_max = args.max_rounds
+        if profile == "editorial" and int(eff_max) >= cwrc.DEFAULT_MAX_ROUNDS:
+            # Editorial work targets 2 rounds and defaults to a max of 3; an
+            # operator raises it by passing an explicit --max-rounds below 5.
+            eff_max = cwrc.EDITORIAL_DEFAULT_MAX_ROUNDS
         try:
             council = cwrc.create_council(
                 root, thread_id=args.thread_id, work_item_id=args.work_item_id,
                 packet_id=args.packet_id, phase=phase, model=args.model,
-                min_rounds=args.min_rounds, max_rounds=args.max_rounds,
-                approved_scope=args.approved_scope)
+                min_rounds=args.min_rounds, max_rounds=eff_max,
+                approved_scope=args.approved_scope, review_profile=profile)
         except ValueError as exc:
             return _emit({"ok": False, "error": str(exc)}, EXIT_USAGE, args.json)
     else:
@@ -413,6 +473,7 @@ def _council(args, phase):
             outcome["operator_required"] = True
             outcome["reason"] = "already at max rounds; no further rounds run"
         cwrc.save_outcome(root, council["council_id"], outcome)
+        _maybe_create_gate(root, council, outcome)
         return _emit(_council_result(outcome), OUTCOME_EXIT.get(outcome["outcome"], EXIT_RUNTIME), args.json)
 
     context = _load(args.prompt, args.context_file or args.plan_file)
@@ -463,6 +524,7 @@ def _council(args, phase):
     outcome["packet"] = {"gpt_delivery": report.get("gpt_delivery"),
                          "estimated_input_tokens": report.get("estimated_input_tokens")}
     cwrc.save_outcome(root, council["council_id"], outcome)
+    _maybe_create_gate(root, council, outcome)
     _maybe_post_council_summary(root, council, outcome)
     return _emit(_council_result(outcome), OUTCOME_EXIT.get(outcome["outcome"], EXIT_RUNTIME), args.json)
 
@@ -501,6 +563,9 @@ def _council_result(outcome):
 
 
 def cmd_progress(args):
+    refusal = _gate_refusal(args, args.work_item_id)
+    if refusal is not None:
+        return refusal
     msg = _load(args.message, args.message_file).strip()
     if not msg:
         return _emit({"ok": False, "error": "empty progress message"}, EXIT_USAGE, args.json)
@@ -525,6 +590,13 @@ def _envelope_audit(root, work_item_id):
             return (json.load(fh) or {}).get("_audit")
     except (OSError, ValueError):
         return None
+
+
+def _review_profile(root, work_item_id):
+    """The review_profile recorded on this work item's envelope, or 'code'."""
+    audit = _envelope_audit(root, work_item_id) or {}
+    rp = str(audit.get("review_profile") or "").strip().lower()
+    return rp if rp in cwrc.REVIEW_PROFILES else "code"
 
 
 def _verify_councils(root, work_item_id):
@@ -621,6 +693,20 @@ def build_canonical_summary(root, work_item_id, status, extra=None):
         pass
 
     line, action = OUTCOME_LINES.get(status, (status, "See records"))
+    # Gate + linked authority: the summary is the operator's one place to see
+    # whether a plan-level gate is unresolved (governed workflow stopped) or
+    # was resolved/closed and by which durable authority record.
+    gates = cwg.load_gates(root, work_item_id)
+    latest_gate = gates[-1] if gates else None
+    gate_summary = None
+    if latest_gate:
+        gate_summary = {
+            "gate_id": latest_gate.get("gate_id"),
+            "council_id": latest_gate.get("council_id"),
+            "disposition": latest_gate.get("disposition"),
+            "created_at": latest_gate.get("created_at"),
+            "authority": latest_gate.get("authority"),
+        }
     summary = {
         "summary_version": 1, "generated_by": "harness",
         "generated_at": cwm._now_iso(),
@@ -637,6 +723,7 @@ def build_canonical_summary(root, work_item_id, status, extra=None):
         "material_findings": material,
         "unresolved_blockers": unresolved[:6],
         "capability_blocked_refs": capability_blocked,
+        "gate": gate_summary,
         "recommended_next_action": action,
         "usage": usage,
     }
@@ -734,6 +821,9 @@ def cmd_complete(args):
     (exit 3, verification_incomplete) and posts the canonical summary. A
     governed work item whose clearance packet is not in clearance_done is a
     required-authority stop (exit 6)."""
+    refusal = _gate_refusal(args, args.work_item_id)
+    if refusal is not None:
+        return refusal
     result_text = _load(args.result, args.result_file).strip()
     if not result_text:
         return _emit({"ok": False, "error": "empty result"}, EXIT_USAGE, args.json)
@@ -787,11 +877,13 @@ def cmd_close(args):
     harness never invoke this autonomously; the underlying council outcome is
     not changed."""
     required, verify_c = _verification_state(args.queue_root, args.work_item_id)
-    if not verify_c and not required:
+    plan_gate = cwg.active_gate(args.queue_root, args.work_item_id)
+    if not verify_c and not required and plan_gate is None:
         return _emit({"ok": False, "error": "nothing to close by operator here: "
-                      "verification is not required and no verify council exists; "
-                      "use complete"}, EXIT_USAGE, args.json)
-    if verify_c and verify_c.get("outcome") == "agreement_threshold_met":
+                      "verification is not required, no verify council exists, and "
+                      "no plan gate is open; use complete"}, EXIT_USAGE, args.json)
+    if verify_c and verify_c.get("outcome") == "agreement_threshold_met" \
+            and plan_gate is None:
         return _emit({"ok": False, "error": "the verification council passed; "
                       "use complete, not close"}, EXIT_USAGE, args.json)
 
@@ -819,10 +911,14 @@ def cmd_close(args):
         full = cwrc.get_council(args.queue_root, verify_c["council_id"]) or {}
         outcome_at = (full.get("outcome") or {}).get("generated_at") or \
             (full.get("council") or {}).get("created_at")
+    # A plan-gated item requires closure authority after the gate as well.
+    if plan_gate and (not outcome_at or plan_gate.get("created_at", "") > outcome_at):
+        outcome_at = plan_gate.get("created_at")
     if outcome_at and (auth.get("at") or "") <= outcome_at:
         return _emit({"ok": False, "error": "authority record predates the "
-                      "incomplete verification outcome; closure authorization "
-                      "must be issued after the failure"}, EXIT_USAGE, args.json)
+                      "gate or the incomplete verification outcome; closure "
+                      "authorization must be issued after the failure"},
+                     EXIT_USAGE, args.json)
 
     closure_meta = {"operator": args.operator or auth.get("actor"),
                     "operator_message_id": args.operator_message_id,
@@ -843,6 +939,14 @@ def cmd_close(args):
     except (ValueError, OSError) as exc:
         return _emit({"ok": False, "error": str(exc)}, EXIT_RUNTIME, args.json)
 
+    # If a plan/incident gate is open, record it closed_unresolved (never
+    # resolved): the operator cancels the item without granting proceed authority.
+    if plan_gate is not None:
+        try:
+            cwg.record_operator_closure(args.queue_root, args.work_item_id, auth)
+        except cwg.GateError:
+            pass
+
     summary = build_canonical_summary(
         args.queue_root, args.work_item_id, "closed_by_operator",
         extra={"closure": closure_meta,
@@ -856,6 +960,44 @@ def cmd_close(args):
                   "operator_message_id": args.operator_message_id,
                   "reason": args.reason, "at": closure_meta["at"],
                   "summary_posted": True}, EXIT_OK, args.json)
+
+
+def cmd_grant_proceed(args):
+    """Resolve the current unresolved plan/incident gate on a work item using a
+    durable inbound operator message that was posted AFTER the gate, names the
+    work item or gating council, and explicitly authorizes proceeding. The
+    original task request never qualifies (the timestamp check enforces it).
+    Resolving the gate only unblocks the governed path; it grants no authority to
+    take any action beyond the operator's approved scope."""
+    gate = cwg.active_gate(args.queue_root, args.work_item_id)
+    if gate is None:
+        return _emit({"ok": False, "command": "grant-proceed",
+                      "error": "no_unresolved_gate",
+                      "work_item_id": args.work_item_id}, EXIT_USAGE, args.json)
+    try:
+        result = cwg.grant_proceed(args.queue_root, args.work_item_id,
+                                   args.operator_message_id)
+    except cwg.GateError as exc:
+        return _emit(dict(exc.payload, command="grant-proceed"),
+                     EXIT_AUTHORITY, args.json)
+    # Record the resolution in the timeline (exempt source; advances nothing).
+    thread_id, packet_id = cww._resolve_target(args.queue_root, args.work_item_id)
+    try:
+        note = ("Plan gate {} resolved by operator authority {} (council {}). "
+                "The governed workflow may resume within the approved scope."
+                ).format(result["gate_id"], args.operator_message_id,
+                         gate.get("council_id"))
+        msg = cwm.build_message("claude", note, role="orchestrator",
+                                packet_id=packet_id, thread_id=thread_id,
+                                direction="internal", status="posted",
+                                source="use-cw-gate", work_item_id=args.work_item_id)
+        cwm.write_message(args.queue_root, msg)
+    except (ValueError, OSError):
+        pass
+    return _emit({"ok": True, "command": "grant-proceed", "status": "resolved",
+                  "work_item_id": args.work_item_id, "gate_id": result["gate_id"],
+                  "council_id": gate.get("council_id"),
+                  "authority": result["authority"]}, EXIT_OK, args.json)
 
 
 def cmd_retrospective(args):
@@ -969,7 +1111,8 @@ SCHEMAS = {
                        "(primary classification input; excluded_actions are the "
                        "operator's guardrails and NEVER raise risk).",
         "required": list(ENVELOPE_REQUIRED),
-        "optional": ["request", "targets", "verification_required", "envelope_version"],
+        "optional": ["request", "targets", "verification_required",
+                     "envelope_version", "review_profile"],
         "rules": [
             "task_kind must be one of: " + ", ".join(KINDS),
             "intended_actions / excluded_actions must be arrays",
@@ -977,6 +1120,9 @@ SCHEMAS = {
             "both task_kind and the approved scope is a conflict -> exit 3",
             "verification_required defaults by kind (actionable/governed/high_risk "
             "-> true; chat/analysis -> false); governed/high_risk clamp to true",
+            "review_profile is 'code' (default; min 2 / max 5 rounds) or "
+            "'editorial' (target 2, default max 3 rounds); role lanes and scoped "
+            "follow-up rounds are prompt guidance only",
         ],
         "example": {
             "envelope_version": 1, "task_kind": "analysis",
@@ -1184,6 +1330,18 @@ def build_parser():
                               "authorizes closing, created after the failure.")
     p_close.add_argument("--json", action="store_true")
     p_close.set_defaults(func=cmd_close)
+
+    p_grant = subs.add_parser("grant-proceed", help="Resolve an unresolved plan/"
+                              "incident gate on a work item using a durable "
+                              "post-gate operator authority message.")
+    p_grant.add_argument("queue_root")
+    p_grant.add_argument("--work-item-id", required=True, metavar="ID")
+    p_grant.add_argument("--operator-message-id", required=True, metavar="ID",
+                         help="Durable inbound operator message, created after "
+                              "the gate, that names this work item or its gating "
+                              "council and explicitly authorizes proceeding.")
+    p_grant.add_argument("--json", action="store_true")
+    p_grant.set_defaults(func=cmd_grant_proceed)
 
     p_retro = subs.add_parser("retrospective", help="Read-only usage/failure report "
                               "for a work item (from the invocation log).")

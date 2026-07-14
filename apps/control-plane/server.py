@@ -52,6 +52,14 @@ import clearwright_agent_event as cwae  # noqa: E402
 import clearwright_message as cwm  # noqa: E402
 import clearwright_work as cww  # noqa: E402
 import clearwright_review_council as cwrc  # noqa: E402
+import clearwright_archive as cwarch  # noqa: E402
+import clearwright_writer_lock as cwl  # noqa: E402
+
+# The single documented request-body cap for POST bodies: worst-case JSON
+# string-escape expansion of a MESSAGE_MAX_BYTES message, plus a fixed
+# envelope allowance for the surrounding JSON fields. Independent of, and
+# larger than, the message-content limit itself (see clearwright_message).
+REQUEST_MAX_BYTES = cwm.MESSAGE_MAX_BYTES * 6 + 8192
 STATIC = os.path.join(HERE, "static")
 DEMO_PACKETS = os.path.join(REPO_ROOT, "examples", "demo_packets")
 MISSION_FILE = os.path.join(REPO_ROOT, "examples", "sample_project", "mission.json")
@@ -335,11 +343,32 @@ def do_message(root, payload, respond=False):
     """Post one local message via the shared adapter. The server is a thin
     driver: it builds and writes through clearwright_message, the same code
     path the CLI uses. On respond, a thread_id is required and the message
-    defaults to an outbound response. Returns a result dict."""
+    defaults to an outbound response.
+
+    Target integrity: when both thread_id and work_item_id are supplied they
+    must already be bound together in the durable record (an existing message
+    in that thread carrying that work_item_id); a mismatched pair is refused
+    rather than silently creating a cross-target record.
+
+    Idempotency: an optional idempotency_key makes a retried POST safe --
+    an exact repeat (same thread, key, target, and canonical content) returns
+    the ORIGINAL message id, never a duplicate; a reused key with different
+    content or target is refused as a conflict.
+
+    Returns a result dict with an ``error_code`` the HTTP layer maps to the
+    matching status (413 too large, 409 idempotency conflict, 400 otherwise)."""
     fields = payload if isinstance(payload, dict) else {}
     thread_id = fields.get("thread_id")
+    work_item_id = fields.get("work_item_id")
     if respond and not (thread_id and str(thread_id).strip()):
         return {"ok": False, "error": "respond requires a thread_id"}
+    if thread_id and work_item_id:
+        bound = any(m.get("work_item_id") == work_item_id
+                    for m in cwm.read_messages(root, thread_id=thread_id))
+        if not bound:
+            return {"ok": False, "error": "thread_id and work_item_id are not "
+                    "bound together in the durable record",
+                    "error_code": "target_mismatch"}
     direction = fields.get("direction") or ("outbound" if respond else cwm.DEFAULT_DIRECTION)
     status = fields.get("status") or ("responded" if respond else cwm.DEFAULT_STATUS)
     try:
@@ -353,14 +382,43 @@ def do_message(root, payload, respond=False):
             source=fields.get("source") or "local-http",
             simulated=bool(fields.get("simulated", False)),
             intent=fields.get("intent"),
+            work_item_id=work_item_id,
+            idempotency_key=fields.get("idempotency_key"),
         )
+    except cwm.MessageTooLarge as exc:
+        return {"ok": False, "error": str(exc), "error_code": "message_too_large",
+                "limit_bytes": cwm.MESSAGE_MAX_BYTES}
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     try:
-        cwm.write_message(root, message)
+        stored, is_retry = cwm.write_message_idempotent(root, message)
+    except cwm.IdempotencyConflict as exc:
+        return {"ok": False, "error": "idempotency_key already used with "
+                "different content or target", "error_code": "idempotency_conflict",
+                "existing_message_id": exc.existing.get("message_id")}
+    except cwl.MaintenanceInProgress:
+        return {"ok": False, "error": "maintenance_in_progress",
+                "error_code": "maintenance_in_progress"}
     except OSError as exc:
         return {"ok": False, "error": str(exc)}
-    return {"ok": True, "message": message, "thread_id": message["thread_id"]}
+    return {"ok": True, "message": stored, "thread_id": stored["thread_id"],
+            "message_id": stored["message_id"],
+            "work_item_id": stored.get("work_item_id"),
+            "canonical_sha256": cwm.canonical_sha256(stored.get("message", "")),
+            "idempotent_retry": is_retry}
+
+
+_MESSAGE_ERROR_STATUS = {
+    "message_too_large": 413,
+    "idempotency_conflict": 409,
+    "maintenance_in_progress": 503,
+}
+
+
+def _message_status_code(result):
+    if result.get("ok"):
+        return 200
+    return _MESSAGE_ERROR_STATUS.get(result.get("error_code"), 400)
 
 
 def do_request(root, fields):
@@ -806,17 +864,30 @@ def build_state(root, mode=None, durable=None, demo_seeded=None):
 
 def build_audit(root, filename):
     path, lane = find_packet(root, filename)
-    if path is None:
-        return {"filename": filename, "found": False, "events": []}
-    packet = load_json(path)
-    return {
-        "filename": os.path.basename(path),
-        "found": True,
-        "lane": lane,
-        "packet_id": packet.get("packet_id"),
-        "status": packet.get("status"),
-        "events": audit_events(packet),
-    }
+    if path is not None:
+        packet = load_json(path)
+        return {
+            "filename": os.path.basename(path),
+            "found": True,
+            "lane": lane,
+            "packet_id": packet.get("packet_id"),
+            "status": packet.get("status"),
+            "events": audit_events(packet),
+            "archived": False,
+        }
+    # Archive-aware fallback: active always wins; only consulted on a miss.
+    archived_path, packet = cwarch.read_archived_clearance_packet(root, filename)
+    if archived_path is not None:
+        return {
+            "filename": os.path.basename(archived_path),
+            "found": True,
+            "lane": "clearance_done",
+            "packet_id": packet.get("packet_id"),
+            "status": packet.get("status"),
+            "events": audit_events(packet),
+            "archived": True,
+        }
+    return {"filename": filename, "found": False, "events": []}
 
 
 def read_mission():
@@ -1183,8 +1254,29 @@ class Handler(BaseHTTPRequestHandler):
             thread_id = urllib.parse.unquote(params.get("thread_id", "")) or None
             limit_raw = params.get("limit", "")
             limit = int(limit_raw) if limit_raw.isdigit() else None
-            self._send_json({"messages": cwm.read_messages(
-                QUEUE_ROOT, packet_id=packet_id, thread_id=thread_id, limit=limit)})
+            # Binding-scoped single-record lookups for the composer's
+            # post-write re-read and idempotency reconciliation: both REQUIRE
+            # thread_id, so neither becomes a bare-id enumeration surface.
+            message_id = urllib.parse.unquote(params.get("message_id", "")) or None
+            idem_key = urllib.parse.unquote(params.get("idempotency_key", "")) or None
+            if message_id and thread_id:
+                found = cwm.find_by_message_id(QUEUE_ROOT, thread_id, message_id)
+                self._send_json({"found": found is not None, "message": found})
+                return
+            if idem_key and thread_id:
+                found = cwm.find_by_idempotency_key(QUEUE_ROOT, thread_id, idem_key)
+                self._send_json({"found": found is not None, "message": found})
+                return
+            messages = cwm.read_messages(
+                QUEUE_ROOT, packet_id=packet_id, thread_id=thread_id, limit=limit)
+            # Archive-aware fallback: active always wins; the archive is
+            # consulted only when a specific thread_id was requested and the
+            # active store returned nothing for it.
+            if not messages and thread_id:
+                messages = cwarch.read_archived_messages(QUEUE_ROOT, thread_id)
+                if limit is not None and limit >= 0:
+                    messages = messages[-limit:]
+            self._send_json({"messages": messages})
             return
         if path == "/api/work-items":
             self._send_json({"work_items": cww.derive_work_items(QUEUE_ROOT)})
@@ -1247,10 +1339,14 @@ class Handler(BaseHTTPRequestHandler):
             params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
             council_id = urllib.parse.unquote(params.get("id", "")) or None
             full = cwrc.get_council(QUEUE_ROOT, council_id) if council_id else None
+            source = "active"
+            if full is None and council_id:
+                full = cwarch.read_archived_council(QUEUE_ROOT, council_id)
+                source = "archive"
             if full is None:
                 self._send_json({"error": "council not found"}, code=404)
                 return
-            self._send_json(full)
+            self._send_json(dict(full, source=source))
             return
         if path == "/api/work-summary":
             # Read-only: the harness-generated canonical summary for a work item.
@@ -1261,10 +1357,14 @@ class Handler(BaseHTTPRequestHandler):
             mid = wid.split(":", 1)[1] if ":" in wid else wid
             summary = load_json_safe(os.path.join(QUEUE_ROOT, "summaries", mid + ".json")) \
                 if mid else None
+            source = "active"
+            if summary is None and mid:
+                summary = cwarch.read_archived_summary(QUEUE_ROOT, mid)
+                source = "archive"
             if summary is None:
                 self._send_json({"error": "no summary recorded"}, code=404)
                 return
-            self._send_json({"summary": summary})
+            self._send_json({"summary": summary, "source": source})
             return
         if path.startswith("/static/") or path in ("/app.js", "/style.css"):
             self._send_static(path)
@@ -1273,8 +1373,49 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        raw = self.rfile.read(length) if length else b""
+        # Content-Length framing: absent -> 411; non-numeric -> 400; over the
+        # bounded request cap -> 413, all BEFORE reading a single body byte.
+        # The bound is REQUEST_MAX_BYTES, independent of and larger than
+        # MESSAGE_MAX_BYTES (worst-case JSON string-escape expansion of a
+        # max-size message plus a fixed envelope allowance), so it admits
+        # every supported canonical content value without an unbounded read.
+        cl_header = self.headers.get("Content-Length")
+        te_header = self.headers.get("Transfer-Encoding")
+        if te_header and cl_header is None:
+            self._send_json({"ok": False, "error": "chunked_transfer_not_supported"}, code=411)
+            self.close_connection = True
+            return
+        if cl_header is None:
+            length = 0
+        else:
+            try:
+                length = int(cl_header)
+            except (TypeError, ValueError):
+                self._send_json({"ok": False, "error": "invalid_content_length"}, code=400)
+                self.close_connection = True
+                return
+            if length < 0:
+                self._send_json({"ok": False, "error": "invalid_content_length"}, code=400)
+                self.close_connection = True
+                return
+        if length > REQUEST_MAX_BYTES:
+            self._send_json({"ok": False, "error": "request_too_large",
+                             "limit_bytes": REQUEST_MAX_BYTES}, code=413)
+            self.close_connection = True
+            return
+        # Bounded read: never more than REQUEST_MAX_BYTES, and never blocks
+        # indefinitely waiting for bytes the client declared but never sent.
+        self.connection.settimeout(30)
+        try:
+            raw = self.rfile.read(length) if length else b""
+        except (OSError, ValueError):
+            self._send_json({"ok": False, "error": "incomplete_body"}, code=400)
+            self.close_connection = True
+            return
+        if len(raw) != length:
+            self._send_json({"ok": False, "error": "incomplete_body"}, code=400)
+            self.close_connection = True
+            return
         try:
             payload = json.loads(raw.decode("utf-8")) if raw else {}
         except (ValueError, UnicodeDecodeError):
@@ -1314,12 +1455,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/messages":
             result = do_message(QUEUE_ROOT, payload, respond=False)
-            self._send_json(result, code=200 if result.get("ok") else 400)
+            self._send_json(result, code=_message_status_code(result))
             return
 
         if path == "/api/messages/respond":
             result = do_message(QUEUE_ROOT, payload, respond=True)
-            self._send_json(result, code=200 if result.get("ok") else 400)
+            self._send_json(result, code=_message_status_code(result))
             return
 
         if path == "/api/work-items/claim":

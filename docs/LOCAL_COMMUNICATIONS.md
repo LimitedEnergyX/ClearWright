@@ -88,6 +88,49 @@ Endpoints:
 - `GET /api/messages` lists messages; `?packet_id=` and `?thread_id=` filter, `?limit=` trims to the most recent N.
 - `POST /api/messages/respond` posts an outbound response; requires `thread_id`.
 
+## Message payload integrity
+
+Every message write path (the CLI, local HTTP, and both operator console
+composers) shares one canonical content contract
+(`clearwright_message.canonical_content`): line endings are normalized
+(`\r\n`/`\r` → `\n`), then the content is trimmed. The stored `message` field
+is always this canonical form — never a differently encoded or clipped
+variant — so anything that later parses the message for operator authority
+(gate `grant-proceed`, `close`, an archive approval) reads exactly the bytes
+that were counted, validated, and durably written.
+
+**Size limit**: `MESSAGE_MAX_BYTES = 65536` (UTF-8 bytes of the canonical
+content field), enforced identically client-side (the console composer) and
+server-side (`build_message` raises `MessageTooLarge`, a `ValueError`
+subclass; the HTTP layer returns 413). A separate, independent, larger
+request-body cap (`REQUEST_MAX_BYTES`, worst-case JSON-escape expansion of a
+max-size message plus a fixed envelope allowance) protects the HTTP framing
+layer itself: `Content-Length` is checked **before** any body byte is read
+(413 over cap, 411 missing/absent on a chunked request, 400 non-numeric or an
+incomplete body), and a malformed or rejected frame closes the connection
+rather than risking a desynchronized reuse of it.
+
+**Idempotency**: a POST may carry an `idempotency_key`. It is persisted as a
+field on the durable message, so the message store itself is the
+restart-safe dedup index. Under a short-held, thread-scoped lock
+(`clearwright_message._ThreadIdempotencyLock`) the check-and-append is
+atomic — two concurrent or retried POSTs with the same `(thread_id,
+idempotency_key)` can never both create a durable record. An exact repeat
+(same thread, key, target `work_item_id`, and canonical content) returns the
+**original** message's identity, never a duplicate; a reused key with
+different content or a different target is refused as `IdempotencyConflict`
+(HTTP 409). The console composers generate a key once per draft and reuse it
+for every retry of that draft, clearing it only after a verified durable
+write.
+
+**Binding-scoped lookups**: `GET /api/messages?thread_id=...&message_id=...`
+and the equivalent `idempotency_key` lookup both **require** the caller to
+supply the owning `thread_id`; neither is a bare-id enumeration surface. The
+console composer uses the message-id lookup as a post-write re-read: it shows
+success only after confirming the durable copy matches what was submitted,
+comparing against the complete stored message, never a local preview. A
+failed or unverifiable send never clears the operator's draft.
+
 ## What the browser shows
 
 The browser UI is the **operator display**. Browser automation (for example

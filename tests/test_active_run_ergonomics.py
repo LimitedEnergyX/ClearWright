@@ -216,7 +216,7 @@ class UiTests(unittest.TestCase):
         self.assertIn('data-filter="all"', self.html)
 
     def test_placeholder_and_comms_and_history_intact(self):
-        self.assertIn('placeholder="Send Agents a Message"', self.html)
+        self.assertIn('placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"', self.html)
         self.assertIn('id="comms"', self.html)         # Local communications intact
         self.assertIn('id="history-view"', self.html)  # History intact
         self.assertIn("state.pulse", self.appjs)       # pulse still server-driven

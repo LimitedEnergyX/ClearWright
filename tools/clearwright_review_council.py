@@ -207,11 +207,59 @@ def _scope_hash(scope):
     return hashlib.sha256(str(scope).encode("utf-8")).hexdigest()
 
 
+REVIEW_PROFILES = ("code", "editorial")
+
+# Reviewer role lanes are PROMPT GUIDANCE ONLY: they steer where each reviewer
+# spends attention, never filter or downgrade a recorded finding, and either
+# reviewer may raise a critical issue outside its lane.
+ROLE_LANES = (
+    "Reviewer role lanes (guidance, not filters; either reviewer may raise a "
+    "critical issue outside its lane):\n"
+    "  - GPT: messaging, factual claims, clarity, positioning, audience, and "
+    "semantic consistency.\n"
+    "  - Codex: implementation consistency, source and citation accuracy, HTML "
+    "and structural integrity, accessibility, security, and diff/artifact "
+    "verification. Do not spend a round on routine taste feedback.\n")
+
+# For round >= 2, reviewers judge resolution and regressions rather than
+# restarting a full critique. New findings on UNCHANGED material are blocking
+# only for the listed categories; otherwise they are advisory (backlog). This is
+# prompt guidance; each reviewer still classifies its own findings and the
+# deterministic agreement rule is unchanged.
+SCOPED_ROUND_GUIDANCE = (
+    "This is a follow-up round. Focus on: (a) whether prior findings are "
+    "resolved, (b) whether the changed sections introduced regressions, and "
+    "(c) newly discovered critical issues. A new finding on UNCHANGED material "
+    "is blocking only for safety, factual accuracy, security, legal risk, or a "
+    "material contradiction; otherwise record it as advisory (backlog).\n")
+
+EDITORIAL_DEFAULT_MAX_ROUNDS = 3
+
+
+def _guidance_header(review_profile, round_no):
+    """PROMPT-ONLY guidance prepended to the reviewer context. Role lanes apply
+    to editorial work (where messaging-vs-implementation division of labor
+    helps); scoped follow-up guidance applies from round 2 for any profile.
+    Returns '' for a round-1 code review so existing behavior is unchanged where
+    no profile guidance is needed."""
+    parts = []
+    if review_profile == "editorial":
+        parts.append(ROLE_LANES)
+    if round_no >= 2:
+        parts.append(SCOPED_ROUND_GUIDANCE)
+    if not parts:
+        return ""
+    return "=== Review guidance ===\n" + "\n".join(parts) + \
+           "=== End review guidance ===\n\n"
+
+
 def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
                    phase="plan", min_rounds=DEFAULT_MIN_ROUNDS,
                    max_rounds=DEFAULT_MAX_ROUNDS, model=None, council_id=None,
-                   approved_scope=None):
+                   approved_scope=None, review_profile="code"):
     min_rounds, max_rounds = clamp_rounds(min_rounds, max_rounds)
+    if review_profile not in REVIEW_PROFILES:
+        review_profile = "code"
     council_id = council_id or new_council_id()
     council = {
         "council_id": council_id,
@@ -219,6 +267,7 @@ def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
         "work_item_id": work_item_id,
         "packet_id": packet_id,
         "phase": phase,
+        "review_profile": review_profile,
         "min_rounds": int(min_rounds),
         "max_rounds": int(max_rounds),
         "model": model,
@@ -682,6 +731,11 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     round_no = len(council.get("rounds", [])) + 1
     context = _augment_context(base_context, prior_rounds) \
         if substantive_round_count(prior_rounds) > 0 else base_context
+    # PROMPT-ONLY guidance (role lanes + scoped follow-up rounds). This changes
+    # only the reviewer prompt string; evaluate(), the verdict schema, and the
+    # reconciliation validation are untouched.
+    context = _guidance_header(council.get("review_profile", "code"),
+                               round_no) + context
 
     hits = secret_scan(context)
     if hits:

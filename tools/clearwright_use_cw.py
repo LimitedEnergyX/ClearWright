@@ -264,6 +264,11 @@ def cmd_start(args):
         kind, method = args.kind, "explicit_kind"
 
     verification_required, vr_source = _resolve_verification_required(envelope, kind)
+    review_profile = "code"
+    if envelope is not None:
+        rp = str(envelope.get("review_profile") or "").strip().lower()
+        if rp in cwrc.REVIEW_PROFILES:
+            review_profile = rp
     intent = "chat" if kind == "chat" else "request"
     res = _do_message(args.queue_root, text, intent, args.thread_id, args.packet_id)
     if not res.get("ok"):
@@ -286,6 +291,7 @@ def cmd_start(args):
         "classification_conflict": conflict, "conflict_detail": conflict_detail,
         "verification_required": verification_required,
         "verification_required_source": vr_source,
+        "review_profile": review_profile,
         "envelope_sha256": envelope_sha, "received_at": cwm._now_iso(),
         "thread_id": thread_id, "message_id": message_id})
 
@@ -297,7 +303,7 @@ def cmd_start(args):
            "verification_required": verification_required,
            "verification_required_source": vr_source,
            "requires_clearance": kind in ("governed", "high_risk"),
-           "preflight": "ok"}
+           "review_profile": review_profile, "preflight": "ok"}
     if intent == "chat":
         out["note"] = "chat is not work; no work item created"
         return _emit(out, EXIT_OK if not conflict else EXIT_OPERATOR, args.json)
@@ -419,12 +425,18 @@ def _council(args, phase):
         if not args.thread_id:
             return _emit({"ok": False, "error": "a new council requires --thread-id"},
                          EXIT_USAGE, args.json)
+        profile = _review_profile(root, args.work_item_id)
+        eff_max = args.max_rounds
+        if profile == "editorial" and int(eff_max) >= cwrc.DEFAULT_MAX_ROUNDS:
+            # Editorial work targets 2 rounds and defaults to a max of 3; an
+            # operator raises it by passing an explicit --max-rounds below 5.
+            eff_max = cwrc.EDITORIAL_DEFAULT_MAX_ROUNDS
         try:
             council = cwrc.create_council(
                 root, thread_id=args.thread_id, work_item_id=args.work_item_id,
                 packet_id=args.packet_id, phase=phase, model=args.model,
-                min_rounds=args.min_rounds, max_rounds=args.max_rounds,
-                approved_scope=args.approved_scope)
+                min_rounds=args.min_rounds, max_rounds=eff_max,
+                approved_scope=args.approved_scope, review_profile=profile)
         except ValueError as exc:
             return _emit({"ok": False, "error": str(exc)}, EXIT_USAGE, args.json)
     else:
@@ -567,6 +579,13 @@ def _envelope_audit(root, work_item_id):
             return (json.load(fh) or {}).get("_audit")
     except (OSError, ValueError):
         return None
+
+
+def _review_profile(root, work_item_id):
+    """The review_profile recorded on this work item's envelope, or 'code'."""
+    audit = _envelope_audit(root, work_item_id) or {}
+    rp = str(audit.get("review_profile") or "").strip().lower()
+    return rp if rp in cwrc.REVIEW_PROFILES else "code"
 
 
 def _verify_councils(root, work_item_id):
@@ -1066,7 +1085,8 @@ SCHEMAS = {
                        "(primary classification input; excluded_actions are the "
                        "operator's guardrails and NEVER raise risk).",
         "required": list(ENVELOPE_REQUIRED),
-        "optional": ["request", "targets", "verification_required", "envelope_version"],
+        "optional": ["request", "targets", "verification_required",
+                     "envelope_version", "review_profile"],
         "rules": [
             "task_kind must be one of: " + ", ".join(KINDS),
             "intended_actions / excluded_actions must be arrays",
@@ -1074,6 +1094,9 @@ SCHEMAS = {
             "both task_kind and the approved scope is a conflict -> exit 3",
             "verification_required defaults by kind (actionable/governed/high_risk "
             "-> true; chat/analysis -> false); governed/high_risk clamp to true",
+            "review_profile is 'code' (default; min 2 / max 5 rounds) or "
+            "'editorial' (target 2, default max 3 rounds); role lanes and scoped "
+            "follow-up rounds are prompt guidance only",
         ],
         "example": {
             "envelope_version": 1, "task_kind": "analysis",

@@ -2658,6 +2658,9 @@ function wire() {
   refreshHealth();
   refreshTaskState();
   refreshArchiveIndex();
+  // Conversations feed the queue's Recent group on every view, so load once
+  // at boot; the fast poll below only runs while the Work view is open.
+  loadConversations();
   setInterval(refresh, LIVE_MS);
   setInterval(refreshAgentEvents, LIVE_MS);
   setInterval(refreshMessages, LIVE_MS);
@@ -2665,10 +2668,14 @@ function wire() {
   setInterval(refreshHealth, LIVE_MS * 2);
   setInterval(refreshTaskState, LIVE_MS);
   setInterval(refreshArchiveIndex, LIVE_MS * 15);
-  // Keep the Work workspace live while it is open.
+  // Keep the Work workspace live while it is open; refresh the Recent group
+  // at the slower health cadence on every other view.
   setInterval(() => {
     if (currentView === "work") loadConversations();
   }, LIVE_MS);
+  setInterval(() => {
+    if (currentView !== "work") loadConversations();
+  }, LIVE_MS * 2);
 }
 
 function handleOperatorAction(kind) {

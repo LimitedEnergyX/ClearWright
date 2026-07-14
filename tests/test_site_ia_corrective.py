@@ -135,6 +135,15 @@ class WorkQueueTests(SourceTestCase):
         self.assertIn("RFI awaiting clarification", self.appjs)
         self.assertIn("council escalated: operator required", self.appjs)
 
+    def test_recent_group_loads_on_every_view(self):
+        # Live post-archive regression: conversations feed the queue's Recent
+        # group, but they only loaded when the Work view opened, so a fresh
+        # Command Center load showed no Recent group at all.
+        wire_at = self.appjs.index("function wire()")
+        boot = self.appjs[wire_at:self.appjs.index("setInterval(refresh,", wire_at)]
+        self.assertIn("loadConversations()", boot)
+        self.assertIn('currentView !== "work"', self.appjs)
+
     def test_superseded_escalation_never_flags_a_thread_forever(self):
         # Live-acceptance regression: two plan councils escalated
         # operator_required, the gate was resolved, and a third council

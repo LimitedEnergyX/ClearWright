@@ -36,6 +36,19 @@ def queue(prefix, tc):
     return root
 
 
+def stub_preflight(tc):
+    """start runs an implicit preflight (key present, codex on PATH). CI has
+    neither, so tests exercising start stub the probes; preflight behavior
+    itself is tested separately with explicit injections."""
+    import clearwright_gpt_review as gpt_mod
+    import clearwright_codex_review as ccr_mod
+    orig_key, orig_exe = gpt_mod.resolve_api_key, ccr_mod.codex_executable
+    gpt_mod.resolve_api_key = lambda *a, **k: ("test-key-present", "process_env")
+    ccr_mod.codex_executable = lambda: "codex-stub"
+    tc.addCleanup(setattr, gpt_mod, "resolve_api_key", orig_key)
+    tc.addCleanup(setattr, ccr_mod, "codex_executable", orig_exe)
+
+
 def run(func, **kw):
     kw.setdefault("json", True)
     buf = io.StringIO()
@@ -67,6 +80,7 @@ class EnvelopeClassificationTests(unittest.TestCase):
 
     def setUp(self):
         self.root = queue("cwrel_env_", self)
+        stub_preflight(self)
 
     def _envelope_file(self, env):
         path = os.path.join(self.root, "envelope.json")
@@ -193,6 +207,7 @@ class SchemaAndDryRunTests(unittest.TestCase):
 
     def setUp(self):
         self.root = queue("cwrel_schema_", self)
+        stub_preflight(self)
         res, _ = run(ucw.cmd_start, **start_args(
             self.root, request="Plan a change.", kind="actionable",
             approved_scope="scope"))
@@ -291,6 +306,7 @@ class InvocationLogTests(unittest.TestCase):
 
     def setUp(self):
         self.root = queue("cwrel_log_", self)
+        stub_preflight(self)
 
     def _log_lines(self):
         path = os.path.join(self.root, "invocation_log.jsonl")

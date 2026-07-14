@@ -672,6 +672,8 @@ body.conv-open .console-grid, body.conv-open .mission { display: none !important
 .conv-entry-summary .conv-msg-body { white-space: pre-wrap; font-size: 0.74rem; }
 .conv-entry-closure { border-left: 3px solid var(--pending); }
 .conv-entry-closure .conv-entry-tag { color: var(--pending); }
+.conv-entry-roundstart { border-left: 3px solid var(--blue-soft); opacity: 0.9; }
+.conv-entry-roundstart .conv-entry-tag { color: var(--blue-soft); }
 .run-count { font-size: 0.62rem; color: var(--gray); }
 .run-last { font-size: 0.62rem; color: var(--gray); margin-left: auto; font-family: ui-monospace, monospace; }
 body.run-open .console-grid, body.run-open .mission { display: none !important; }

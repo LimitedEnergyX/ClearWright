@@ -5,6 +5,22 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Streamlined Desktop "Use CW" workflow (from the passed acceptance run). The
+  skill (v1.3.0) codifies standing defaults so the operator is no longer asked
+  settled questions: read-only means no changes to the target product, repo,
+  deployment, or external systems while CW governance records and runtime
+  evidence are always permitted; "operator interface" defaults to the web UI;
+  the local execution transport (e.g. Desktop Commander) is an implementation
+  detail, never an operator question. Each council round now posts a bounded
+  plan/context digest into the conversation timeline (full packet stays
+  hash-bound in the council record), so the thread reads as the complete
+  exchange: request -> plan digest -> reviews -> reconciliation -> outcome.
+  Canonical summary posting is idempotent on the summary's semantic fingerprint
+  (status/outcome/councils/findings; volatile usage counters and timestamps
+  never cause duplicate posts). docs/ACCEPTANCE.md records the passed
+  acceptance fixtures, and tests/test_use_cw_e2e.py replays the exact Desktop
+  invocation sequence (start envelope -> 2-round plan council -> agreement ->
+  2-round verify council -> agreement -> DONE) with mocked reviewers.
 - Artifact & operator layer (PR 2 of the acceptance-hardening design). New
   `tools/clearwright_artifacts.py`: artifacts are registered and pinned under
   `review_artifacts/` with the FULL sha256 as identity (short ids are display

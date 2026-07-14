@@ -735,7 +735,11 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
             remaining = max(4000, divisor_chars - len(gpt_adapter.INSTRUCTION)
                             - len(gpt_base) - 2000)
             per = max(2000, remaining // max(1, len(all_artifact_ids)))
-            packs = [cwa.excerpt_pack(root, aid, per)[0] for aid in all_artifact_ids]
+            # Target the excerpts at the exact lines the review context cites:
+            # the reviewer's own citations ARE the evidence it needs to check.
+            focus = cwa.cited_line_numbers(context)
+            packs = [cwa.excerpt_pack(root, aid, per, focus_lines=focus)[0]
+                     for aid in all_artifact_ids]
             gpt_body, gpt_delivery = gpt_base + "\n\n".join(packs), "excerpt_pack"
         codex_prompt = context + "\n\n" + cwa.codex_reference_block(root, all_artifact_ids)
     else:
@@ -761,13 +765,24 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
               packet_id=council.get("packet_id"),
               council_id=council_id, round_no=round_no, phase=phase)
 
+    # Codex readable-workspace contract (verified in the acceptance regression:
+    # the read-only sandbox reads within its workspace ROOT, not arbitrary
+    # absolute paths). When artifacts are in play, Codex runs with the artifact
+    # registry as its working directory so the pinned absolute paths fall inside
+    # the readable root — narrowly scoped, no broad permission granted. Without
+    # artifacts the caller's --repo remains the working directory.
+    codex_cwd = os.path.join(root, "review_artifacts") if all_artifact_ids else repo
     codex_timeout = max(int(timeout or 0),
-                        codex_adapter.effective_timeout(packet_bytes, base=timeout))
+                        codex_adapter.effective_timeout(
+                            packet_bytes + sum(
+                                cwa.get(root, a).get("bytes", 0)
+                                for a in all_artifact_ids if cwa.get(root, a)),
+                            base=timeout))
     plan = [
         ("gpt", gpt_fn, gpt_adapter.ADAPTER_VERSION,
          dict(model=requested_model, timeout=timeout), gpt_body),
         ("codex", codex_fn, codex_adapter.ADAPTER_VERSION,
-         dict(repo=repo, timeout=codex_timeout), codex_prompt),
+         dict(repo=codex_cwd, timeout=codex_timeout), codex_prompt),
     ]
 
     attempt_state = council.setdefault("attempt_state", {})

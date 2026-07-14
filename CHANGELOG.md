@@ -5,6 +5,29 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Local Council site information-architecture completion (corrective
+  follow-up to the hardening/redesign PR, same governed work item). The
+  operator desktop is now three regions: a compact grouped work queue
+  (Attention/Active/Recent/Archived; rows show title, status, phase hint,
+  age, and the attention reason), a center task workspace under a
+  persistent selected-task header (title, work-item id, status, phase,
+  council, gate, claim, next action) with a six-phase stepper
+  (Request/Plan Review/Authority/Execute/Verify/Complete) replacing the
+  workflow canvas — only the selected task's current phase animates,
+  operator-required renders amber and static — and a right operator panel
+  (next action, authority state, compact zero-state clearance card,
+  composer, actions). Navigation is Command Center / Work / History with
+  Attention as a count/filter chip; the unified Work page
+  (Overview/Conversation/Councils/Evidence/Audit) replaces the
+  Conversations and Active Run top-level views; History is one filterable
+  ledger (`GET /api/ledger`) across packets, messages, and agent events,
+  active and archived, with row-click detail, and hosts the clearance
+  lanes; the Tool Log is a developer surface (hidden by default,
+  Ctrl+Shift+L). New read-only routes: `/api/task-state`,
+  `/api/archive-index`. Live-acceptance fixes: a superseded
+  operator_required council no longer flags a thread as Attention forever;
+  the Work composer docks sticky at the viewport bottom; the page never
+  scrolls horizontally.
 - ClearWright hardening and Local Council site redesign (skill v1.4.0).
   **Plan-level gate enforcement**: a plan or incident council that ends
   `operator_required`/`hard_gate` now creates a durable, unresolved gate on

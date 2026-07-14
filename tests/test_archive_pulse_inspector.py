@@ -228,13 +228,15 @@ class UiTests(unittest.TestCase):
         self.assertIn("c.archived", self.appjs)  # default filter hides archived
 
     def test_durable_record_wording_clarified(self):
+        # Clearance lanes now live in History; the tip points at the queue.
         self.assertIn("not the active work list", self.html)
-        self.assertIn("Work items and Active Run", self.html)
+        self.assertIn("Active work lives in the Command Center queue", self.html)
 
     def test_operator_real_only_and_views_intact(self):
         self.assertIn('id="convo-panel"', self.html)
         self.assertIn("simulated agents", self.html)
-        self.assertIn('id="active-run-view"', self.html)
+        self.assertIn('id="queue-region"', self.html)
+        self.assertIn('id="center-work"', self.html)
         self.assertIn('id="history-view"', self.html)
         self.assertIn('placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"', self.html)
 

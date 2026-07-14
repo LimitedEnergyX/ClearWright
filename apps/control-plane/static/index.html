@@ -15,12 +15,15 @@
         <p class="posture" id="posture">Local reference implementation &middot; early alpha &middot; human-commanded, operator-controlled</p>
       </div>
     </div>
+    <nav class="topbar-nav" aria-label="Primary">
+      <button id="nav-command" class="nav-btn is-active" type="button">Command Center</button>
+      <button id="nav-work" class="nav-btn" type="button">Work</button>
+      <button id="nav-history" class="nav-btn" type="button">History</button>
+    </nav>
     <div class="topbar-actions">
+      <button id="attention-chip" class="attention-chip" type="button" title="Items needing an operator decision; click to filter the queue" hidden>Attention <span id="attention-count">0</span></button>
       <span class="actor" id="actor-label">operator</span>
       <button id="health-chip" class="health-chip" type="button" aria-label="System health details"><span class="health-dot" aria-hidden="true"></span><span id="health-label">Checking</span></button>
-      <button id="conversations-btn" class="btn btn-quiet" type="button">Conversations</button>
-      <button id="active-run-btn" class="btn btn-quiet" type="button">Active Run</button>
-      <button id="history-btn" class="btn btn-quiet" type="button">History</button>
       <button id="reset-btn" class="btn btn-quiet" type="button">Reset demo</button>
     </div>
   </header>
@@ -39,82 +42,24 @@
       </div>
     </details>
 
-    <div class="console-grid">
-      <div class="console-main">
-        <section class="panel canvas-panel" aria-labelledby="flow-h">
-          <div class="panel-head">
-            <h2 id="flow-h">Clearance workflow <span class="help" tabindex="0" role="button" aria-label="About the clearance workflow">?<span class="tip">The path every request travels. Stages light up as packets move through the live queue, and the active stage pulses. Pulse shows recent activity, not permanent packet state, so a completed packet does not pulse forever. Visual aid only; not a workflow editor.</span></span></h2>
-            <div class="pulse-inspector" id="pulse-inspector" aria-live="polite">Pulse: idle &middot; no recent activity</div>
-          </div>
-          <div class="canvas-wrap" id="canvas-wrap">
-            <div class="gcanvas" id="gcanvas">
-              <svg class="gedges" id="gedges" xmlns="http://www.w3.org/2000/svg"></svg>
-            </div>
-            <div class="canvas-zoom">
-              <button class="btn" id="zoom-in" type="button" title="Zoom in">+</button>
-              <button class="btn" id="zoom-out" type="button" title="Zoom out">&minus;</button>
-              <button class="btn" id="zoom-fit" type="button" title="Fit">&#8862;</button>
-            </div>
-          </div>
-        </section>
+    <!-- The three-region operator desktop: queue | selected task | operator.
+         Every primary panel binds to the SAME selected task; the Command
+         Center and Work navigation entries change only how deep the center
+         region goes (at-a-glance summary vs the full tabbed workspace). -->
+    <div class="shell" id="shell">
+      <aside class="queue-region" id="queue-region" aria-label="Work queue">
+        <div class="queue-head">
+          <span>Work queue <span class="help" tabindex="0" role="button" aria-label="About the work queue">?<span class="tip">Actionable work only, derived from the live queue and messages: unanswered actionable requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Normal chat stays in the Conversation tab and never appears here. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></span>
+          <button id="queue-new-btn" class="btn btn-quiet" type="button" title="Start a new conversation">New</button>
+        </div>
+        <div id="queue-groups"><p class="muted queue-empty">Loading queue...</p></div>
 
-        <details class="panel panel-secondary record" open>
-          <summary>Durable record <span class="help" tabindex="0" role="button" aria-label="About the durable record">?<span class="tip">A packet lane/audit snapshot, not the active work list. Active work lives in Work items and Active Run. Completed packets collapse into the archive line after they age out (they stay durable and in History, the full ledger). Failed packets always stay visible. Actions run the real ClearWright tools.</span></span></summary>
-          <div class="board" id="board">
-            <p class="muted">Loading board...</p>
-          </div>
-        </details>
-      </div>
-
-      <aside class="console-side">
-        <section class="panel operator-panel" aria-labelledby="incoming-h">
-          <div class="panel-head">
-            <h2 id="incoming-h">Incoming clearance request <span class="help" tabindex="0" role="button" aria-label="About incoming clearance requests">?<span class="tip">Clearance packets arrive from agents, tools, scripts, or integrations. The operator reviews and decides; nobody fills out packet paperwork here.</span></span></h2>
-          </div>
-          <div id="operator-card">
-            <p class="muted">Loading...</p>
-          </div>
-        </section>
-
-        <section class="panel work-panel" id="work-panel" aria-labelledby="work-h">
-          <div class="panel-head">
-            <h2 id="work-h">Work items <span class="feed-badge local">live</span> <span class="help" tabindex="0" role="button" aria-label="About work items">?<span class="tip">Actionable work only, derived from the live queue and messages: unanswered actionable requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Normal chat stays in Conversations and never appears here. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display.</span></span></h2>
-          </div>
-          <div class="work-items" id="work-items"><p class="muted work-empty">No open work items.</p></div>
-        </section>
-
-        <section class="panel comms-panel" id="comms-panel" aria-labelledby="comms-h">
-          <div class="panel-head">
-            <h2 id="comms-h">Local communications <span class="feed-badge local">real</span> <span class="help" tabindex="0" role="button" aria-label="About local communications">?<span class="tip">A compact recent feed of the real, durable, packet-linked messages sent through the local adapter (CLI, curl, or local HTTP at POST /api/messages). The quick box below sends normal chat (never a work item); for readable threads, replies, follow-ups, and actionable requests, open Conversations in the top bar. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></h2>
-          </div>
-          <form id="operator-chat-form" class="operator-chat composer">
-            <div class="composer-banner" id="operator-chat-banner">New conversation</div>
-            <textarea id="operator-chat-input" class="composer-textarea" rows="1"
-                      placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"></textarea>
-            <div class="composer-footer">
-              <span class="composer-counter" id="operator-chat-counter" hidden></span>
-              <span class="composer-error" id="operator-chat-error" hidden role="alert"></span>
-              <button id="operator-chat-send" class="btn btn-primary" type="submit">Send</button>
-            </div>
-          </form>
+        <details class="panel panel-secondary diag-panel" id="comms-panel">
+          <summary>Local communications <span class="feed-badge local">real</span> <span class="help" tabindex="0" role="button" aria-label="About local communications">?<span class="tip">A compact recent feed of the real, durable, packet-linked messages sent through the local adapter (CLI, curl, or local HTTP at POST /api/messages). A durable diagnostic lane, collapsed by default; the operator composer lives in the right panel.</span></span></summary>
           <div class="comms" id="comms"><p class="muted comms-empty">No local messages yet. Send one with tools/clearwright_message.py or POST /api/messages.</p></div>
-        </section>
+        </details>
 
-        <section class="panel convo-panel" id="convo-panel" aria-labelledby="convo-h">
-          <div class="panel-head">
-            <h2 id="convo-h">Agent conversation <span class="sim-tag">simulated agents</span></h2>
-            <p class="hint">Ask agents a question about the sample project. Simulated agent roles deliberate (max 5 rounds), then ClearWright condenses a recommendation the operator can send to the clearance queue. Consensus does not grant authority; the operator decides. No real external model integration.</p>
-          </div>
-          <form id="convo-form" class="convo-form">
-            <input id="convo-input" type="text" required maxlength="240"
-                   placeholder="e.g. Should we align the version references in the docs?" />
-            <button id="convo-ask" class="btn btn-primary" type="submit">Ask</button>
-          </form>
-          <div class="convo" id="convo-transcript"></div>
-          <div id="convo-summary"></div>
-        </section>
-
-        <details class="panel panel-secondary" id="feed-panel">
+        <details class="panel panel-secondary diag-panel" id="feed-panel">
           <summary>Live agent feed <span class="help" tabindex="0" role="button" aria-label="About the live agent feed">?<span class="tip">Local events are real, sent by agents, tools, or scripts through the local adapter (CLI, curl, or local HTTP at POST /api/agent-events). Simulated lines are a demo fallback only. No copy/paste into this page is required, and no browser automation is needed to drive ClearWright. A durable diagnostic lane, collapsed by default so it does not compete with the primary work queue.</span></span></summary>
           <div class="feed-group">
             <div class="feed-grouplabel">Local events <span class="feed-badge local">real</span></div>
@@ -126,104 +71,126 @@
           </div>
         </details>
       </aside>
-    </div>
 
-    <section class="conversations-view" id="conversations-view" hidden aria-labelledby="conversations-h">
-      <div class="panel-head history-head">
-        <h2 id="conversations-h">Conversations <span class="feed-badge local">durable</span></h2>
-        <div class="active-run-controls">
-          <button id="conv-new-btn" class="btn btn-quiet" type="button">New conversation</button>
-          <button id="conversations-close" class="btn btn-quiet" type="button">Back to console</button>
+      <section class="task-region" id="task-region" aria-label="Selected task">
+        <div class="task-header" id="task-header"><p class="muted">No task selected. Pick one from the work queue.</p></div>
+
+        <div class="phase-stepper" id="phase-stepper" aria-label="Task phase"></div>
+        <div class="pulse-inspector" id="pulse-inspector" aria-live="polite">Pulse: idle &middot; no recent activity</div>
+
+        <div id="center-command">
+          <div id="command-overview"><p class="muted">Select a task to see its overview.</p></div>
+
+          <details class="panel panel-secondary convo-panel" id="convo-panel">
+            <summary>Agent conversation <span class="sim-tag">simulated agents</span></summary>
+            <p class="hint">Ask agents a question about the sample project. Simulated agent roles deliberate (max 5 rounds), then ClearWright condenses a recommendation the operator can send to the clearance queue. Consensus does not grant authority; the operator decides. No real external model integration.</p>
+            <form id="convo-form" class="convo-form">
+              <input id="convo-input" type="text" required maxlength="240"
+                     placeholder="e.g. Should we align the version references in the docs?" />
+              <button id="convo-ask" class="btn btn-primary" type="submit">Ask</button>
+            </form>
+            <div class="convo" id="convo-transcript"></div>
+            <div id="convo-summary"></div>
+          </details>
         </div>
-      </div>
-      <p class="hint">Operator/agent dialogue on durable message threads. Pick a conversation on the left, read the timeline, and reply below. Replies from Claude, Codex, or other workers appear only when they actually post back through the local adapter; nothing here is simulated.</p>
-      <div class="conv-layout">
-        <div class="conv-list" id="conv-list"><p class="muted">Loading conversations...</p></div>
-        <div class="conv-main">
-          <div id="conv-detail"><p class="muted">No conversation selected. Type below to start a new one.</p></div>
-          <form id="conv-composer" class="conv-composer composer">
-            <div class="composer-banner" id="conv-banner">New conversation</div>
-            <div class="conv-composer-row">
-              <select id="conv-mode" class="conv-target" aria-label="Composer mode">
-                <option value="chat" selected>Message</option>
-                <option value="ask">Ask agent</option>
-                <option value="workitem">Create work item</option>
-                <option value="clearance">Request clearance</option>
-              </select>
-              <select id="conv-target" class="conv-target" aria-label="Message target hint">
-                <option value="">All</option>
-                <option value="@Claude ">Claude</option>
-                <option value="@Codex ">Codex</option>
-                <option value="[operator note] ">Operator note</option>
-              </select>
-            </div>
-            <textarea id="conv-input" class="composer-textarea" rows="1"
+
+        <div id="center-work" hidden>
+          <p class="hint">Operator/agent dialogue on durable message threads. Replies from Claude, Codex, or other workers appear only when they actually post back through the local adapter; nothing here is simulated.</p>
+          <div id="conv-detail"><p class="muted">No task selected. Pick one from the work queue.</p></div>
+          <!-- The fixed Work composer docks here (sticky at the viewport
+               bottom) so replying never requires scrolling past the timeline. -->
+          <div id="work-composer-dock"></div>
+        </div>
+      </section>
+
+      <aside class="operator-region" id="operator-region" aria-label="Operator panel">
+        <div class="op-card" id="next-action-card">
+          <div class="op-card-head">Next required action</div>
+          <div class="op-card-body" id="next-action-body"><p class="muted">No task selected.</p></div>
+        </div>
+
+        <div class="op-card" id="authority-card">
+          <div class="op-card-head">Authority state</div>
+          <div class="op-card-body" id="authority-body"><p class="muted">No task selected.</p></div>
+        </div>
+
+        <section class="op-card clearance-card is-empty" id="clearance-card" aria-labelledby="incoming-h">
+          <div class="op-card-head" id="incoming-h">Incoming clearance request <span class="help" tabindex="0" role="button" aria-label="About incoming clearance requests">?<span class="tip">Clearance packets arrive from agents, tools, scripts, or integrations. The operator reviews and decides; nobody fills out packet paperwork here.</span></span></div>
+          <div id="operator-card"><p class="muted">Loading...</p></div>
+        </section>
+
+        <div class="op-card" id="composer-card">
+          <div class="op-card-head">Message the agents</div>
+          <form id="operator-chat-form" class="operator-chat composer">
+            <div class="composer-banner" id="operator-chat-banner">New conversation</div>
+            <textarea id="operator-chat-input" class="composer-textarea" rows="1"
                       placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"></textarea>
             <div class="composer-footer">
-              <span class="composer-counter" id="conv-counter" hidden></span>
-              <span class="composer-error" id="conv-error" hidden role="alert"></span>
-              <button id="conv-send" class="btn btn-primary" type="submit">Send</button>
+              <span class="composer-counter" id="operator-chat-counter" hidden></span>
+              <span class="composer-error" id="operator-chat-error" hidden role="alert"></span>
+              <button id="operator-chat-send" class="btn btn-primary" type="submit">Send</button>
             </div>
           </form>
-          <p class="conv-target-hint">Message is normal chat: durable, but never a work item and never an Attention flag. Ask agent and Create work item make the message actionable; Request clearance files an RTA through the intake. Target is an intent hint only; participation is real only when a worker posts back through CW.</p>
+          <p class="conv-target-hint">Message is normal chat: durable, but never a work item and never an Attention flag. Participation is real only when a worker posts back through CW. Use the Work page composer for actionable requests.</p>
         </div>
-      </div>
-    </section>
 
-    <section class="active-run-view" id="active-run-view" hidden aria-labelledby="active-run-h">
-      <div class="panel-head history-head">
-        <h2 id="active-run-h">Active Run <span class="feed-badge local">live</span></h2>
-        <div class="active-run-controls">
-          <div class="run-filter" id="run-filter">
-            <button class="btn btn-quiet run-filter-btn is-on" type="button" data-filter="active">Active</button>
-            <button class="btn btn-quiet run-filter-btn" type="button" data-filter="recent">Recent</button>
-            <button class="btn btn-quiet run-filter-btn" type="button" data-filter="all">All</button>
-          </div>
-          <button id="active-run-close" class="btn btn-quiet" type="button">Back to console</button>
+        <div class="op-card" id="operator-actions-card">
+          <div class="op-card-head">Operator actions</div>
+          <div class="op-card-body conv-actions" id="operator-actions"><p class="muted">No task selected.</p></div>
         </div>
-      </div>
-      <p class="hint">Recent runs derived from the durable message threads. Pick a run on the left to read its full sequence: operator request, claim, progress, reviewer notes, and the final response, with Codex telemetry shown as fields when present. Read-only; History remains the full ledger.</p>
-      <div class="run-layout">
-        <div class="run-list" id="run-list"><p class="muted">Loading runs...</p></div>
-        <div id="active-run-body"><p class="muted">Loading...</p></div>
-      </div>
-    </section>
+      </aside>
+    </div>
 
     <section class="history-view" id="history-view" hidden aria-labelledby="history-h">
       <div class="panel-head history-head">
         <h2 id="history-h">History <span class="feed-badge local">read-only</span></h2>
-        <button id="history-close" class="btn btn-quiet" type="button">Back to console</button>
       </div>
-      <p class="hint">A read-only view of the durable record: every clearance packet across the lanes, every local message, and every local agent event. Nothing here edits or deletes; the queue and audit trail stay the record.</p>
-      <form id="history-filters" class="history-filters">
-        <input id="hf-packet" type="text" placeholder="packet_id" autocomplete="off" />
-        <input id="hf-thread" type="text" placeholder="thread_id" autocomplete="off" />
-        <input id="hf-actor" type="text" placeholder="actor" autocomplete="off" />
-        <select id="hf-lane">
-          <option value="">any lane</option>
-          <option value="clearance_outbox">clearance_outbox</option>
-          <option value="clearance_in_progress">clearance_in_progress</option>
-          <option value="clearance_done">clearance_done</option>
-          <option value="clearance_failed">clearance_failed</option>
+      <p class="hint">One unified, read-only ledger of the durable record: every clearance packet, local message, and agent event, active and archived. Nothing here edits or deletes; the queue and audit trail stay the record.</p>
+      <form id="ledger-filters" class="history-filters">
+        <select id="lf-scope" aria-label="Scope">
+          <option value="active" selected>active</option>
+          <option value="archived">archived</option>
+          <option value="all">all</option>
         </select>
-        <input id="hf-status" type="text" placeholder="status" autocomplete="off" />
-        <button id="hf-apply" class="btn btn-quiet" type="submit">Apply</button>
-        <button id="hf-clear" class="btn btn-quiet" type="button">Clear</button>
+        <select id="lf-type" aria-label="Record type">
+          <option value="">any type</option>
+          <option value="message">message</option>
+          <option value="packet">packet</option>
+          <option value="agent_event">agent event</option>
+        </select>
+        <input id="lf-actor" type="text" placeholder="actor" autocomplete="off" />
+        <input id="lf-status" type="text" placeholder="status" autocomplete="off" />
+        <input id="lf-date" type="date" aria-label="On date" />
+        <input id="lf-workitem" type="text" placeholder="work-item ID" autocomplete="off" />
+        <input id="lf-council" type="text" placeholder="council ID" autocomplete="off" />
+        <input id="lf-text" type="text" placeholder="text search" autocomplete="off" />
+        <button id="lf-apply" class="btn btn-quiet" type="submit">Apply</button>
+        <button id="lf-clear" class="btn btn-quiet" type="button">Clear</button>
       </form>
-      <div class="history-grid">
-        <div class="history-col">
-          <h3 class="history-col-h">Packets <span class="history-count" id="hc-packets">0</span></h3>
-          <div id="history-packets"></div>
+      <div class="ledger-layout">
+        <div class="ledger-table-wrap">
+          <table class="ledger" aria-label="History ledger">
+            <thead>
+              <tr><th>Time</th><th>Type</th><th>Work item</th><th>Actor</th><th>Event</th><th>Status</th></tr>
+            </thead>
+            <tbody id="ledger-body"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
+          </table>
         </div>
-        <div class="history-col">
-          <h3 class="history-col-h">Messages <span class="history-count" id="hc-messages">0</span></h3>
-          <div id="history-messages"></div>
-        </div>
-        <div class="history-col">
-          <h3 class="history-col-h">Agent events <span class="history-count" id="hc-events">0</span></h3>
-          <div id="history-events"></div>
+        <div class="ledger-detail" id="ledger-detail" hidden>
+          <div class="ledger-detail-head">
+            <span>Record</span>
+            <button id="ledger-detail-close" class="btn btn-quiet" type="button">Close</button>
+          </div>
+          <div id="ledger-detail-body"></div>
         </div>
       </div>
+
+      <details class="panel panel-secondary record" id="lanes-panel">
+        <summary>Durable record lanes <span class="help" tabindex="0" role="button" aria-label="About the durable record">?<span class="tip">A packet lane/audit snapshot, not the active work list. Active work lives in the Command Center queue. Completed packets collapse into the archive line after they age out (they stay durable and in this History ledger). Failed packets always stay visible. Actions run the real ClearWright tools.</span></span></summary>
+        <div class="board" id="board">
+          <p class="muted">Loading board...</p>
+        </div>
+      </details>
     </section>
   </main>
 
@@ -301,12 +268,43 @@
     </div>
   </div>
 
-  <footer class="activity">
+  <!-- Work-page composer template: the Work Conversation tab uses this fixed
+       composer (mode + target hints + the shared multiline textarea). -->
+  <form id="conv-composer" class="conv-composer composer" hidden>
+    <div class="composer-banner" id="conv-banner">New conversation</div>
+    <div class="conv-composer-row">
+      <select id="conv-mode" class="conv-target" aria-label="Composer mode">
+        <option value="chat" selected>Message</option>
+        <option value="ask">Ask agent</option>
+        <option value="workitem">Create work item</option>
+        <option value="clearance">Request clearance</option>
+      </select>
+      <select id="conv-target" class="conv-target" aria-label="Message target hint">
+        <option value="">All</option>
+        <option value="@Claude ">Claude</option>
+        <option value="@Codex ">Codex</option>
+        <option value="[operator note] ">Operator note</option>
+      </select>
+    </div>
+    <textarea id="conv-input" class="composer-textarea" rows="1"
+              placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"></textarea>
+    <div class="composer-footer">
+      <span class="composer-counter" id="conv-counter" hidden></span>
+      <span class="composer-error" id="conv-error" hidden role="alert"></span>
+      <button id="conv-send" class="btn btn-primary" type="submit">Send</button>
+    </div>
+  </form>
+  <p class="conv-target-hint" id="conv-composer-hint" hidden>Message is normal chat: durable, but never a work item and never an Attention flag. Ask agent and Create work item make the message actionable; Request clearance files an RTA through the intake. Target is an intent hint only; participation is real only when a worker posts back through CW.</p>
+
+  <!-- Developer surface: hidden by default; toggled by the keyboard shortcut
+       Ctrl+Shift+L or the hidden #tool-log-toggle control. -->
+  <footer class="activity" id="activity-footer" hidden>
     <details class="activity-details">
-      <summary><span class="activity-label">Tool log</span></summary>
+      <summary><span class="activity-label">Tool log</span> <span class="muted">(developer surface; Ctrl+Shift+L)</span></summary>
       <pre id="activity-log" class="activity-log">Ready.</pre>
     </details>
   </footer>
+  <button id="tool-log-toggle" class="tool-log-toggle" type="button" title="Toggle the developer tool log (Ctrl+Shift+L)" aria-label="Toggle developer tool log">&#9881;</button>
 
   <script src="/app.js"></script>
 </body>

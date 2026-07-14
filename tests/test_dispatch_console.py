@@ -274,9 +274,9 @@ class UiAndExistingBehaviorTests(unittest.TestCase):
         self.assertIn("OPERATOR-0001", appjs)
         self.assertIn("operator-ui", appjs)
         self.assertIn('id="operator-chat-form"', html)
-        # Work items and history are wired to their endpoints.
+        # Work items and the unified ledger are wired to their endpoints.
         self.assertIn("/api/work-items", appjs)
-        self.assertIn("/api/history", appjs)
+        self.assertIn("/api/ledger", appjs)
 
     def test_operator_mode_hides_simulated_conversation(self):
         appjs = read(os.path.join(STATIC, "app.js"))

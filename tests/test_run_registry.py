@@ -149,18 +149,20 @@ class UiTests(unittest.TestCase):
         self.appjs = read(os.path.join(STATIC, "app.js"))
 
     def test_run_selector_exists(self):
-        self.assertIn('id="run-list"', self.html)
-        self.assertIn("function renderRunList", self.appjs)
-        self.assertIn("/api/runs", self.appjs)
-        self.assertIn("selectedRunThread", self.appjs)
-        self.assertIn("thread_id=", self.appjs)  # selection loads a specific run
+        # Run selection now lives in the grouped work queue: one shared
+        # selection (selectedConvThread) binds every panel to the same task.
+        self.assertIn('id="queue-groups"', self.html)
+        self.assertIn("function renderQueue", self.appjs)
+        self.assertIn("selectedConvThread", self.appjs)
+        self.assertIn("thread_id=", self.appjs)  # selection loads a specific task
 
     def test_copy_controls_and_filters_still_present(self):
         self.assertIn("copy-btn", self.appjs)
         self.assertIn("data-copy-summary", self.appjs)
         self.assertIn("runSummaryText", self.appjs)
-        self.assertIn('id="run-filter"', self.html)
-        self.assertIn('data-filter="active"', self.html)
+        # Run filters became queue groups plus the Attention filter chip.
+        self.assertIn("function buildQueueGroups", self.appjs)
+        self.assertIn('id="attention-chip"', self.html)
 
     def test_history_view_intact(self):
         self.assertIn('id="history-view"', self.html)

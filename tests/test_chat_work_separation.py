@@ -224,7 +224,7 @@ class UiTests(unittest.TestCase):
 
     def test_work_items_panel_declares_actionable_only(self):
         self.assertIn("Actionable work only", self.html)
-        self.assertIn("Normal chat stays in Conversations", self.html)
+        self.assertIn("Normal chat stays in the Conversation tab", self.html)
 
     def test_chat_badge_style_present(self):
         self.assertIn(".run-status-chat", self.css)
@@ -233,8 +233,10 @@ class UiTests(unittest.TestCase):
         self.assertIn("never a work item and never an Attention flag", self.html)
 
     def test_other_views_intact(self):
-        for token in ('id="conversations-view"', 'id="active-run-view"',
-                      'id="history-view"', 'id="work-items"', 'id="health-chip"',
+        # Conversations and Active Run merged into the unified Work page;
+        # the queue region replaced the work-items panel.
+        for token in ('id="center-work"', 'id="queue-region"',
+                      'id="history-view"', 'id="health-chip"',
                       'placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"'):
             self.assertIn(token, self.html)
 

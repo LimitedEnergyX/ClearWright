@@ -193,6 +193,39 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("artifact", report["reason"])
         self.assertEqual(cap, [])  # nothing dispatched
 
+    def test_excerpt_pack_targets_cited_lines_first(self):
+        # The acceptance regression showed blind sampling starves the reviewer
+        # of exactly the lines the report cites. Cited lines get windows first.
+        meta = self._artifact(3000)
+        self.assertEqual(cwa.cited_line_numbers("see L1295 and L2549-2553, also L7."),
+                         [7, 1295, 2549, 2553])
+        pack, _rec = cwa.excerpt_pack(self.root, meta["artifact_id"], 20000,
+                                      focus_lines=[1295, 2549])
+        self.assertIn("  1295  content line 1294", pack)  # window covers the cited line
+        self.assertIn("  2549  content line 2548", pack)
+        self.assertIn("Windows around every line number cited", pack)
+
+    def test_codex_cwd_is_artifact_registry_when_artifacts_present(self):
+        # Verified live: the read-only sandbox reads within its workspace root,
+        # not arbitrary absolute paths. With artifacts, Codex must run with the
+        # registry as cwd so pinned paths fall inside the readable root.
+        meta = self._artifact(10)
+        seen = {}
+        def codex_capture(root, context, repo=None, timeout=None, **kw):
+            seen["repo"] = repo
+            return reviewer_fn("codex", "codex-cli")(root, context)
+        c = cwrc.create_council(self.root, thread_id=self.thread, approved_scope="s")
+        cwrc.run_round(self.root, c, "ctx", sleep=lambda *_: None,
+                       artifact_ids=[meta["artifact_id"]], repo="D:/some/repo",
+                       gpt_fn=reviewer_fn("gpt", "openai-api"), codex_fn=codex_capture)
+        self.assertEqual(seen["repo"], os.path.join(self.root, "review_artifacts"))
+        # Without artifacts the caller's repo stays the working directory.
+        c2 = cwrc.create_council(self.root, thread_id=self.thread, approved_scope="s")
+        cwrc.run_round(self.root, c2, "ctx", sleep=lambda *_: None,
+                       repo="D:/some/repo",
+                       gpt_fn=reviewer_fn("gpt", "openai-api"), codex_fn=codex_capture)
+        self.assertEqual(seen["repo"], "D:/some/repo")
+
     def test_artifacts_are_remembered_on_the_council(self):
         meta = self._artifact(10)
         c = cwrc.create_council(self.root, thread_id=self.thread, approved_scope="s")

@@ -194,45 +194,85 @@ def inline_rendering(root, artifact_id):
     return header + text, rec
 
 
-def excerpt_pack(root, artifact_id, max_chars):
+def excerpt_pack(root, artifact_id, max_chars, focus_lines=None):
     """Bounded, line-numbered excerpt pack for a text-only reviewer when the
-    full artifact exceeds the phase budget: manifest + head + evenly sampled
-    windows + tail, hard-capped at max_chars. Recorded as a derived artifact."""
+    full artifact exceeds the phase budget. TARGETED first: when the review
+    context cites specific line numbers (focus_lines), windows around those
+    exact lines are included first — the reviewer's own citations are the
+    evidence it needs — then head, evenly sampled windows, and tail fill the
+    remaining budget. Hard-capped at max_chars; recorded as a derived artifact."""
     meta = verify(root, artifact_id)
     lines = _read_text(meta).splitlines()
     total = len(lines)
 
     def window(start, count):
+        start = max(0, min(start, total - 1))
         seg = lines[start:start + count]
         return "{}\n".format("-" * 8) + "\n".join(
             "{:>6}  {}".format(start + i + 1, ln) for i, ln in enumerate(seg))
 
     budget = max(2000, max_chars)
+    used = 0
+    parts = []
+
+    # Targeted windows around cited lines (merged when overlapping), first.
+    if focus_lines:
+        wanted = sorted({int(n) for n in focus_lines if 0 < int(n) <= total})
+        spans = []
+        for n in wanted[:60]:
+            lo, hi = max(1, n - 25), min(total, n + 25)
+            if spans and lo <= spans[-1][1] + 5:
+                spans[-1] = (spans[-1][0], max(spans[-1][1], hi))
+            else:
+                spans.append((lo, hi))
+        for lo, hi in spans:
+            w = window(lo - 1, hi - lo + 1)
+            if used + len(w) > budget:
+                break
+            parts.append(w)
+            used += len(w)
+
     head = window(0, min(120, total))
+    if used + len(head) <= budget:
+        parts.append(head)
+        used += len(head)
     tail = window(max(0, total - 60), 60) if total > 200 else ""
     samples = []
-    used = len(head) + len(tail)
     n_windows = 6
     for k in range(1, n_windows + 1):
         start = int(total * k / (n_windows + 1))
         w = window(start, 40)
-        if used + len(w) > budget:
+        if used + len(w) + len(tail) > budget:
             break
         samples.append(w)
         used += len(w)
-    body = "\n".join([head] + samples + ([tail] if tail else []))
+    body = "\n".join(parts + samples + ([tail] if tail else []))
     if len(body) > budget:
         body = body[:budget] + "\n[excerpt pack truncated at budget]"
     rec = _derived_record(root, meta, "excerpt-pack", body)
+    targeted = " Windows around every line number cited in the review context "\
+               "are included first." if focus_lines else ""
     manifest = (
         "=== ARTIFACT {} (EXCERPT PACK — NOT the full artifact) ===\n"
         "Full artifact: sha256 {} · {} bytes · {} lines (pinned by CW).\n"
-        "This pack is a derived artifact (sha256 {}, derived_from the hash above).\n"
+        "This pack is a derived artifact (sha256 {}, derived_from the hash above).{}\n"
         "THE LINE-NUMBERED EXCERPTS BELOW ARE THE ONLY EVIDENCE YOU MAY RELY ON. "
         "Do not assume unexcerpted regions; say when a conclusion would require "
         "them.\n").format(meta["artifact_id"], meta["sha256"], meta["bytes"],
-                          meta["line_count"], rec["sha256"])
+                          meta["line_count"], rec["sha256"], targeted)
     return manifest + body, rec
+
+
+def cited_line_numbers(text, cap=60):
+    """Line numbers cited in a review context as L<number> (e.g. "L1295",
+    "L2549-2553" contributes both ends). Deterministic and bounded."""
+    import re as _re
+    found = set()
+    for m in _re.finditer(r"\bL(\d{1,6})(?:\s*[-–]\s*L?(\d{1,6}))?", text or ""):
+        found.add(int(m.group(1)))
+        if m.group(2):
+            found.add(int(m.group(2)))
+    return sorted(found)[:cap]
 
 
 def codex_reference_block(root, artifact_ids):

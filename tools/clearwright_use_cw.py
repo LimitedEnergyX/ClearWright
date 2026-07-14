@@ -673,25 +673,46 @@ def _summary_text(summary):
     return "\n".join(lines)
 
 
+def _summary_fingerprint(summary):
+    """Semantic identity of a summary: status, outcome, councils and their
+    round counts, findings, and blockers — NOT volatile fields (generated_at,
+    usage counters), so re-emitting the same governance state never re-posts."""
+    import hashlib
+    core = {k: summary.get(k) for k in
+            ("status", "outcome_line", "plan_council", "verify_council",
+             "material_findings", "unresolved_blockers", "capability_blocked_refs",
+             "closure", "outcome")}
+    return hashlib.sha256(json.dumps(core, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def persist_and_post_summary(root, work_item_id, summary):
     """Write summaries/<message_id>.json and post the durable CW summary
-    message. Returns the summary. Never raises into the caller's path."""
+    message. Posting is IDEMPOTENT on the summary's semantic fingerprint: the
+    record file always refreshes (usage counters, timestamps), but a duplicate
+    message is never posted for an unchanged governance state. Never raises
+    into the caller's path."""
     try:
         mid = work_item_id.split(":", 1)[1] if ":" in work_item_id else work_item_id
         directory = os.path.join(root, "summaries")
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, mid + ".json")
+        previous = load_summary(root, work_item_id) or {}
+        summary["summary_fingerprint"] = _summary_fingerprint(summary)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(summary, fh, indent=2)
             fh.write("\n")
         os.replace(tmp, path)
+        if previous.get("summary_fingerprint") == summary["summary_fingerprint"]:
+            summary["message_posted"] = False  # unchanged state; no duplicate post
+            return summary
         thread_id, packet_id = cww._resolve_target(root, work_item_id)
         msg = cwm.build_message("claude", _summary_text(summary), role="orchestrator",
                                 packet_id=packet_id, thread_id=thread_id,
                                 direction="internal", status="posted",
                                 source="use-cw-summary", work_item_id=work_item_id)
         cwm.write_message(root, msg)
+        summary["message_posted"] = True
     except (OSError, ValueError):
         pass
     return summary

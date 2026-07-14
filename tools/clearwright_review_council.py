@@ -785,6 +785,31 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
          dict(repo=codex_cwd, timeout=codex_timeout), codex_prompt),
     ]
 
+    # Make the plan visible in the conversation: the timeline should read as the
+    # complete exchange (operator request -> plan -> reviews -> reconciliation ->
+    # outcome), so each round posts a bounded digest of what was dispatched. The
+    # full packet stays in the council record, hash-bound; only a capped digest
+    # (never secrets — the packet already passed the secret scan) is posted.
+    digest = " ".join(context.split())[:400]
+    try:
+        note = ("Review Council round {} starting ({} phase, {}). GPT delivery: {}. "
+                "Artifacts: {}. Context digest: {}{} [full packet sha256 {} in the "
+                "council record]").format(
+            round_no, phase, council_id,
+            gpt_delivery if all_artifact_ids else "text_only",
+            ", ".join(all_artifact_ids) if all_artifact_ids else "none",
+            digest, "…" if len(context) > 400 else "",
+            hashlib.sha256(context.encode("utf-8")).hexdigest()[:16])
+        msg = cwm.build_message("claude", note, role="orchestrator",
+                                packet_id=council.get("packet_id"),
+                                thread_id=council.get("thread_id"),
+                                direction="internal", status="posted",
+                                source="review-council",
+                                work_item_id=council.get("work_item_id"))
+        cwm.write_message(root, msg)
+    except (ValueError, OSError):
+        pass  # a narration failure must never block a dispatch
+
     attempt_state = council.setdefault("attempt_state", {})
     pending = council.setdefault("pending_results", {})
     results, statuses, attempts_used, fingerprints = {}, {}, {}, {}

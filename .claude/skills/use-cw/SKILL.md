@@ -8,7 +8,7 @@ description: >-
   Council on the result, and record completion. Use when the operator says "Use
   CW", "review this with CW", "run this through CW", "govern this through CW",
   "check this with GPT and Codex", or invokes /use-cw.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Use CW
@@ -16,6 +16,26 @@ version: 1.2.0
 When the operator says **"Use CW to do X"** (or a close variant), govern the task
 through ClearWright with no manual copy/paste between models. The operator gives
 the task and the scope; you run the workflow.
+
+## Standing defaults — do NOT re-ask these
+
+These were settled by the operator; treat them as resolved and start working:
+
+- **"Read-only" means**: no changes to the target product, its repository, its
+  deployment, or any external system. CW's own governance records (work items,
+  council records, reconciliations, summaries) and temporary runtime evidence
+  files under the queue/runtime tree are ALWAYS permitted — the workflow could
+  not run otherwise. Never ask whether CW may write its own records.
+- **"Operator interface" means the ClearWright web UI** (the console served on
+  the local port) unless the operator explicitly names the CLI or another
+  surface.
+- **Transport is an implementation detail.** In Claude Desktop, automatically
+  use Desktop Commander (or whichever local execution tool is available) to
+  reach the wrapper. Do not ask about it and do not narrate it — mention the
+  transport only if it fails.
+
+Surface a question only for genuine scope ambiguity the defaults above do not
+resolve.
 
 Drive everything through the one stable entry point:
 

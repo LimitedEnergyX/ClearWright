@@ -1049,6 +1049,9 @@ function conversationEntryTag(m) {
     return { cls: "conv-entry-unavailable", label: "reviewer unavailable · not recorded as participation" };
   }
   if (m.source === "review-council") {
+    if (/^Review Council round \d+ starting/.test(body)) {
+      return { cls: "conv-entry-roundstart", label: "council round start · plan/context digest" };
+    }
     return { cls: "conv-entry-reconcile", label: "Claude reconciliation" };
   }
   if (m.source === "use-cw-summary") {

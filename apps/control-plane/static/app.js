@@ -1542,6 +1542,7 @@ function askReason(action, card) {
       esc(card.packet_id) + " : " + (card.action || "");
     const input = document.getElementById("reason-input");
     input.value = "";
+    input.setCustomValidity("");
     document.getElementById("reason-modal").setAttribute("aria-hidden", "false");
     input.focus();
   });
@@ -1712,9 +1713,19 @@ function wire() {
   document.getElementById("audit-close").addEventListener("click", closeAudit);
   document.getElementById("reason-cancel").addEventListener("click", () => closeReason(null));
   document.getElementById("reason-confirm").addEventListener("click", () => {
-    const value = document.getElementById("reason-input").value.trim();
-    if (!value) return;
+    const input = document.getElementById("reason-input");
+    const value = input.value.trim();
+    if (!value) {
+      // The trim check stays authoritative: native `required` would accept
+      // whitespace-only input, and the textarea lives outside any form.
+      input.setCustomValidity("A reason is required.");
+      input.reportValidity();
+      return;
+    }
     closeReason(value);
+  });
+  document.getElementById("reason-input").addEventListener("input", (ev) => {
+    ev.target.setCustomValidity("");
   });
   document.getElementById("results-cancel").addEventListener("click", closeResults);
   document.getElementById("results-form").addEventListener("submit", submitResults);

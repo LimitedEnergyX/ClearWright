@@ -156,6 +156,48 @@ invocation finds the pending journal and resumes forward-only:
 Reruns are idempotent: resuming a fully completed journal is a no-op, and the
 index can always be rebuilt from the set of completed manifests.
 
+The journal carries the approval lineage (`approval_id` and
+`operator_message_id`) alongside `approved_plan_sha256`, so a manifest
+finalized by recovery keeps the same manifest-to-approval audit link as an
+uninterrupted run.
+
+## Execution runbook (local operator sequence)
+
+The writer/archive exclusion above covers durable **writers**; it does not —
+and by design cannot — stop **readers**. On Windows a plain `open()` for
+reading blocks `os.rename` on the same file (sharing violation, WinError 32),
+so a long-running local reader such as the control-plane server polling the
+queue can halt an execute mid-journal. Recovery handles that interruption
+cleanly, but the operational path must not depend on discovering it
+mid-journal. Execute in this order:
+
+1. **Stop the local control-plane server** (and any other known queue
+   readers) before `archive execute`. On Windows this is required, not
+   advisory; on POSIX it is still recommended so the operation runs against a
+   quiet queue.
+2. Run `archive dry-run` and confirm the plan hash matches the recorded
+   hash-bound approval exactly.
+3. Run `archive execute`.
+4. If the run is interrupted for any reason (sharing violation, crash,
+   power loss):
+   - identify the pending journal: `runtime/queues/archive/<YYYY-MM>/pending-<opid>.json`
+     (with its per-move completion log `pending-<opid>.log`);
+   - resume it forward-only — the next `archive execute` call runs
+     `recover_pending` first, or invoke `clearwright_archive.recover_pending(root)`
+     directly; recovery re-verifies every hash and never re-moves a completed
+     entry;
+   - verify completion: the journal renamed to `completed-<opid>.json`, the
+     `manifest-<opid>.json` present with the approved plan hash and approval
+     lineage, and `archive status` showing `exclusive: null` (the exclusive
+     flag is released even on an interrupted run; a stale flag from a dead
+     process is swept on confirmed non-liveness only).
+5. Validate integrity before restarting anything: every manifest row's
+   `archive_path` exists and hash-verifies, every `original_path` is gone
+   from the active queue, and the archive index resolves every archived id.
+6. **Restart the local server** and confirm the site reflects the archive:
+   archived records labeled in History (`/api/ledger?scope=archived`), the
+   Archived queue group populated, and all nonterminal work items unchanged.
+
 ## Archive-aware reads
 
 Once a record is archived, `/api/audit`, `/api/messages`, `/api/review-council`,

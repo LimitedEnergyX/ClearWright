@@ -459,6 +459,38 @@ class CrashRecoveryTests(ArchiveTestBase):
         self.assertTrue(os.path.isfile(
             cwa._journal_path(mdir, "op-auto", "completed")))
 
+    def test_recovery_preserves_approval_lineage_in_the_manifest(self):
+        # Live-execution regression (verify council finding): the first real
+        # execute halted mid-journal on a Windows sharing violation and
+        # recovery finalized the manifest with approval_id null, losing the
+        # direct manifest-to-approval audit link. The journal now carries the
+        # approval lineage so a recovered manifest keeps it.
+        mdir = os.path.join(cwa.archive_root(self.root), "2026-08")
+        os.makedirs(mdir, exist_ok=True)
+        src_dir = os.path.join(self.root, "communications")
+        os.makedirs(src_dir, exist_ok=True)
+        src = os.path.join(src_dir, "lineage.json")
+        with open(src, "w", encoding="utf-8") as fh:
+            fh.write('{"a": 1}')
+        plan = {"entries": [{"id": "thr-x", "type": "thread", "src": src,
+                            "dst": os.path.join(mdir, "lineage.json"),
+                            "sha256": cwa._sha256_file(src)}]}
+        approval = {"approval_id": "apr-lineage-1",
+                   "operator_message_id": "msg-lineage-1",
+                   "approved_plan_sha256": "h" * 64}
+        journal = cwa.write_journal(mdir, "op-lineage", plan, "h" * 64,
+                                   approval=approval)
+        self.assertEqual(journal["approval_id"], "apr-lineage-1")
+        self.assertEqual(journal["operator_message_id"], "msg-lineage-1")
+        # Simulate the interruption: journal durable, no move executed yet.
+        results = cwa.recover_pending(self.root)
+        self.assertEqual(results[0]["status"], "completed")
+        manifest = cwa._read_json(
+            os.path.join(mdir, "manifest-op-lineage.json"))
+        self.assertEqual(manifest["approval_id"], "apr-lineage-1")
+        self.assertEqual(manifest["operator_message_id"], "msg-lineage-1")
+        self.assertEqual(manifest["approved_plan_sha256"], "h" * 64)
+
 
 class LogRotationTests(ArchiveTestBase):
 

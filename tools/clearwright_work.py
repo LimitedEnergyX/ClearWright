@@ -45,9 +45,25 @@ import sys
 
 import clearwright_message as cwm
 import clearwright_claim as cwc
+import clearwright_gate as cwg
 
 LANES = ["clearance_outbox", "clearance_in_progress",
          "clearance_done", "clearance_failed"]
+
+# The operator acts through the authority channel and is never gated; every
+# other actor is an agent whose governed mutations on a gated item are refused.
+OPERATOR_ACTOR = "OPERATOR-0001"
+
+
+def _gate_block(root, work_item_id, actor):
+    """Return a refusal dict if an unresolved gate blocks an agent-actor
+    mutation on this work item; else None. The operator is never blocked."""
+    if str(actor).strip() == OPERATOR_ACTOR:
+        return None
+    gate = cwg.active_gate(root, work_item_id)
+    if gate is None:
+        return None
+    return cwg.refusal_payload(gate)
 
 
 def _read_packets(root):
@@ -216,6 +232,9 @@ def claim_work_item(root, work_item_id, actor, role=cwm.DEFAULT_ROLE,
     kind, ref = parse_work_item_id(work_item_id)
     if kind is None:
         return {"ok": False, "error": "unrecognized work_item_id"}
+    blocked = _gate_block(root, work_item_id, actor)
+    if blocked is not None:
+        return blocked
     if find_work_item(root, work_item_id) is None:
         return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
 
@@ -256,6 +275,9 @@ def respond_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE,
     existing lifecycle tools for that."""
     if parse_work_item_id(work_item_id)[0] is None:
         return {"ok": False, "error": "unrecognized work_item_id"}
+    blocked = _gate_block(root, work_item_id, actor)
+    if blocked is not None:
+        return blocked
     if find_work_item(root, work_item_id) is None:
         return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
     thread_id, packet_id = _resolve_target(root, work_item_id)
@@ -281,6 +303,9 @@ def progress_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE
     item stays open."""
     if parse_work_item_id(work_item_id)[0] is None:
         return {"ok": False, "error": "unrecognized work_item_id"}
+    blocked = _gate_block(root, work_item_id, actor)
+    if blocked is not None:
+        return blocked
     if find_work_item(root, work_item_id) is None:
         return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
     thread_id, packet_id = _resolve_target(root, work_item_id)

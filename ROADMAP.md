@@ -1,40 +1,59 @@
 # Roadmap
 
-ClearWright is early alpha and a local reference implementation of the ClearWright
-Protocol. This roadmap describes direction and priorities, not commitments or
-dates.
+ClearWright is an early local alpha: an operator-controlled authorization,
+consensus, and audit layer for multi-AI-agent work. This roadmap is the
+concise public summary of [PROJECT_PLAN.md](PROJECT_PLAN.md), which is the
+strategic source of truth. Direction and priorities only - no dates and no
+commitments.
 
 ## Current status
 
-- Early alpha.
-- Local reference implementation.
-- Private-to-public readiness in progress.
-- The clearance packet schema and the clearance queue model exist.
-- Continuous integration and a naming gate exist.
-- Manual clearance decisions (CTA / DTA / RFI) exist.
+- Early **local alpha**, in daily governed use by its operator - including
+  governing this repository's own development.
+- Working today (evidence in [PROJECT_PLAN.md](PROJECT_PLAN.md) section 3):
+  the clearance protocol and queue; a local operator console; real GPT and
+  Codex Review Councils with structured verdicts and a deterministic
+  agreement rule; the "Use CW" governed loop; fail-closed plan gates and
+  fail-closed verification before completion; review profiles; message
+  payload integrity; artifact and evidence handling; a durable archive
+  layer with hash-bound operator approval and crash-safe recovery; canonical
+  summaries and a durable audit trail.
+- A local long-running operator service exists. Fail-closed plan gates and
+  review profiles exist. ClearWright does not create autonomous authority
+  and does not ship an independent production policy engine or general
+  scheduler.
 
-## Near-term
+## Next
 
-- Queue lifecycle refinement.
-- Packet validation hardening.
-- ClearWright Local Repo Profile refinement.
-- Audit trail review.
-- README and contributor guidance polish.
+- **Pre-Leapfrog Stabilization Gate**: message-scoped work-item identity,
+  same-thread isolation, derived-queue completeness, gate idempotency,
+  selected-task state isolation, server lifecycle evidence, and a safe
+  manual launcher.
+- **Project Leapfrog** (next major milestone): one trusted Stable
+  ClearWright instance governs development and verification of one isolated
+  Candidate instance - separate runtime roots and secrets, an explicit
+  permitted-channel matrix, promotion only under durable operator
+  authority, verified rollback, and a first end-to-end promotion proof.
+  Implementation starts only after the stabilization gate is verified
+  complete.
 
-## Later
+## Later (in dependency order)
 
-- Richer clearance lifecycle tooling.
-- Additional examples.
-- Stronger validation and reporting.
-- Possible integrations after the core manual lifecycle is stable.
+1. Council efficiency and observability (bounded packets, scoped review,
+   cost/latency metrics - without weakening deterministic agreement).
+2. Multi-user identity, SSO, and workspace isolation.
+3. Project registry and scoped connector.
+4. Installer and deployment (only after identity, connector, and migration
+   rules stabilize).
+5. Reliability, recovery, and policy packs.
+6. Trusted pilot, then public alpha.
 
-## Non-goals
+## Non-goals and honest limitations
 
-- No autonomous execution authority.
-- No daemon.
-- No scheduler.
-- No policy engine.
-- No Discord automation.
+- Early alpha; **not production-ready**.
 - No SaaS claim.
 - No certification or compliance claim.
-- No production-ready claim.
+- ClearWright does not create its own authority. Work proceeds only within
+  operator-defined scope and recorded delegation.
+- ClearWright may operate over an administrator-selected private network;
+  it **does not provide or manage VPN infrastructure**.

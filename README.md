@@ -17,9 +17,12 @@ The specification is the **ClearWright Protocol**: Request to Act (RTA), Clear t
 Act (CTA), Denied to Act (DTA), Request for Information (RFI), and durable
 **clearance packets** that move through a four-state **clearance queue**.
 
-> **Status: early alpha.** ClearWright is a local reference implementation of the
-> ClearWright Protocol, human-commanded and operator-controlled, and under active
-> development.
+> **Status: early local alpha.** ClearWright is a local reference implementation
+> of the ClearWright Protocol, human-commanded and operator-controlled, and under
+> active development. It is in daily governed use by its operator - including
+> governing this repository's own development. It is not production-ready.
+> Strategic plan: [PROJECT_PLAN.md](PROJECT_PLAN.md) · public summary:
+> [ROADMAP.md](ROADMAP.md) · decisions: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Why ClearWright
 
@@ -128,7 +131,32 @@ This repository ships the local, single-machine foundation:
   Council (start / plan / council / progress / incident / verify / complete /
   status) with compact JSON and stable exit codes. Council agreement never grants
   authority; the operator's approved scope does. See [docs/USE_CW.md](docs/USE_CW.md).
-- A stdlib test suite ([tests/](tests/)).
+- **Fail-closed plan gates**: a plan or incident council that escalates to the
+  operator creates a durable gate; the governed workflow refuses to proceed
+  until a durable, post-gate operator authority message resolves it.
+- **Fail-closed verification**: completion refuses DONE unless the bound
+  verification council reached agreement; operator-only closure requires its
+  own durable, post-outcome authority record.
+- **Review profiles** (`code` / `editorial`) with prompt-only reviewer lanes
+  that never touch the deterministic agreement rule.
+- **Message payload integrity**: canonical content, size caps, thread-scoped
+  idempotency, and strict HTTP framing on the local API.
+- **Artifact and evidence handling**: pinned artifacts with full-hash
+  provenance, delivered capability-aware to each reviewer.
+- A **durable archive layer**: journaled, crash-safe moves of old terminal
+  records under a hash-bound operator approval (no server write route),
+  forward-only recovery, archive-aware reads, and an execution runbook. See
+  [docs/ARCHIVE_OPERATION.md](docs/ARCHIVE_OPERATION.md).
+- A **task-centered operator site**: three-region desktop (work queue, selected
+  task with a six-phase stepper, operator panel), a unified filterable History
+  ledger across packets/messages/events with archived-record labeling.
+- A stdlib test suite ([tests/](tests/)) and a CI naming/confidentiality gate.
+
+Evidence convention: capability claims in the planning documents are labeled
+**[repo-verifiable]** (merged PRs, committed tests, CI) or
+**[operator-attested]** (demonstrated on the operator's live local system,
+backed by dated durable local records, not independently verifiable from this
+repository). See [PROJECT_PLAN.md](PROJECT_PLAN.md) section 3.
 
 Documented as direction, not yet implemented here: a read-only packet index, a
 canonical packet hash policy, and a unified operator command surface. These are
@@ -194,7 +222,12 @@ behavior, and implementation simplicity are especially useful. See
 
 ## Project docs
 
-- [ROADMAP.md](ROADMAP.md): current status, near-term, later, and non-goals.
+- [PROJECT_PLAN.md](PROJECT_PLAN.md): the strategic source of truth - current
+  verified state with evidence, phases, dependencies, acceptance criteria,
+  risk register, metrics, and the public/private information boundary.
+- [ROADMAP.md](ROADMAP.md): the concise public summary - current status, next,
+  later, and non-goals.
+- [docs/DECISIONS.md](docs/DECISIONS.md): the public-safe decision register.
 - [docs/END_OF_ALPHA_TARGET.md](docs/END_OF_ALPHA_TARGET.md): end-of-alpha target
   workflow (protocol vision, not a current-state implementation claim).
 - [docs/PEER_REVIEW.md](docs/PEER_REVIEW.md): what review is useful and how to

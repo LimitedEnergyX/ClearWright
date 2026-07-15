@@ -59,11 +59,14 @@ Statuses: **standing** (in force), **planned** (adopted for future work).
 ## D-05. Public and private planning remain separate
 
 - **Decision:** public surfaces (repository, GitHub metadata, CI logs,
-  screenshots, exports) never carry private machine names, endpoints,
-  operator identities, credential or provider-account arrangements,
-  private project names, local paths, or unresolvable private identifiers;
-  operational detail lives in a private operations record outside the
-  repository.
+  screenshots, exports) never carry private machine names, endpoints, the
+  operational operator identity used inside the governance system or any
+  operator's private personal details, credential or provider-account
+  arrangements, private project names, local paths, or unresolvable private
+  identifiers; operational detail lives in a private operations record
+  outside the repository. Deliberate public attribution - the project's
+  authorship byline, trademark notice, and public organization handle - is
+  intentional and permitted; it is not a private operational identifier.
 - **Rationale:** the repository is public; operational security and
   personal privacy cannot depend on nobody looking.
 - **Consequences:** a two-stage pre-publication privacy review with the

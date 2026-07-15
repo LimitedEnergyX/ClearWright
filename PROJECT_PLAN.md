@@ -334,16 +334,23 @@ Project field values, labels, linked artifacts, screenshots, CI logs,
 release notes, automation payloads, and any metrics or evidence exports.
 
 Public surfaces must never contain: private machine names; internal service
-endpoints or ports; operator personal names; real private operator
-identifiers; private workspace names; API-key, credential, or
-provider-account arrangements (including named provider projects); private
-network details; private project names; local-only file paths (including
-the location of the private operations record); private runtime or council
-identifiers outsiders cannot resolve; raw council transcripts; reviewer
-account identifiers; account-linked token or cost records; environment
-variable or service names that reveal providers or accounts; branch names
-derived from private project names; or attachments containing any of the
-above.
+endpoints or ports; the operational operator identity used inside the
+governance system (for example internal operator role identifiers) or any
+operator's private personal details; private workspace names; API-key,
+credential, or provider-account arrangements (including named provider
+projects); private network details; private project names; local-only file
+paths (including the location of the private operations record); private
+runtime or council identifiers outsiders cannot resolve; raw council
+transcripts; reviewer account identifiers; account-linked token or cost
+records; environment variable or service names that reveal providers or
+accounts; branch names derived from private project names; or attachments
+containing any of the above.
+
+This prohibition covers *private operational* identity, not deliberate
+*public* attribution. The project's own authorship byline, trademark
+notice, and public GitHub organization handle are intentional public legal
+and attribution statements and are explicitly permitted; they are not the
+private operational identifiers this boundary excludes.
 
 Process: the operator owns pre-publication review. Stage 1 (pre-push)
 reviews changed files, branch names, commit messages, and PR text - and the

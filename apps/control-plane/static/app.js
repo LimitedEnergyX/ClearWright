@@ -912,24 +912,19 @@ function relativeAge(iso) {
 }
 
 // The newest council per thread (the API returns councils newest-first). A
-// superseded operator_required council must never flag a thread forever:
-// only the LATEST council's outcome describes the thread's current state.
-function latestCouncilFor(threadId) {
-  return lastQueueCouncils.find((c) => c.thread_id === threadId) || null;
-}
+// A phase hint for queue rows derived from the WORK ITEM'S OWN server-derived
+// state (the selected task gets the precise phase via /api/task-state). Because
+// the state is per work item, a superseded escalation on a sibling item can
+// never flag this row, and two items in one thread hint independently.
+const _STATE_PHASE = {
+  operator_required: "Authority", verification: "Verify", planning: "Plan Review",
+  done: "Complete", closed: "Complete", superseded: "Complete",
+  claimed: "Execute", open: "Request", malformed: "Malformed",
+  legacy_ambiguity: "Ambiguous",
+};
 
-// A cheap per-thread phase hint for queue rows (the SELECTED task gets the
-// precise server-derived phase via /api/task-state; rows only need a hint).
 function queuePhaseHint(threadId, status) {
-  const councils = lastQueueCouncils.filter((c) => c.thread_id === threadId);
-  const verify = councils.find((c) => c.phase === "verify");
-  const plan = councils.find((c) => c.phase === "plan");
-  if (status === "responded" || status === "chat") return "Complete";
-  const latest = latestCouncilFor(threadId);
-  if (latest && latest.outcome === "operator_required") return "Authority";
-  if (verify) return verify.outcome === "agreement_threshold_met" ? "Complete" : "Verify";
-  if (plan) return plan.outcome === "agreement_threshold_met" ? "Execute" : "Plan Review";
-  return "Request";
+  return _STATE_PHASE[status] || "Request";
 }
 
 function queueRow(entry) {
@@ -971,16 +966,13 @@ function buildQueueGroups() {
       });
     }
   });
-  // Only a thread whose LATEST council escalated still needs the operator;
-  // resolved gates with a later agreed council are back to plain active work.
-  const gatedThreads = new Set(lastQueueCouncils
-    .filter((c) => c.thread_id && c.outcome === "operator_required" &&
-      latestCouncilFor(c.thread_id) === c)
-    .map((c) => c.thread_id));
-
+  // Attention is decided by each WORK ITEM'S OWN state, not the thread's:
+  // the server derives operator_required per work item (its own unresolved
+  // gate), so two items sharing one thread route independently -- a gated
+  // item goes to Attention while its non-gated sibling stays Active.
   lastWorkItems.forEach((it) => {
-    if (it.kind !== "message" || !it.thread_id) return;
-    seenThreads.add(it.thread_id);
+    if (it.kind !== "message") return;
+    if (it.thread_id) seenThreads.add(it.thread_id);
     const entry = {
       thread_id: it.thread_id, work_item_id: it.work_item_id,
       title: it.title || it.summary || "",
@@ -988,9 +980,12 @@ function buildQueueGroups() {
       phase: queuePhaseHint(it.thread_id, it.status),
       age: relativeAge(it.created_at),
     };
-    if (gatedThreads.has(it.thread_id)) {
+    if (it.status === "operator_required") {
       entry.reason = "council escalated: operator required";
       entry.phase = "Authority";
+      attention.push(entry);
+    } else if (it.status === "legacy_ambiguity") {
+      entry.reason = "legacy record ambiguity (see integrity warnings)";
       attention.push(entry);
     } else {
       active.push(entry);

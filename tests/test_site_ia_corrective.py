@@ -146,21 +146,18 @@ class WorkQueueTests(SourceTestCase):
         self.assertIn("loadConversations()", boot)
         self.assertIn('currentView !== "work"', self.appjs)
 
-    def test_superseded_escalation_never_flags_a_thread_forever(self):
-        # Live-acceptance regression: two plan councils escalated
-        # operator_required, the gate was resolved, and a third council
-        # agreed -- yet the queue kept the thread under Attention while the
-        # header/stepper said Execute. Only the LATEST council per thread may
-        # drive the Attention grouping and the Authority phase hint.
-        self.assertIn("function latestCouncilFor", self.appjs)
-        gated_at = self.appjs.index("const gatedThreads")
-        gated_expr = self.appjs[gated_at:self.appjs.index(";", gated_at)]
-        self.assertIn("latestCouncilFor", gated_expr)
+    def test_attention_grouping_is_work_item_scoped(self):
+        # Stabilization: Attention and the phase hint are decided by each work
+        # item's OWN server-derived state, not by thread-level council scans, so
+        # a superseded escalation on one item never flags a sibling and two
+        # items in one thread route independently. (Supersedes the thread-based
+        # latestCouncilFor fix.)
+        self.assertNotIn("function latestCouncilFor", self.appjs)
+        self.assertNotIn("const gatedThreads", self.appjs)
+        self.assertIn('it.status === "operator_required"', self.appjs)
         hint_at = self.appjs.index("function queuePhaseHint")
         hint_body = self.appjs[hint_at:self.appjs.index("\n}", hint_at)]
-        self.assertIn("latestCouncilFor", hint_body)
-        self.assertNotIn('councils.some((c) => c.outcome === "operator_required")',
-                         hint_body)
+        self.assertNotIn("lastQueueCouncils", hint_body)
 
 
 class ThreeRegionLayoutTests(SourceTestCase):

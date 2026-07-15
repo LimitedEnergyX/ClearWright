@@ -95,11 +95,19 @@ class WorkItemSeparationTests(unittest.TestCase):
         self.assertEqual(items[0]["kind"], "message")
         self.assertEqual(items[0]["status"], "open")
 
-    def test_message_without_intent_stays_actionable(self):
-        # Existing callers (no intent) must keep deriving work, unchanged.
+    def test_v2_message_needs_explicit_request_intent(self):
+        # Stabilization: the identity cutover closes the origin rule. A v2
+        # message (identity_version >= 2) with no intent is NOT an origin, so
+        # authority/no-intent messages can never become work items or titles.
         server.do_message(self.root, {"actor": "claude", "role": "orchestrator",
                                       "source": "cli", "direction": "inbound",
-                                      "message": "Legacy request, no intent."})
+                                      "message": "No-intent v2 message."})
+        self.assertEqual(len(cww.derive_work_items(self.root)), 0)
+        # An explicit request intent derives one work item.
+        server.do_message(self.root, {"actor": "claude", "role": "orchestrator",
+                                      "source": "cli", "direction": "inbound",
+                                      "intent": "request",
+                                      "message": "Explicit request."})
         self.assertEqual(len(cww.derive_work_items(self.root)), 1)
 
     def test_chat_thread_becomes_work_when_actionable_followup_posted(self):

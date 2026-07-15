@@ -126,7 +126,7 @@ class PulseMetadataTests(unittest.TestCase):
         self.assertEqual(p["active_phase"], "idle")
 
     def test_open_item_sets_incoming_phase_with_sources(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Please review.", "packet_id": "cw-9"})
         p = server.compute_pulse(self.root)
         self.assertTrue(p["incoming"])
@@ -137,7 +137,7 @@ class PulseMetadataTests(unittest.TestCase):
         self.assertEqual(p["source_packet_id"], "cw-9")
 
     def _open_and_claim(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Please review."})
         wid = cww.derive_work_items(self.root)[0]["work_item_id"]
         cww.claim_work_item(self.root, wid, "claude")

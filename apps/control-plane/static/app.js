@@ -220,14 +220,20 @@ function renderPulseInspector(pulse) {
 // queue, header, phase display, conversation, and operator panel cannot occur.
 async function refreshTaskState() {
   try {
-    const url = selectedConvThread
-      ? "/api/task-state?thread_id=" + encodeURIComponent(selectedConvThread)
-      : "/api/task-state";
+    // work_item_id is the primary selector; a bare thread selection is still
+    // honored (the server resolves it, erroring only on a multi-item thread).
+    let url = "/api/task-state";
+    if (selectedWorkItemId) {
+      url += "?work_item_id=" + encodeURIComponent(selectedWorkItemId);
+    } else if (selectedConvThread) {
+      url += "?thread_id=" + encodeURIComponent(selectedConvThread);
+    }
     const ts = await getJSON(url);
-    if (ts && ts.found && !selectedConvThread) {
-      // Adopt the server's default (most recently worked) task as the
-      // selection so every panel binds to the same task from first paint.
-      selectedConvThread = ts.thread_id;
+    if (ts && ts.found && !selectedWorkItemId) {
+      // Adopt the server's default task so every panel binds to the same task
+      // from first paint; key future selection on its canonical work-item id.
+      selectedWorkItemId = ts.work_item_id;
+      if (!selectedConvThread) selectedConvThread = ts.thread_id;
     }
     lastTaskState = ts && ts.found ? ts : null;
   } catch (e) {
@@ -906,33 +912,33 @@ function relativeAge(iso) {
 }
 
 // The newest council per thread (the API returns councils newest-first). A
-// superseded operator_required council must never flag a thread forever:
-// only the LATEST council's outcome describes the thread's current state.
-function latestCouncilFor(threadId) {
-  return lastQueueCouncils.find((c) => c.thread_id === threadId) || null;
-}
+// A phase hint for queue rows derived from the WORK ITEM'S OWN server-derived
+// state (the selected task gets the precise phase via /api/task-state). Because
+// the state is per work item, a superseded escalation on a sibling item can
+// never flag this row, and two items in one thread hint independently.
+const _STATE_PHASE = {
+  operator_required: "Authority", verification: "Verify", planning: "Plan Review",
+  done: "Complete", closed: "Complete", superseded: "Complete",
+  claimed: "Execute", open: "Request", malformed: "Malformed",
+  legacy_ambiguity: "Ambiguous",
+};
 
-// A cheap per-thread phase hint for queue rows (the SELECTED task gets the
-// precise server-derived phase via /api/task-state; rows only need a hint).
 function queuePhaseHint(threadId, status) {
-  const councils = lastQueueCouncils.filter((c) => c.thread_id === threadId);
-  const verify = councils.find((c) => c.phase === "verify");
-  const plan = councils.find((c) => c.phase === "plan");
-  if (status === "responded" || status === "chat") return "Complete";
-  const latest = latestCouncilFor(threadId);
-  if (latest && latest.outcome === "operator_required") return "Authority";
-  if (verify) return verify.outcome === "agreement_threshold_met" ? "Complete" : "Verify";
-  if (plan) return plan.outcome === "agreement_threshold_met" ? "Execute" : "Plan Review";
-  return "Request";
+  return _STATE_PHASE[status] || "Request";
 }
 
 function queueRow(entry) {
-  const selected = entry.thread_id && entry.thread_id === selectedConvThread;
+  // Selection is keyed on the CANONICAL work-item id so two work items sharing
+  // one conversation thread select independently; thread id rides along only
+  // for the conversation timeline.
+  const selected = (entry.work_item_id && entry.work_item_id === selectedWorkItemId)
+    || (!entry.work_item_id && entry.thread_id && entry.thread_id === selectedConvThread);
   const bits = ['<span class="q-status q-status-' + esc(entry.status) + '">' + esc(entry.status) + "</span>"];
   if (entry.phase) bits.push('<span class="q-phase">' + esc(entry.phase) + "</span>");
   if (entry.age) bits.push('<span class="q-age">' + esc(entry.age) + "</span>");
   return '<div class="q-row' + (selected ? " is-selected" : "") +
     '" data-thread="' + esc(entry.thread_id || "") +
+    '" data-work-item="' + esc(entry.work_item_id || "") +
     '" data-archived="' + (entry.archived ? "1" : "") + '">' +
     '<div class="q-title">' + esc((entry.title || "").slice(0, 72)) + "</div>" +
     '<div class="q-meta">' + bits.join("") + "</div>" +
@@ -950,7 +956,8 @@ function buildQueueGroups() {
   lastWorkItems.forEach((it) => {
     if (it.kind === "packet" || it.kind === "rfi") {
       attention.push({
-        thread_id: it.thread_id, title: it.title || it.summary || it.packet_id,
+        thread_id: it.thread_id, work_item_id: it.work_item_id,
+        title: it.title || it.summary || it.packet_id,
         status: it.status || "open",
         phase: it.kind === "rfi" ? "Authority" : "Authority",
         age: relativeAge(it.created_at),
@@ -959,25 +966,26 @@ function buildQueueGroups() {
       });
     }
   });
-  // Only a thread whose LATEST council escalated still needs the operator;
-  // resolved gates with a later agreed council are back to plain active work.
-  const gatedThreads = new Set(lastQueueCouncils
-    .filter((c) => c.thread_id && c.outcome === "operator_required" &&
-      latestCouncilFor(c.thread_id) === c)
-    .map((c) => c.thread_id));
-
+  // Attention is decided by each WORK ITEM'S OWN state, not the thread's:
+  // the server derives operator_required per work item (its own unresolved
+  // gate), so two items sharing one thread route independently -- a gated
+  // item goes to Attention while its non-gated sibling stays Active.
   lastWorkItems.forEach((it) => {
-    if (it.kind !== "message" || !it.thread_id) return;
-    seenThreads.add(it.thread_id);
+    if (it.kind !== "message") return;
+    if (it.thread_id) seenThreads.add(it.thread_id);
     const entry = {
-      thread_id: it.thread_id, title: it.title || it.summary || "",
+      thread_id: it.thread_id, work_item_id: it.work_item_id,
+      title: it.title || it.summary || "",
       status: it.status || "open",
       phase: queuePhaseHint(it.thread_id, it.status),
       age: relativeAge(it.created_at),
     };
-    if (gatedThreads.has(it.thread_id)) {
+    if (it.status === "operator_required") {
       entry.reason = "council escalated: operator required";
       entry.phase = "Authority";
+      attention.push(entry);
+    } else if (it.status === "legacy_ambiguity") {
+      entry.reason = "legacy record ambiguity (see integrity warnings)";
       attention.push(entry);
     } else {
       active.push(entry);
@@ -986,7 +994,8 @@ function buildQueueGroups() {
   lastWorkItems.forEach((it) => {
     if (it.kind === "in_progress") {
       active.push({
-        thread_id: it.thread_id, title: it.title || it.packet_id,
+        thread_id: it.thread_id, work_item_id: it.work_item_id,
+        title: it.title || it.packet_id,
         status: "in progress", phase: "Execute", age: "",
       });
     }
@@ -1412,6 +1421,9 @@ function toggleHealthPanel() {
 // --------------------------------------------------------------------------- //
 
 let selectedConvThread = null;
+// The canonical work-item id of the selected task (primary selection key). A
+// thread id sharing two work items no longer collapses selection to one.
+let selectedWorkItemId = null;
 let lastConversations = [];
 let convDetailRun = null;
 let lastConvCouncils = [];
@@ -2465,7 +2477,13 @@ function renderState(state) {
   // task's state (the phase stepper above it is the authoritative display of
   // state.pulse-adjacent activity for the selected task).
   const p = state.pulse || {};
-  if (!p.source_thread_id || p.source_thread_id === selectedConvThread) {
+  // Bind the pulse to the SELECTED WORK ITEM: only pulse activity whose source
+  // work item is the selected one animates this display, so a sibling work item
+  // sharing the same thread can never drive or relabel it.
+  const pulseIsMine = selectedWorkItemId
+    ? (!p.source_work_item_id || p.source_work_item_id === selectedWorkItemId)
+    : (!p.source_thread_id || p.source_thread_id === selectedConvThread);
+  if (pulseIsMine) {
     renderPulseInspector(state.pulse);
   } else {
     renderPulseInspector({ active_phase: null,
@@ -2490,8 +2508,9 @@ function toggleToolLog() {
   if (footer) footer.hidden = !footer.hidden;
 }
 
-function selectTask(threadId) {
+function selectTask(threadId, workItemId) {
   selectedConvThread = threadId || null;
+  selectedWorkItemId = workItemId || null;
   convComposerNewThreadId = null;
   if (convComposer) convComposer.restoreDraft();
   if (operatorChatComposer) operatorChatComposer.updateBanner();
@@ -2549,7 +2568,8 @@ function wire() {
     const row = e.target.closest(".q-row");
     if (!row) return;
     const thread = row.getAttribute("data-thread");
-    if (thread) selectTask(thread);
+    const workItem = row.getAttribute("data-work-item");
+    if (thread || workItem) selectTask(thread, workItem);
   });
   document.getElementById("queue-new-btn").addEventListener("click", () => {
     selectTask(null);

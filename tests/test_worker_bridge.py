@@ -58,7 +58,7 @@ class SharedHelperTests(unittest.TestCase):
         self.root, *_ = server.resolve_queue(self.base)  # operator
 
     def _post_and_wid(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "source": "operator-ui", "message": "Review this repo under CW."})
         return cww.derive_work_items(self.root)[0]["work_item_id"]
 
@@ -109,7 +109,7 @@ class WorkerCliTests(unittest.TestCase):
                               capture_output=True, encoding="utf-8", errors="replace")
 
     def test_next_lists_open_work_and_full_cycle(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "source": "operator-ui", "message": "Review this repo under CW."})
         # next
         nxt = self._run("next", self.root, "--actor", "claude")
@@ -139,7 +139,7 @@ class WorkerCliTests(unittest.TestCase):
         self.assertTrue(all(m["source"] in ("operator-ui", "worker-bridge") for m in thread))
 
     def test_status_command_reports_json(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "hi"})
         out = self._run("status", self.root)
         self.assertEqual(out.returncode, 0, out.stderr)

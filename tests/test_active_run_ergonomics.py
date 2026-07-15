@@ -93,7 +93,7 @@ class CodexErgonomicsTests(unittest.TestCase):
 
     def setUp(self):
         self.root = operator_queue("ar_cx_", self)
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Review under CW."})
         self.wid = cww.derive_work_items(self.root)[0]["work_item_id"]
         cww.claim_work_item(self.root, self.wid, "claude")
@@ -162,7 +162,7 @@ class ActiveRunTests(unittest.TestCase):
         self.assertEqual(ar["messages"], [])
 
     def test_active_run_reports_ids_and_telemetry(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Active run.", "packet_id": "cw-harness-301"})
         wid = cww.derive_work_items(self.root)[0]["work_item_id"]
         cww.claim_work_item(self.root, wid, "claude")
@@ -242,7 +242,7 @@ class RegressionTests(unittest.TestCase):
 
     def test_core_endpoints_and_pulse(self):
         root = operator_queue("ar_reg_", self)
-        self.assertTrue(server.do_message(root, {"actor": "a", "message": "m"})["ok"])
+        self.assertTrue(server.do_message(root, {"actor": "a", "intent": "request", "message": "m"})["ok"])
         self.assertTrue(server.do_agent_event(root, {"actor": "a", "message": "e"})["ok"])
         wid = cww.derive_work_items(root)[0]["work_item_id"]
         cww.claim_work_item(root, wid, "claude")

@@ -48,7 +48,7 @@ class RunRegistryTests(unittest.TestCase):
         self.root, *_ = server.resolve_queue(base)  # operator, empty
 
         # Run 1: full cycle with a (mocked) Codex review, tied to a packet.
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "source": "operator-ui",
                                       "message": "Run one: review the repo.",
                                       "packet_id": "cw-1"})
@@ -64,14 +64,14 @@ class RunRegistryTests(unittest.TestCase):
         self.t1 = cwm.read_messages(self.root)[0]["thread_id"]
 
         # Run 2: claimed but not answered.
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "source": "operator-ui",
                                       "message": "Run two: pending work."})
         w2 = [i for i in cww.derive_work_items(self.root) if i["kind"] == "message"][0]["work_item_id"]
         cww.claim_work_item(self.root, w2, "claude")
 
         # Run 3: open, untouched.
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "source": "claude-desktop-relay",
                                       "message": "Run three: untouched."})
 

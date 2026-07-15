@@ -63,7 +63,7 @@ class HttpParityTests(unittest.TestCase):
 
     def setUp(self):
         self.root = new_operator_queue("p18_http_", self)
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "source": "operator-ui", "message": "Review under CW.",
                                       "packet_id": "cw-harness-301"})
         self.wid = cww.derive_work_items(self.root)[0]["work_item_id"]
@@ -129,12 +129,12 @@ class WorkflowPulseTests(unittest.TestCase):
         self.assertFalse(server.compute_pulse(self.root, now=self.now)["done"])
 
     def test_open_message_work_item_pulses_incoming(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Review under CW."})
         self.assertTrue(server.compute_pulse(self.root, now=self.now)["incoming"])
 
     def test_claimed_work_item_pulses_claimed(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Review under CW."})
         wid = cww.derive_work_items(self.root)[0]["work_item_id"]
         cww.claim_work_item(self.root, wid, "claude")
@@ -142,7 +142,7 @@ class WorkflowPulseTests(unittest.TestCase):
 
     def test_recent_response_pulses_done_but_stale_does_not(self):
         self._stale_done()
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Review under CW."})
         wid = cww.derive_work_items(self.root)[0]["work_item_id"]
         cww.claim_work_item(self.root, wid, "claude")
@@ -186,7 +186,7 @@ class CodexTelemetryTests(unittest.TestCase):
 
     def setUp(self):
         self.root = new_operator_queue("p18_codex_", self)
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Review under CW."})
         self.wid = cww.derive_work_items(self.root)[0]["work_item_id"]
         cww.claim_work_item(self.root, self.wid, "claude")

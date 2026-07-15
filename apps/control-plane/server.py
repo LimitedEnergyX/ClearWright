@@ -36,6 +36,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -54,6 +56,8 @@ import clearwright_work as cww  # noqa: E402
 import clearwright_review_council as cwrc  # noqa: E402
 import clearwright_archive as cwarch  # noqa: E402
 import clearwright_writer_lock as cwl  # noqa: E402
+import clearwright_identity as cwid  # noqa: E402
+import clearwright_server_lifecycle as csl  # noqa: E402
 
 # The single documented request-body cap for POST bodies: worst-case JSON
 # string-escape expansion of a MESSAGE_MAX_BYTES message, plus a fixed
@@ -1120,50 +1124,85 @@ def _run_status(msgs):
 TASK_PHASES = ("request", "plan_review", "authority", "execute", "verify", "complete")
 
 
-def build_task_state(root, thread_id):
-    """Read-only: the selected-task header + phase-stepper model. Returns
-    {thread_id, work_item_id, packet_id, title, status, phase, phase_attention,
-     councils, current_council, gate, claim, next_action, phases}."""
+def build_task_state(root, thread_id=None, work_item_id=None):
+    """Read-only: the selected-task header + phase-stepper model, bound to a
+    CANONICAL WORK ITEM. Pass work_item_id to select precisely (primary); a
+    thread_id is accepted for compatibility and resolved to its single work
+    item, erroring work_item_ambiguous when the thread holds several. Every
+    field (title, council, phase, gate, claim, next action, overview) derives
+    from the selected work item ALONE, so an authority or chat message can
+    never become the title and one task's activity can never relabel another.
+    Returns {found, work_item_id, thread_id, title, status, phase, ...}."""
     import clearwright_gate as cwg
-    run = build_active_run(root, thread_id=thread_id)
-    tid = run.get("thread_id")
-    empty = {"thread_id": thread_id, "found": False}
-    if not tid:
-        return empty
-    msgs = run["messages"]
-    wid = run.get("work_item_id")
-    inbound = next((m for m in msgs if m.get("direction") == "inbound"), msgs[0])
-    status = _run_status(msgs)
+    import clearwright_identity as cwid
 
-    # If the thread's originating message derived a work item, the id may not
-    # appear on any message until claim; derive it the same way work items do.
+    # Resolve the selection to a canonical work-item id.
+    wid = work_item_id
+    if not wid and thread_id:
+        thread_items = [it for it in cww.derive_work_items(root, include="all")
+                        if it.get("kind") == "message"
+                        and it.get("thread_id") == thread_id]
+        if len(thread_items) > 1:
+            return {"thread_id": thread_id, "found": False,
+                    "error": "work_item_ambiguous",
+                    "work_item_ids": [it["work_item_id"] for it in thread_items]}
+        if thread_items:
+            wid = thread_items[0]["work_item_id"]
     if not wid:
-        origin = next((m for m in msgs if m.get("direction") == "inbound"
-                       and m.get("intent") != "chat"), None)
-        if origin:
-            wid = "message:" + origin.get("message_id", "")
+        return {"thread_id": thread_id, "found": False}
 
-    councils = cwrc.list_councils(root, thread_id=tid)
+    item = cww.find_work_item(root, wid)
+    mid = cwid.message_id_of(wid)
+    origin = None
+    if mid:
+        origin = next((m for m in cwm.read_messages(root)
+                       if m.get("message_id") == mid), None)
+    if item is None and origin is None:
+        return {"thread_id": thread_id, "found": False, "work_item_id": wid}
+
+    tid = (item or {}).get("thread_id") or (origin or {}).get("thread_id")
+    # Bound records for this work item only.
+    all_msgs = cwm.read_messages(root)
+    bound = [m for m in all_msgs if m.get("work_item_id") == wid]
+    # Legacy single-item thread: unbound thread records bind to the sole item.
+    if tid:
+        thread_item_count = sum(
+            1 for it in cww.derive_work_items(root, include="all")
+            if it.get("kind") == "message" and it.get("thread_id") == tid)
+        if thread_item_count <= 1:
+            bound += [m for m in all_msgs if not m.get("work_item_id")
+                      and m.get("thread_id") == tid]
+    status = (item or {}).get("status") or "open"
+
+    # Title is ALWAYS the work item's ORIGIN message, never a thread scan.
+    title_source = origin or item or {}
+    title_text = title_source.get("message") or title_source.get("title") or ""
+
+    # Councils bound to THIS work item (thread fallback only for legacy
+    # single-item threads).
+    councils = [c for c in cwrc.list_councils(root) if c.get("work_item_id") == wid]
+    if not councils and tid and thread_item_count <= 1:
+        councils = cwrc.list_councils(root, thread_id=tid)
     plan_c = next((c for c in councils if c.get("phase") == "plan"), None)
     verify_c = next((c for c in councils if c.get("phase") == "verify"), None)
     current_council = councils[0] if councils else None
 
     gate = None
-    if wid:
-        try:
-            gate = cwg.active_gate(root, wid)
-        except Exception:
-            gate = None
+    try:
+        gate = cwg.active_gate(root, wid)
+    except Exception:
+        gate = None
 
-    claim_msg = next((m for m in msgs if m.get("status") == "claimed"), None)
+    claim_msg = next((m for m in bound if m.get("status") == "claimed"), None)
     claim = {"claimed": claim_msg is not None,
              "claimed_by": (claim_msg or {}).get("actor"),
              "claimed_at": (claim_msg or {}).get("at")}
+    msgs = bound
 
     plan_agreed = bool(plan_c and plan_c.get("outcome") == "agreement_threshold_met")
     verify_agreed = bool(verify_c and verify_c.get("outcome") == "agreement_threshold_met")
-    done = any(m.get("closure") in ("done", "closed_by_operator") for m in msgs) or \
-        status == "responded"
+    done = status in ("done", "closed", "superseded") or \
+        any(m.get("closure") in ("done", "closed_by_operator") for m in msgs)
 
     # Phase derivation, in precedence order. Authority (an unresolved gate)
     # renders amber and static; it interrupts whatever phase was underway.
@@ -1272,8 +1311,8 @@ def build_task_state(root, thread_id):
 
     return {
         "thread_id": tid, "found": True,
-        "work_item_id": wid, "packet_id": run.get("packet_id"),
-        "title": (inbound.get("message") or "")[:160],
+        "work_item_id": wid, "packet_id": (item or {}).get("packet_id"),
+        "title": (title_text or "")[:160],
         "status": status,
         "phase": phase, "phase_attention": phase_attention,
         "phases": list(TASK_PHASES),
@@ -1430,6 +1469,22 @@ def build_health(root, mode=None, durable=None, codex_check=_codex_cli_on_path,
 
         health["pulse"] = compute_pulse(root) if health["queue_root_exists"] else {}
 
+        # Current-instance status (lifecycle observability) and any
+        # integrity/lifecycle problems -- a lifecycle-log failure surfaces here
+        # rather than silently looking like a healthy start.
+        if INSTANCE is not None:
+            inst = dict(INSTANCE)
+            if LIFECYCLE_ERROR:
+                inst["lifecycle_log_error"] = LIFECYCLE_ERROR
+            health["instance"] = inst
+        try:
+            iw = cww.integrity_warnings(root) if health["queue_root_exists"] else []
+        except Exception:
+            iw = []
+        health["integrity_warning_count"] = len(iw)
+        if iw:
+            warnings.append("{} queue integrity warning(s).".format(len(iw)))
+
         capabilities = {
             "worker_bridge": os.path.isfile(os.path.join(TOOLS, "clearwright_worker.py")),
             "proof_tool": os.path.isfile(os.path.join(TOOLS, "clearwright_proof.py")),
@@ -1471,6 +1526,9 @@ QUEUE_ROOT = None  # set in main()
 DURABLE = False    # True when running against a persistent --queue-root
 MODE = DEMO_MODE   # "operator" (live local) or "demo" (walkthrough); set in main()
 DEMO_SEEDED = False  # True when demo packets were seeded into this queue
+INSTANCE = None    # current-instance descriptor for /api/health; set in main()
+LIFECYCLE_ERROR = None  # set if the lifecycle log could not be written
+APP_VERSION = "0.1.0-alpha"  # control-plane application version
 
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -1564,7 +1622,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"messages": messages})
             return
         if path == "/api/work-items":
-            self._send_json({"work_items": cww.derive_work_items(QUEUE_ROOT)})
+            wi_query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            wi_params = dict(p.split("=", 1) for p in wi_query.split("&") if "=" in p)
+            include = "all" if wi_params.get("include") == "all" else "nonterminal"
+            self._send_json({
+                "work_items": cww.derive_work_items(QUEUE_ROOT, include=include),
+                "integrity_warnings": cww.integrity_warnings(QUEUE_ROOT),
+            })
             return
         if path == "/api/worker-status":
             self._send_json(cww.worker_status(QUEUE_ROOT))
@@ -1620,12 +1684,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(build_ledger(QUEUE_ROOT, scope=scope))
             return
         if path == "/api/task-state":
-            # Read-only selected-task header + phase model for one thread.
+            # Read-only selected-task header + phase model, bound to a canonical
+            # work item. work_item_id is the primary selector; thread_id is
+            # accepted for compatibility.
             import urllib.parse
             query = self.path.split("?", 1)[1] if "?" in self.path else ""
             params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
             thread_id = urllib.parse.unquote(params.get("thread_id", "")) or None
-            self._send_json(build_task_state(QUEUE_ROOT, thread_id))
+            wid = urllib.parse.unquote(params.get("work_item_id", "")) or None
+            self._send_json(build_task_state(QUEUE_ROOT, thread_id=thread_id,
+                                             work_item_id=wid))
             return
         if path == "/api/archive-index":
             self._send_json(build_archive_index_summary(QUEUE_ROOT))
@@ -1819,13 +1887,82 @@ def main():
              "--queue-root is given, otherwise demo.")
     args = parser.parse_args()
 
+    global INSTANCE, LIFECYCLE_ERROR
     QUEUE_ROOT, DURABLE, MODE, DEMO_SEEDED = resolve_queue(args.queue_root, args.mode)
     if not DURABLE:
         # Only a fresh temporary queue is removed on exit; a durable queue
         # must persist.
         atexit.register(lambda: shutil.rmtree(QUEUE_ROOT, ignore_errors=True))
 
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    # Freeze the legacy work-item origin manifest once, at a write boundary
+    # (never on a read path), so derived-queue reads stay pure.
+    try:
+        cwid.ensure_migrated(QUEUE_ROOT)
+    except Exception:
+        pass
+
+    # server.py lives at <repo>/apps/control-plane/server.py.
+    repo_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    commit = csl.git_commit(repo_dir)
+    lc = dict(version=APP_VERSION, git_commit=commit, mode=MODE,
+              bind_host=args.host, port=args.port, argv=sys.argv)
+
+    # (1) Server-authoritative single-instance lock BEFORE bind.
+    ok, note = csl.acquire_instance_lock(QUEUE_ROOT, args.port)
+    if note.get("prior_unclean"):
+        csl.record(QUEUE_ROOT, "prior_unclean_shutdown", **lc)
+    if not ok:
+        csl.record(QUEUE_ROOT, "startup_refused_duplicate", **lc)
+        sys.stderr.write("REFUSED: another ClearWright instance holds port "
+                         "{} (pid {}).\n".format(args.port, note.get("pid")))
+        return 5
+    csl.clear_stale_startup_sentinel(QUEUE_ROOT, args.port)
+
+    # (2) Bind.
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as exc:
+        csl.record(QUEUE_ROOT, "startup_refused_port", **lc)
+        csl.release_instance_lock(QUEUE_ROOT, args.port)
+        sys.stderr.write("REFUSED: could not bind {}:{} ({}).\n".format(
+            args.host, args.port, exc))
+        return 3
+
+    INSTANCE = {"pid": os.getpid(), "started_at_utc": csl._now_iso(),
+                "version": APP_VERSION, "git_commit": commit,
+                "bind": "{}:{}".format(args.host, args.port),
+                "port": args.port, "queue_root": QUEUE_ROOT, "mode": MODE,
+                "lifecycle_log": csl.lifecycle_path(QUEUE_ROOT)}
+
+    # (3) In-process readiness (no HTTP self-request).
+    try:
+        build_health(QUEUE_ROOT, mode=MODE, durable=DURABLE)
+    except Exception as exc:
+        csl.record(QUEUE_ROOT, "shutdown_exception", **lc)
+        httpd.server_close()
+        csl.release_instance_lock(QUEUE_ROOT, args.port)
+        sys.stderr.write("REFUSED: readiness check failed ({}).\n".format(exc))
+        return 1
+
+    # (4) startup_ok only after bind + readiness.
+    if csl.record(QUEUE_ROOT, "startup_ok", **lc) is None:
+        LIFECYCLE_ERROR = "startup lifecycle write failed"
+
+    # (5) Poll the graceful-stop sentinel on a daemon thread.
+    stop_flag = {"stop": False}
+
+    def _watch_stop():
+        while not stop_flag["stop"]:
+            try:
+                if csl.stop_sentinel_targets_me(QUEUE_ROOT, args.port):
+                    httpd.shutdown()
+                    return
+            except Exception:
+                pass
+            time.sleep(2)
+
+    threading.Thread(target=_watch_stop, daemon=True).start()
+
     url = "http://{}:{}/".format(args.host, args.port)
     print("ClearWright control plane ({} mode, local reference implementation, early alpha)".format(MODE))
     print("Queue root: {} ({}{})".format(
@@ -1833,12 +1970,28 @@ def main():
         ", demo-seeded" if DEMO_SEEDED else ""))
     print("Open: {}".format(url))
     print("Press Ctrl+C to stop.")
+    terminal_written = [False]
+
+    def _terminal(event):
+        if not terminal_written[0]:
+            terminal_written[0] = True
+            csl.record(QUEUE_ROOT, event, **lc)
+
     try:
         httpd.serve_forever()
+        _terminal("shutdown_graceful")  # sentinel-triggered clean shutdown
     except KeyboardInterrupt:
         print("\nStopping.")
+        _terminal("shutdown_graceful")
+    except Exception:
+        _terminal("shutdown_exception")
+        raise
     finally:
+        stop_flag["stop"] = True
         httpd.server_close()
+        csl.clear_stop_sentinel(QUEUE_ROOT, args.port)
+        csl.release_instance_lock(QUEUE_ROOT, args.port)
+    return 0
 
 
 if __name__ == "__main__":

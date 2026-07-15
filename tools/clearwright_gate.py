@@ -216,11 +216,140 @@ def is_blocked(root, work_item_id):
 # Creation and transitions (the only disposition writers)
 # --------------------------------------------------------------------------- #
 
+# Gate escalation-identity version. Bumped ONLY when escalation semantics
+# change, so a changed governing rule can require fresh authority even when the
+# council, phase, outcome, round count, and scope are unchanged.
+GATE_POLICY_VERSION = 1
+
+
+def _dedup_key(subject, council_id, phase, outcome, rounds, scope_hash,
+               policy_version=GATE_POLICY_VERSION):
+    """Stable escalation identity over a versioned canonical-JSON serialization
+    (delimiter collisions impossible by construction). Case-insensitive fields
+    are casefolded; rounds is an integer; scope defaults to 'none'."""
+    import unicodedata
+
+    def norm(v, fold=False):
+        s = unicodedata.normalize("NFC", str(v if v is not None else ""))
+        return s.casefold() if fold else s
+
+    payload = {
+        "v": int(policy_version),
+        "subject": norm(subject),
+        "council": norm(council_id),
+        "phase": norm(phase, fold=True),
+        "outcome": norm(outcome, fold=True),
+        "rounds": int(rounds or 0),
+        "scope": norm(scope_hash or "none"),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def ensure_gate(root, work_item_id, council_id, phase, outcome,
+                substantive_round_count, scope_hash, invocation_id):
+    """Idempotent gate creation keyed on the unique escalation event. Runs the
+    entire read-check-write atomically under the interprocess writer lock, so
+    concurrent evaluations of the same terminal council create exactly ONE gate.
+
+    - An existing gate (resolved OR unresolved) with the same dedup key -> no
+      new gate; a deduplicated_events entry {council_id, trigger,
+      invocation_id} is appended (idempotent on that triple), and the original
+      authority linkage is untouched.
+    - A legacy gate lacking a stored dedup_key is matched by its normalized
+      field tuple under the frozen v1-era key and BACKFILLED, so a pre-upgrade
+      resolved gate cannot re-gate the first post-upgrade reconciliation.
+    - A genuinely new substantive round, outcome, or scope produces a new key
+      and a new gate.
+    invocation_id is required and must be non-null (the caller's council
+    invocation id, or a deterministic fallback)."""
+    if not invocation_id:
+        raise GateError({"ok": False, "error": "invocation_id_required"})
+    subject = canonical_subject(work_item_id)
+    key = _dedup_key(subject, council_id, phase, outcome,
+                     substantive_round_count, scope_hash)
+    with cwl.write_token(root, purpose="gate"):
+        record = _load_record(root, subject)
+        match = None
+        for gate in record["gates"]:
+            stored = gate.get("dedup_key")
+            if stored == key:
+                match = gate
+                break
+            if not stored and _legacy_matches(gate, subject, council_id, phase,
+                                               outcome, substantive_round_count,
+                                               scope_hash):
+                gate["dedup_key"] = key  # backfill the frozen match
+                match = gate
+                break
+        if match is not None:
+            events = match.setdefault("deduplicated_events", [])
+            triple = (council_id, "reconcile", invocation_id)
+            if not any((e.get("council_id"), e.get("trigger"),
+                        e.get("invocation_id")) == triple for e in events):
+                events.append({"council_id": council_id, "trigger": "reconcile",
+                               "invocation_id": invocation_id, "at": _now_iso()})
+            _write_record_locked(root, record)
+            return {"gate": match, "deduplicated": True}
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+        gate = {
+            "gate_id": "gate-" + stamp,
+            "subject": subject,
+            "work_item_id_as_seen": str(work_item_id),
+            "work_item_id": subject,
+            "council_id": council_id,
+            "phase": phase,
+            "outcome": outcome,
+            "dedup_key": key,
+            "created_at": _now_iso(),
+            "disposition": "unresolved",
+            "authority": None,
+        }
+        record["gates"].append(gate)
+        _write_record_locked(root, record)
+        return {"gate": gate, "deduplicated": False}
+
+
+def _legacy_matches(gate, subject, council_id, phase, outcome, rounds, scope_hash):
+    """Frozen v1-era field-tuple equivalence for a keyless legacy gate. A gate
+    missing council_id or outcome is EXCLUDED (returns False) so the system
+    fails toward a visible new gate, never toward suppressing an escalation."""
+    if not gate.get("council_id") or not gate.get("outcome"):
+        return False
+    legacy_key = _dedup_key(gate.get("subject") or subject, gate.get("council_id"),
+                            gate.get("phase"), gate.get("outcome"),
+                            gate.get("substantive_round_count", rounds),
+                            gate.get("scope_hash", scope_hash), policy_version=1)
+    this_key = _dedup_key(subject, council_id, phase, outcome, rounds,
+                          scope_hash, policy_version=1)
+    return legacy_key == this_key
+
+
+def _write_record_locked(root, record):
+    """Write a gate record WITHOUT acquiring the writer lock (the caller already
+    holds it). Mirrors _write_record's atomic replace + fsync."""
+    directory = os.path.join(root, GATES_DIR)
+    os.makedirs(directory, exist_ok=True)
+    path = _subject_path(root, record["subject"])
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(record, fh, indent=2)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    _fsync_dir(directory)
+
+
 def create_gate(root, work_item_id, council_id, phase, outcome):
     """Create an unresolved gate for the work item's canonical subject. At most
     one unresolved gate may exist per subject; a second creation is refused
     (defensive: council activity on a gated subject is already refused, so no
-    new gate source normally exists). Returns the created gate."""
+    new gate source normally exists). Returns the created gate.
+
+    Retained for compatibility; new escalation paths use ensure_gate for
+    idempotency."""
     subject = canonical_subject(work_item_id)
     record = _load_record(root, subject)
     for gate in record["gates"]:

@@ -346,19 +346,27 @@ def _gate_refusal(args, work_item_id):
 
 
 def _maybe_create_gate(root, council, outcome):
-    """Create a durable unresolved gate when a plan or incident council bound to
-    a work item ends operator_required or hard_gate. Verify councils use the
-    completion gate instead. Never raises into the council path."""
+    """Ensure ONE durable gate per unique escalation event when a plan or
+    incident council bound to a work item ends operator_required or hard_gate.
+    Idempotent: resolving a gate and later re-evaluating the SAME terminal
+    council (e.g. recording the final reconciliation) records a deduplicated
+    event, never a duplicate gate. Verify councils use the completion gate
+    instead. Never raises into the council path."""
     wid = council.get("work_item_id")
     phase = council.get("phase")
     if not wid or phase not in ("plan", "incident"):
         return
     if outcome.get("outcome") not in ("operator_required", "hard_gate"):
         return
+    rounds = council.get("rounds") or []
+    substantive = sum(1 for r in rounds if r.get("substantive", True))
+    scope_hash = council.get("approved_scope_sha256") or "none"
+    invocation_id = "gateeval-{}-{}-{}".format(
+        council.get("council_id"), outcome.get("outcome"), substantive)
     try:
-        if cwg.active_gate(root, wid) is None:
-            cwg.create_gate(root, wid, council.get("council_id"), phase,
-                            outcome.get("outcome"))
+        cwg.ensure_gate(root, wid, council.get("council_id"), phase,
+                        outcome.get("outcome"), substantive, scope_hash,
+                        invocation_id)
     except cwg.GateError:
         pass
 

@@ -197,6 +197,16 @@ def _derive_state(origin, bound, gate, councils, warnings, wid):
     if gate is not None:
         return "operator_required"
 
+    # A completed/answered item is terminal DONE. The completion path records an
+    # outbound "responded" message (not necessarily a closure field), and it
+    # takes precedence over a stale council outcome -- e.g. a plan council that
+    # ended operator_required but was later resolved and the item verified and
+    # completed must read DONE, not "planning".
+    responses = [m for m in bound if m.get("direction") == "outbound"
+                 or m.get("status") == "responded"]
+    if responses:
+        return "done"
+
     verify_c = next((c for c in councils if c.get("phase") == "verify"), None)
     if verify_c is not None and verify_c.get("outcome") != "agreement_threshold_met":
         return "verification"
@@ -204,10 +214,6 @@ def _derive_state(origin, bound, gate, councils, warnings, wid):
     if plan_c is not None and plan_c.get("outcome") != "agreement_threshold_met":
         return "planning"
 
-    responses = [m for m in bound if m.get("direction") == "outbound"
-                 or m.get("status") == "responded"]
-    if responses:
-        return "done"
     return "claimed" if claims else "open"
 
 

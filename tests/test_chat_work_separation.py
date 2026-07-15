@@ -2,9 +2,12 @@
 
 Chat is not work. A message may carry an optional intent: "chat" is plain
 durable conversation that never derives a work item and never raises an
-Attention state, and "request" is an actionable ask. When intent is absent a
-message stays actionable, so every existing tool, relay, and script keeps its
-behavior unchanged. The console composer defaults to Message (chat); Ask agent
+Attention state, and "request" is an actionable ask. Originally (PR #24) an
+absent intent stayed actionable; since the stabilization identity-version 2
+cutover a NEW message derives a work item only with an explicit "request"
+intent (the closed origin rule in tools/clearwright_work.py), while
+pre-cutover records keep the historical convention through the frozen legacy
+manifest. The console composer defaults to Message (chat); Ask agent
 and Create work item post actionable requests; Request clearance files an RTA.
 """
 import os

@@ -21,9 +21,13 @@ demo conversation lives only in demo mode.
 
 A message may also carry an optional intent: "chat" marks plain conversation
 that needs no action, and "request" marks an actionable request. Chat is not
-work: an inbound message with intent "chat" never derives a work item. When
-intent is absent the message stays actionable, so existing worker tools,
-relays, and scripts keep their behavior without any change.
+work: an inbound message with intent "chat" never derives a work item. Since
+the identity-version 2 cutover (the closed origin rule in
+tools/clearwright_work.py), ONLY an inbound message with an explicit intent
+of "request" derives a work item: a new message posted without an intent is
+durable conversation, not work. Pre-cutover records (no identity_version)
+keep the historical convention -- absent intent meant actionable -- through
+the frozen legacy-origin manifest.
 
 The control plane server imports build_message, write_message, and read_messages
 for its /api/messages endpoints, so the CLI and the API share one implementation.
@@ -140,7 +144,9 @@ def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
     content exceeds MESSAGE_MAX_BYTES. A new thread_id is generated when one
     is not supplied. Only a non-empty packet_id, work_item_id, intent, and
     idempotency_key are included. intent "chat" marks plain conversation
-    (never a work item); absent means actionable. The stored ``message`` field
+    (never a work item); under the v2 closed origin rule only an explicit
+    intent of "request" makes a new inbound message an actionable origin, so
+    an absent intent means conversation, not work. The stored ``message`` field
     is ALWAYS the canonical (newline-normalized) content, so authority parsing
     and every later comparison read the same bytes that were counted and
     validated -- never a clipped or differently-encoded preview."""
@@ -424,8 +430,9 @@ def _add_write_args(sub, thread_required):
                      help="Optional source label (default: {}).".format(DEFAULT_SOURCE))
     sub.add_argument("--intent", default=None, choices=INTENTS,
                      help=("Optional intent: chat is plain conversation (never "
-                           "a work item); request is actionable. Omitted means "
-                           "actionable, so existing callers are unchanged."))
+                           "a work item); request is actionable. A new (v2) "
+                           "message derives a work item ONLY with an explicit "
+                           "request intent; omitted means conversation."))
     sub.add_argument("--simulated", action="store_true",
                      help="Mark this message as simulated/demo, not real communication.")
     sub.add_argument("--dry-run", action="store_true",

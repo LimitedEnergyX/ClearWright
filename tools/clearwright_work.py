@@ -506,20 +506,30 @@ def progress_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE
 
 def find_work_item(root, work_item_id):
     """Return the work item matching work_item_id, or None. Resolves over ALL
-    items (terminal, malformed, legacy_ambiguity included) so gated, closed, and
-    ambiguous items remain discoverable rather than vanishing from lookup."""
+    derived items (terminal, malformed, legacy_ambiguity included) so gated,
+    closed, and ambiguous items remain discoverable rather than vanishing from
+    lookup.
+
+    Packet-kind ids resolve through the derived list; a message id resolves only
+    when it is an ACTUAL origin (an actionable request under the closed identity
+    rule or the frozen legacy manifest). A non-origin message -- a chat, an
+    authority record, or a reviewer post -- is deliberately NOT resolvable, so a
+    claim/response/task-state can never bind to a message that derive_work_items
+    correctly excludes."""
     for item in derive_work_items(root, include="all"):
         if item.get("work_item_id") == work_item_id:
             return item
-    # A message work item whose origin message exists on disk but is not (yet)
-    # an actionable origin still resolves for binding purposes.
     mid = cwid.message_id_of(work_item_id)
     if mid:
-        for m in cwm.read_messages(root):
-            if m.get("message_id") == mid:
+        messages = cwm.read_messages(root)
+        origins = _origin_message_ids(root, messages)
+        if mid in origins:
+            origin = next((m for m in messages if m.get("message_id") == mid), None)
+            if origin is not None:
                 return _work_item(work_item_id, "message", "open", "respond",
-                                  thread_id=m.get("thread_id"),
-                                  title=m.get("message"), created_at=m.get("at"))
+                                  thread_id=origin.get("thread_id"),
+                                  title=origin.get("message"),
+                                  created_at=origin.get("at"))
     return None
 
 

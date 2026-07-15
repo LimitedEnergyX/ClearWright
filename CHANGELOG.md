@@ -5,6 +5,23 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Stabilization verification fixes (verify council round 1, work item
+  message:msg-20260715T033322041191). The stop helper
+  (`tools/stop-clearwright.ps1`) now copies the server's own recorded
+  process-start token from the instance-lock file into the stop sentinel
+  instead of re-deriving a PowerShell ISO timestamp the server would never
+  match, so a graceful stop is actually graceful instead of silently falling
+  back to force termination. `find_work_item` no longer resolves arbitrary
+  message ids: a message id resolves only when it is an actual actionable
+  origin (closed v2 identity rule or the frozen legacy manifest), so direct
+  claims/responses/task-state can never bind to chat, authority, or reviewer
+  records that derivation correctly excludes. Intent documentation
+  (module/CLI/README) now states the v2 closed origin rule (a new message is
+  actionable only with an explicit `request` intent). The unknown-closure
+  regression test now actually writes the unrecognized closure record and
+  asserts both continued visibility and the `unknown_closure_value` integrity
+  warning; new regression tests pin the lock-to-sentinel start-time contract
+  and origin-only direct lookup.
 - Local Council site information-architecture completion (corrective
   follow-up to the hardening/redesign PR, same governed work item). The
   operator desktop is now three regions: a compact grouped work queue

@@ -134,6 +134,68 @@ class OriginRuleTests(unittest.TestCase):
         self.assertEqual(len(cww.derive_work_items(self.root)), 1)
 
 
+class DirectLookupOriginRuleTests(unittest.TestCase):
+    """A: find_work_item honors the closed origin rule. A NON-origin message id
+    (chat, no-intent authority text, internal/progress note) must never resolve,
+    so direct claims/responses/task-state cannot bind to records that
+    derive_work_items correctly excludes. Regression for the over-permissive
+    direct message fallback found by verify council round 1."""
+
+    def setUp(self):
+        self.root = queue("stab_dl_", self)
+
+    def _direct(self, mid):
+        return cww.find_work_item(self.root, cwid.work_item_id_for(mid))
+
+    def test_no_intent_authority_text_does_not_resolve(self):
+        r = server.do_message(self.root, {
+            "actor": "OPERATOR-0001", "role": "operator",
+            "source": "operator-ui",
+            "message": "I authorize proceeding on the gated item."})
+        self.assertIsNone(self._direct(r["message"]["message_id"]))
+
+    def test_chat_does_not_resolve(self):
+        r = server.do_message(self.root, {
+            "actor": "OPERATOR-0001", "role": "operator",
+            "source": "operator-ui", "intent": "chat",
+            "message": "just conversation"})
+        self.assertIsNone(self._direct(r["message"]["message_id"]))
+
+    def test_internal_note_does_not_resolve(self):
+        origin = request_msg(self.root, "Governed request.")
+        note = cwm.build_message("claude", "progress note", role="agent",
+                                 thread_id=origin["thread_id"],
+                                 direction="internal",
+                                 work_item_id=cwid.work_item_id_for(
+                                     origin["message_id"]))
+        cwm.write_message(self.root, note)
+        self.assertIsNone(self._direct(note["message_id"]))
+
+    def test_origin_still_resolves(self):
+        origin = request_msg(self.root, "Governed request.")
+        item = self._direct(origin["message_id"])
+        self.assertIsNotNone(item)
+        self.assertEqual(item["work_item_id"],
+                         cwid.work_item_id_for(origin["message_id"]))
+
+    def test_legacy_manifest_origin_still_resolves(self):
+        directory = cwm.comms_dir(self.root)
+        os.makedirs(directory, exist_ok=True)
+        mid = "msg-" + cwm._stamp()
+        rec = {"message_id": mid, "thread_id": "thr-legacy-dl",
+               "at": cwm._now_iso(), "actor": "OPERATOR-0001",
+               "role": "operator", "direction": "inbound", "status": "posted",
+               "message": "Legacy work request.", "source": "operator-ui",
+               "simulated": False}
+        with open(os.path.join(directory, mid + ".json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        cwid.migrate_legacy_origins(self.root)
+        item = self._direct(mid)
+        self.assertIsNotNone(item)
+        self.assertEqual(item["work_item_id"], cwid.work_item_id_for(mid))
+
+
 class LegacyManifestTests(unittest.TestCase):
     """A: legacy (pre-cutover) messages resolve through a frozen, audited
     migration manifest; deletion is surfaced, never silently regenerated."""
@@ -195,17 +257,25 @@ class QueueIntegrityTests(unittest.TestCase):
     def test_unknown_closure_stays_visible(self):
         m = request_msg(self.root, "Task with a weird closure.")
         wid = cwid.work_item_id_for(m["message_id"])
-        # Post a closure record with an unrecognized value bound to the item.
+        # WRITE a closure record with an UNRECOGNIZED value bound to the item.
+        # build_message validates closure, so a rogue/legacy writer is
+        # simulated by mutating the record before the durable write.
         bad = cwm.build_message("OPERATOR-0001", "closing oddly", role="operator",
                                 thread_id=m["thread_id"], direction="internal",
                                 work_item_id=wid)
-        bad["closure"] = "closed_by_operator"  # recognized
-        cwm.write_message(self.root, cwm.build_message(
-            "OPERATOR-0001", "note", role="operator", thread_id=m["thread_id"],
-            direction="internal", work_item_id=wid))
-        # An item with only an unknown-closure remains nonterminal + warned.
-        items = {it["work_item_id"] for it in cww.derive_work_items(self.root)}
+        bad["closure"] = "resolved_externally"  # NOT in RECOGNIZED_CLOSURES
+        cwm.write_message(self.root, bad)
+        # The item stays visible and NONterminal, and the unknown value is
+        # surfaced as an integrity warning instead of terminating the item.
+        items = {it["work_item_id"]: it for it in cww.derive_work_items(self.root)}
         self.assertIn(wid, items)
+        self.assertNotIn(items[wid]["status"], ("done", "closed", "superseded"))
+        warns = [w for w in cww.integrity_warnings(self.root)
+                 if w.get("code") == "unknown_closure_value"
+                 and w.get("work_item_id") == wid]
+        self.assertEqual(len(warns), 1)
+        self.assertEqual(warns[0].get("value"), "resolved_externally")
+        self.assertEqual(warns[0].get("record_id"), bad["message_id"])
 
     def test_integrity_warnings_shape(self):
         request_msg(self.root, "A task.")
@@ -380,6 +450,56 @@ class LifecycleTests(unittest.TestCase):
     def test_canonical_logs_dir(self):
         expected = os.path.join(os.path.dirname(os.path.abspath(self.root)), "logs")
         self.assertEqual(csl.logs_dir(self.root), expected)
+
+
+class StopSentinelContractTests(unittest.TestCase):
+    """E: the stop helper's sentinel matches the server's recorded identity.
+    Regression for verify council round 1 (blocking): the helper used to
+    re-derive start_time as a PowerShell ISO timestamp, which never matched the
+    server's platform-specific process-start token, so every 'graceful' stop
+    silently fell through to force termination."""
+
+    PORT = 9787
+
+    def setUp(self):
+        self.root = queue("stab_ss_", self)
+
+    def test_lock_records_the_exact_self_start_token(self):
+        ok, _ = csl.acquire_instance_lock(self.root, self.PORT)
+        self.assertTrue(ok)
+        self.addCleanup(csl.release_instance_lock, self.root, self.PORT)
+        lock = json.loads(read(csl.instance_lock_path(self.root, self.PORT)))
+        self.assertEqual(lock["pid"], os.getpid())
+        self.assertEqual(lock["start_time"], csl._self_start_time())
+
+    def test_sentinel_copied_from_lock_is_accepted(self):
+        # Exactly what stop-clearwright.ps1 does now: copy pid + start_time
+        # VERBATIM from the instance lock into the sentinel.
+        ok, _ = csl.acquire_instance_lock(self.root, self.PORT)
+        self.assertTrue(ok)
+        self.addCleanup(csl.release_instance_lock, self.root, self.PORT)
+        lock = json.loads(read(csl.instance_lock_path(self.root, self.PORT)))
+        csl.write_stop_sentinel(self.root, self.PORT,
+                                lock["pid"], lock["start_time"])
+        self.assertTrue(csl.stop_sentinel_targets_me(self.root, self.PORT))
+        csl.clear_stop_sentinel(self.root, self.PORT)
+
+    def test_iso_timestamp_sentinel_rejected_and_removed(self):
+        # The pre-fix helper wrote an ISO-8601 UTC timestamp; the server must
+        # reject the mismatched token (and clean it up), never honor it.
+        os.makedirs(csl.logs_dir(self.root), exist_ok=True)
+        csl.write_stop_sentinel(self.root, self.PORT, os.getpid(),
+                                "2026-07-15T05:53:33.0000000Z")
+        self.assertFalse(csl.stop_sentinel_targets_me(self.root, self.PORT))
+        self.assertFalse(
+            os.path.isfile(csl.stop_sentinel_path(self.root, self.PORT)))
+
+    def test_stop_helper_copies_lock_start_time(self):
+        stop = read(os.path.join(TOOLS, "stop-clearwright.ps1"))
+        self.assertIn("clearwright-{0}.lock", stop)
+        self.assertIn("$lock.start_time", stop)
+        # The regression marker: never re-derive the token from Get-Process.
+        self.assertNotIn("$proc.StartTime", stop)
 
 
 class LauncherSourceTests(unittest.TestCase):

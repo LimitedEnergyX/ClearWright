@@ -47,6 +47,7 @@ import clearwright_message as cwm
 import clearwright_claim as cwc
 import clearwright_gate as cwg
 import clearwright_writer_lock as cwl
+import clearwright_identity as cwid
 
 LANES = ["clearance_outbox", "clearance_in_progress",
          "clearance_done", "clearance_failed"]
@@ -114,10 +115,112 @@ def _work_item(work_item_id, kind, status, next_action, **extra):
 _KIND_ORDER = {"packet": 0, "rfi": 1, "in_progress": 2, "message": 3}
 
 
-def derive_work_items(root):
-    """Return the derived work-item list, most actionable first. Nothing is
-    written; the list is computed from packets and messages on disk."""
+# Terminal states are hidden by the default (nonterminal) derivation but always
+# resolvable via include="all". operator_required / verification / planning /
+# legacy_ambiguity are NONterminal and always listed, even without a claim, so a
+# governed item never disappears because it is gated, unclaimed, or malformed.
+_TERMINAL_STATES = frozenset(("done", "closed", "superseded"))
+
+
+def _origin_message_ids(root, messages):
+    """The set of message ids that are ACTIONABLE origins under the closed
+    identity rule (v2) or the frozen legacy manifest."""
+    legacy = cwid.legacy_origin_ids(root)
+    origins = set()
+    for m in messages:
+        mid = m.get("message_id")
+        if not mid:
+            continue
+        if cwid.is_v2(m):
+            if cwid.v2_is_origin(m):
+                origins.add(mid)
+        elif mid in legacy:
+            origins.add(mid)
+    return origins
+
+
+def _bound(records, work_item_id, thread_id, single_thread_item):
+    """Records bound to this work item: those carrying work_item_id ==
+    work_item_id, plus (legacy only) records in a single-item thread that carry
+    no work_item_id. Returns (bound_list, had_unbound_in_multi)."""
+    bound, unbound_multi = [], False
+    for r in records:
+        rwid = r.get("work_item_id")
+        if rwid == work_item_id:
+            bound.append(r)
+        elif not rwid and r.get("thread_id") == thread_id:
+            if single_thread_item:
+                bound.append(r)  # unambiguous legacy: one item in the thread
+            else:
+                unbound_multi = True  # ambiguous: do not select arbitrarily
+    return bound, unbound_multi
+
+
+def _derive_state(origin, bound, gate, councils, warnings, wid):
+    """Deterministic state precedence for one message work item. Appends any
+    integrity warnings (which annotate, never override, the derived state)."""
+    if origin is None:
+        return "malformed"
+
+    closures = [m for m in bound if m.get("closure")]
+    recognized = [m for m in closures
+                  if str(m.get("closure") or "").strip().casefold()
+                  in cwid.RECOGNIZED_CLOSURES]
+    unknown = [m for m in closures if m not in recognized]
+    for m in unknown:
+        warnings.append({"code": "unknown_closure_value", "work_item_id": wid,
+                         "record_id": m.get("message_id"),
+                         "value": m.get("closure")})
+    if len(recognized) > 1:
+        warnings.append({"code": "conflicting_closures", "work_item_id": wid,
+                         "record_ids": [m.get("message_id") for m in recognized]})
+
+    claims = [m for m in bound if m.get("status") == "claimed"]
+    if len(claims) > 1:
+        warnings.append({"code": "duplicate_claim", "work_item_id": wid,
+                         "record_ids": [m.get("message_id") for m in claims]})
+
+    if recognized:
+        winner = max(recognized, key=lambda m: m.get("at") or "")
+        cval = str(winner.get("closure") or "").strip().casefold()
+        reason = str((winner.get("closure_meta") or {}).get("reason")
+                     or winner.get("message") or "").casefold()
+        disp = str((winner.get("closure_meta") or {}).get("disposition") or "").casefold()
+        superseded = disp == "superseded" or "supersede" in reason
+        if gate is not None:
+            warnings.append({"code": "gate_open_at_closure", "work_item_id": wid,
+                             "gate_id": gate.get("gate_id")})
+        if cval == "closed_by_operator":
+            return "superseded" if superseded else "closed"
+        return "done"
+
+    if gate is not None:
+        return "operator_required"
+
+    verify_c = next((c for c in councils if c.get("phase") == "verify"), None)
+    if verify_c is not None and verify_c.get("outcome") != "agreement_threshold_met":
+        return "verification"
+    plan_c = next((c for c in councils if c.get("phase") == "plan"), None)
+    if plan_c is not None and plan_c.get("outcome") != "agreement_threshold_met":
+        return "planning"
+
+    responses = [m for m in bound if m.get("direction") == "outbound"
+                 or m.get("status") == "responded"]
+    if responses:
+        return "done"
+    return "claimed" if claims else "open"
+
+
+def derive_work_items(root, include="nonterminal"):
+    """Return the derived work-item list. include="nonterminal" (default) lists
+    open/claimed/planning/operator_required/verification/legacy_ambiguity/
+    malformed items; include="all" also lists done/closed/superseded with their
+    true state. Nothing is written. Message work items are MESSAGE-SCOPED: every
+    actionable message derives its own item, so two actionable messages in one
+    thread remain fully independent."""
+    import clearwright_review_council as cwrc
     items = []
+    warnings = []
     for p in _read_packets(root):
         pid, status, lane = p["packet_id"], p["status"], p["lane"]
         if not pid:
@@ -136,33 +239,41 @@ def derive_work_items(root):
                 "post progress or complete",
                 packet_id=pid, title=p["title"], summary=p["title"]))
 
-    # Message threads: an inbound ACTIONABLE request with no response is open
-    # work. Plain chat (intent "chat") is conversation, not work; a chat thread
-    # becomes work only when an actionable follow-up is posted into it.
     messages = cwm.read_messages(root)
-    threads = {}
-    order = []
-    for m in messages:
-        tid = m.get("thread_id") or "thr-unknown"
-        if tid not in threads:
-            threads[tid] = []
-            order.append(tid)
-        threads[tid].append(m)
-    for tid in order:
-        msgs = threads[tid]
-        origin = next((m for m in msgs if m.get("direction") == "inbound"
-                       and m.get("intent") != "chat"), None)
-        if origin is None:
-            continue  # chat-only or worker-only thread, not an actionable request
-        has_response = any(m.get("direction") == "outbound"
-                           or m.get("status") == "responded" for m in msgs)
-        if has_response:
-            continue  # the request was answered; the thread is closed
-        claim_msg = next((m for m in msgs if m.get("status") == "claimed"), None)
-        status = "claimed" if claim_msg else "open"
+    by_id = {m.get("message_id"): m for m in messages if m.get("message_id")}
+    origins = _origin_message_ids(root, messages)
+
+    # How many origins share each thread -> single-item threads bind unbound
+    # legacy records; multi-item threads flag legacy ambiguity.
+    thread_origin_count = {}
+    for mid in origins:
+        tid = by_id[mid].get("thread_id") or "thr-unknown"
+        thread_origin_count[tid] = thread_origin_count.get(tid, 0) + 1
+
+    all_councils = cwrc.list_councils(root)
+
+    for mid in origins:
+        origin = by_id[mid]
+        wid = cwid.work_item_id_for(mid)
+        tid = origin.get("thread_id") or "thr-unknown"
+        single = thread_origin_count.get(tid, 0) <= 1
+        bound, unbound_multi = _bound(messages, wid, tid, single)
+        if unbound_multi:
+            warnings.append({"code": "legacy_ambiguity", "work_item_id": wid,
+                             "thread_id": tid})
+        try:
+            gate = cwg.active_gate(root, wid)
+        except Exception:
+            gate = None
+        councils = [c for c in all_councils if c.get("work_item_id") == wid]
+        # Legacy fallback: a single-item thread may hold thread-bound councils.
+        if not councils and single:
+            councils = [c for c in all_councils if c.get("thread_id") == tid]
+        state = _derive_state(origin, bound, gate, councils, warnings, wid)
+
+        claim_msg = next((m for m in bound if m.get("status") == "claimed"), None)
         items.append(_work_item(
-            "message:{}".format(origin.get("message_id")), "message", status,
-            "respond",
+            wid, "message", state, _next_action_for(state),
             thread_id=tid, packet_id=origin.get("packet_id"),
             actor=origin.get("actor"), source=origin.get("source"),
             title=origin.get("message"), summary=origin.get("message"),
@@ -170,9 +281,62 @@ def derive_work_items(root):
             claimed_by=(claim_msg or {}).get("actor"),
             claimed_at=(claim_msg or {}).get("at")))
 
+    if include != "all":
+        items = [it for it in items if it["status"] not in _TERMINAL_STATES]
+
     items.sort(key=lambda it: (_KIND_ORDER.get(it["kind"], 9),
                                _neg_time(it.get("created_at"))))
     return items
+
+
+_NEXT_ACTION = {
+    "open": "respond", "claimed": "respond", "planning": "continue plan council",
+    "operator_required": "resolve gate (operator authority required)",
+    "verification": "run or finish verification", "done": "none (terminal)",
+    "closed": "none (closed by operator)", "superseded": "none (superseded)",
+    "malformed": "inspect origin record",
+}
+
+
+def _next_action_for(state):
+    return _NEXT_ACTION.get(state, "respond")
+
+
+def integrity_warnings(root):
+    """Machine-readable derived-queue integrity defects. Includes any
+    legacy-manifest-missing condition plus per-item collision warnings."""
+    warnings = []
+    ms = cwid.manifest_status(root)
+    if ms:
+        warnings.append({"code": ms})
+    # Re-run derivation over ALL items to collect item-level warnings.
+    import clearwright_review_council as cwrc
+    messages = cwm.read_messages(root)
+    by_id = {m.get("message_id"): m for m in messages if m.get("message_id")}
+    origins = _origin_message_ids(root, messages)
+    thread_origin_count = {}
+    for mid in origins:
+        tid = by_id[mid].get("thread_id") or "thr-unknown"
+        thread_origin_count[tid] = thread_origin_count.get(tid, 0) + 1
+    all_councils = cwrc.list_councils(root)
+    for mid in origins:
+        origin = by_id[mid]
+        wid = cwid.work_item_id_for(mid)
+        tid = origin.get("thread_id") or "thr-unknown"
+        single = thread_origin_count.get(tid, 0) <= 1
+        bound, unbound_multi = _bound(messages, wid, tid, single)
+        if unbound_multi:
+            warnings.append({"code": "legacy_ambiguity", "work_item_id": wid,
+                             "thread_id": tid})
+        try:
+            gate = cwg.active_gate(root, wid)
+        except Exception:
+            gate = None
+        councils = [c for c in all_councils if c.get("work_item_id") == wid]
+        if not councils and single:
+            councils = [c for c in all_councils if c.get("thread_id") == tid]
+        _derive_state(origin, bound, gate, councils, warnings, wid)
+    return warnings
 
 
 def _neg_time(at):
@@ -249,6 +413,7 @@ def claim_work_item(root, work_item_id, actor, role=cwm.DEFAULT_ROLE,
             return {"ok": False, "error": "claim tool refused the packet claim (exit {})".format(code)}
         packet_claimed = ref
 
+    cwid.ensure_migrated(root)
     thread_id, packet_id = _resolve_target(root, work_item_id)
     note = ("claimed CTA packet " + ref) if kind == "packet" else ("claimed work item " + str(work_item_id))
     try:
@@ -283,6 +448,7 @@ def respond_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE,
         return blocked
     if find_work_item(root, work_item_id) is None:
         return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
+    cwid.ensure_migrated(root)
     thread_id, packet_id = _resolve_target(root, work_item_id)
     try:
         msg = cwm.build_message(
@@ -313,6 +479,7 @@ def progress_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE
         return blocked
     if find_work_item(root, work_item_id) is None:
         return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
+    cwid.ensure_migrated(root)
     thread_id, packet_id = _resolve_target(root, work_item_id)
     try:
         msg = cwm.build_message(
@@ -332,10 +499,21 @@ def progress_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE
 
 
 def find_work_item(root, work_item_id):
-    """Return the derived work item matching work_item_id, or None."""
-    for item in derive_work_items(root):
+    """Return the work item matching work_item_id, or None. Resolves over ALL
+    items (terminal, malformed, legacy_ambiguity included) so gated, closed, and
+    ambiguous items remain discoverable rather than vanishing from lookup."""
+    for item in derive_work_items(root, include="all"):
         if item.get("work_item_id") == work_item_id:
             return item
+    # A message work item whose origin message exists on disk but is not (yet)
+    # an actionable origin still resolves for binding purposes.
+    mid = cwid.message_id_of(work_item_id)
+    if mid:
+        for m in cwm.read_messages(root):
+            if m.get("message_id") == mid:
+                return _work_item(work_item_id, "message", "open", "respond",
+                                  thread_id=m.get("thread_id"),
+                                  title=m.get("message"), created_at=m.get("at"))
     return None
 
 

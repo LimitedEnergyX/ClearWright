@@ -56,7 +56,7 @@ class ConversationsEndpointTests(unittest.TestCase):
     def setUp(self):
         self.root = operator_queue("cv_", self)
         # Conversation 1: full cycle with a mocked Codex review.
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "source": "operator-ui",
                                       "message": "Conv one: please review."})
         w1 = cww.derive_work_items(self.root)[0]["work_item_id"]
@@ -70,12 +70,12 @@ class ConversationsEndpointTests(unittest.TestCase):
         cww.respond_work_item(self.root, w1, "claude", "Conv one answered.")
         self.t1 = cwm.read_messages(self.root)[0]["thread_id"]
         # Conversation 2: claimed only.
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "source": "operator-ui", "message": "Conv two: pending."})
         w2 = [i for i in cww.derive_work_items(self.root) if i["kind"] == "message"][0]["work_item_id"]
         cww.claim_work_item(self.root, w2, "claude")
         # Conversation 3: open.
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "source": "claude-code-relay", "message": "Conv three: open."})
 
     def convs(self, **kw):

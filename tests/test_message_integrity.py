@@ -129,7 +129,7 @@ class DoMessageTests(unittest.TestCase):
 
     def test_normal_post_succeeds_with_identity_and_hash(self):
         result = server.do_message(self.root, {
-            "actor": "OPERATOR-0001", "message": "hello", "role": "operator",
+            "actor": "OPERATOR-0001", "message": "hello", "role": "operator", "intent": "request",
         })
         self.assertTrue(result["ok"])
         self.assertIn("message_id", result)

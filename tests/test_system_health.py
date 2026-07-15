@@ -88,7 +88,7 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(h["agent_event_count"], 1)
 
     def test_work_item_run_counts_and_latest_timestamp(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Open request."})
         h = health(self.root)
         self.assertEqual(h["work_items_open"], 1)
@@ -106,7 +106,7 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(h["errors"], [])
 
     def test_yellow_when_open_work_items(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Open request."})
         h = health(self.root)
         self.assertEqual(h["status"], "yellow")
@@ -152,7 +152,7 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(calls, [1])
 
     def test_health_does_not_mutate_queue(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Open request."})
         server.do_request(self.root, dict(REQUEST_FIELDS))
         before = snapshot(self.root)

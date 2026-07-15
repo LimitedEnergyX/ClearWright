@@ -359,7 +359,7 @@ class TaskStateModelTests(unittest.TestCase):
 
     def test_request_phase_and_next_action(self):
         server.do_message(self.root, {"actor": "OPERATOR-0001",
-                                      "role": "operator",
+                                      "role": "operator", "intent": "request",
                                       "source": "operator-ui",
                                       "message": "Please review the docs"})
         tid = server.build_active_run(self.root)["thread_id"]
@@ -372,7 +372,7 @@ class TaskStateModelTests(unittest.TestCase):
 
     def test_claimed_next_action_is_plan_council(self):
         server.do_message(self.root, {"actor": "OPERATOR-0001",
-                                      "role": "operator",
+                                      "role": "operator", "intent": "request",
                                       "source": "operator-ui",
                                       "message": "Actionable request"})
         wid = cww.derive_work_items(self.root)[0]["work_item_id"]
@@ -397,7 +397,7 @@ class LedgerModelTests(unittest.TestCase):
 
     def test_messages_and_events_share_one_ledger(self):
         server.do_message(self.root, {"actor": "OPERATOR-0001",
-                                      "role": "operator",
+                                      "role": "operator", "intent": "request",
                                       "source": "operator-ui",
                                       "message": "ledger message row"})
         server.do_agent_event(self.root, {"actor": "agent/worker",

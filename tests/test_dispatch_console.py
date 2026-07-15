@@ -77,7 +77,7 @@ class OperatorMessageTests(unittest.TestCase):
 
     def test_work_items_include_unclaimed_operator_message(self):
         server.do_message(self.root, {
-            "actor": "OPERATOR-0001", "role": "operator", "source": "operator-ui",
+            "actor": "OPERATOR-0001", "role": "operator", "intent": "request", "source": "operator-ui",
             "message": "Review this repo under CW."})
         items = cww.derive_work_items(self.root)
         msgs = [i for i in items if i["kind"] == "message"]
@@ -94,7 +94,7 @@ class WorkItemLifecycleTests(unittest.TestCase):
         self.root, *_ = server.resolve_queue(self.base)  # operator
 
     def test_claim_records_without_losing_original(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Review this repo under CW."})
         wid = [i for i in cww.derive_work_items(self.root) if i["kind"] == "message"][0]["work_item_id"]
         res = cww.claim_work_item(self.root, wid, "claude")
@@ -111,7 +111,7 @@ class WorkItemLifecycleTests(unittest.TestCase):
         self.assertEqual(item["claimed_by"], "claude")
 
     def test_respond_writes_durable_response_in_same_thread(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Review this repo under CW."})
         origin = cwm.read_messages(self.root)[0]
         wid = "message:" + origin["message_id"]
@@ -125,13 +125,13 @@ class WorkItemLifecycleTests(unittest.TestCase):
         self.assertEqual([i for i in cww.derive_work_items(self.root) if i["kind"] == "message"], [])
 
     def test_work_item_links_to_packet_id(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "About this packet", "packet_id": "cw-harness-301"})
         item = [i for i in cww.derive_work_items(self.root) if i["kind"] == "message"][0]
         self.assertEqual(item["packet_id"], "cw-harness-301")
 
     def test_missing_actor_claim_fails_safely(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "hi"})
         wid = [i for i in cww.derive_work_items(self.root) if i["kind"] == "message"][0]["work_item_id"]
         res = cww.claim_work_item(self.root, wid, "  ")
@@ -207,7 +207,7 @@ class HistoryTests(unittest.TestCase):
 
     def test_history_includes_all_three_sources(self):
         server.do_request(self.root, dict(REQUEST_FIELDS))
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "note", "packet_id": "cw-harness-301"})
         server.do_agent_event(self.root, {"actor": "claude", "message": "looked",
                                           "packet_id": "cw-harness-301"})
@@ -217,7 +217,7 @@ class HistoryTests(unittest.TestCase):
         self.assertGreaterEqual(len(h["events"]), 1)
 
     def test_history_filters(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "for p1", "packet_id": "cw-1"})
         server.do_message(self.root, {"actor": "claude", "message": "other", "packet_id": "cw-2"})
         by_packet = server.build_history(self.root, packet_id="cw-1")
@@ -248,7 +248,7 @@ class CliTests(unittest.TestCase):
                               capture_output=True, encoding="utf-8", errors="replace")
 
     def test_cli_list_claim_respond(self):
-        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+        server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator", "intent": "request",
                                       "message": "Review this repo under CW."})
         listed = self._run("list", self.root)
         self.assertEqual(listed.returncode, 0, listed.stderr)

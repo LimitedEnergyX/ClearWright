@@ -42,6 +42,11 @@ import clearwright_writer_lock as cwl
 
 COMMS_DIR = "communications"
 DEFAULT_ROLE = "agent"
+
+# Message identity version. v2 introduces the closed origin rule for
+# work-item derivation (see tools/clearwright_work.py). Messages written before
+# this cutover have no identity_version and keep the historical convention.
+IDENTITY_VERSION = 2
 DEFAULT_SOURCE = "local-adapter"
 DEFAULT_DIRECTION = "inbound"
 DEFAULT_STATUS = "posted"
@@ -169,6 +174,14 @@ def build_message(actor, message, role=DEFAULT_ROLE, packet_id=None,
         "message_id": "msg-" + stamp,
         "thread_id": thread,
         "at": _now_iso(),
+        # Identity-version cutover (stabilization): every message written after
+        # this change carries identity_version >= 2, so work-item derivation can
+        # apply the closed origin rule (intent == "request" only) to new records
+        # while preserving the historical convention for pre-cutover records.
+        # Durable messages are append-only: write_message never rewrites an
+        # existing record, and claims/responses/closures are always DISTINCT
+        # records, so an origin's stored fields are immutable after write.
+        "identity_version": IDENTITY_VERSION,
         "actor": str(actor).strip(),
         "role": (str(role).strip() or DEFAULT_ROLE) if role else DEFAULT_ROLE,
         "direction": direction,

@@ -317,6 +317,12 @@ class ExecuteAndZeroDataLossTests(ArchiveTestBase):
                              body="I authorize archive execution for hash " + plan_hash)
         cwa.write_approval(self.root, plan_hash, auth["message_id"], "OPERATOR-0001")
 
+        # Pre-warm the persistent registry.lock file (created on first lock
+        # acquisition) so the zero-data-loss byte counts below compare like
+        # with like; this fixture seeds messages without tokens, so execute()
+        # would otherwise be the first-ever acquisition on this queue root.
+        with cwl.write_token(self.root, purpose="count-warmup"):
+            pass
         before_active = self._count_files(self.root)
         before_archive = self._count_files(cwa.archive_root(self.root))
 

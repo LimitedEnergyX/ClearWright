@@ -948,7 +948,8 @@ def execute(root, inventory_path=DEFAULT_INVENTORY_PATH,
         return {"ok": False, "error": verr, "plan_hash": plan_hash}
     opid = new_opid()
     mdir = month_dir(root, at=now)
-    flag = cwl.acquire_exclusive(root, opid, deadline_seconds=deadline_seconds)
+    flag = cwl.acquire_exclusive(root, opid, deadline_seconds=deadline_seconds,
+                                 pending_path=_journal_path(mdir, opid, "pending"))
     try:
         fresh = generate_plan(root, inventory, now=now)
         if not fresh.get("ok") or fresh["plan_hash"] != plan_hash:

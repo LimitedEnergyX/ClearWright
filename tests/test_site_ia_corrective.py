@@ -112,11 +112,13 @@ class TaskHeaderTests(SourceTestCase):
             self.assertIn(field, self.appjs)
 
     def test_single_shared_selection(self):
-        # One selection variable feeds task state, conversation, and queue
-        # highlighting; there is no per-view selection to drift.
-        self.assertIn("selectedConvThread", self.appjs)
+        # Selection is keyed on the canonical work-item id (primary), with the
+        # thread carried alongside only for the conversation timeline; there is
+        # no per-view selection to drift.
+        self.assertIn("selectedWorkItemId", self.appjs)
         self.assertNotIn("selectedRunThread", self.appjs)
-        self.assertIn("/api/task-state?thread_id=", self.appjs)
+        self.assertIn("/api/task-state", self.appjs)
+        self.assertIn("?work_item_id=", self.appjs)
 
 
 class WorkQueueTests(SourceTestCase):

@@ -220,14 +220,20 @@ function renderPulseInspector(pulse) {
 // queue, header, phase display, conversation, and operator panel cannot occur.
 async function refreshTaskState() {
   try {
-    const url = selectedConvThread
-      ? "/api/task-state?thread_id=" + encodeURIComponent(selectedConvThread)
-      : "/api/task-state";
+    // work_item_id is the primary selector; a bare thread selection is still
+    // honored (the server resolves it, erroring only on a multi-item thread).
+    let url = "/api/task-state";
+    if (selectedWorkItemId) {
+      url += "?work_item_id=" + encodeURIComponent(selectedWorkItemId);
+    } else if (selectedConvThread) {
+      url += "?thread_id=" + encodeURIComponent(selectedConvThread);
+    }
     const ts = await getJSON(url);
-    if (ts && ts.found && !selectedConvThread) {
-      // Adopt the server's default (most recently worked) task as the
-      // selection so every panel binds to the same task from first paint.
-      selectedConvThread = ts.thread_id;
+    if (ts && ts.found && !selectedWorkItemId) {
+      // Adopt the server's default task so every panel binds to the same task
+      // from first paint; key future selection on its canonical work-item id.
+      selectedWorkItemId = ts.work_item_id;
+      if (!selectedConvThread) selectedConvThread = ts.thread_id;
     }
     lastTaskState = ts && ts.found ? ts : null;
   } catch (e) {
@@ -927,12 +933,17 @@ function queuePhaseHint(threadId, status) {
 }
 
 function queueRow(entry) {
-  const selected = entry.thread_id && entry.thread_id === selectedConvThread;
+  // Selection is keyed on the CANONICAL work-item id so two work items sharing
+  // one conversation thread select independently; thread id rides along only
+  // for the conversation timeline.
+  const selected = (entry.work_item_id && entry.work_item_id === selectedWorkItemId)
+    || (!entry.work_item_id && entry.thread_id && entry.thread_id === selectedConvThread);
   const bits = ['<span class="q-status q-status-' + esc(entry.status) + '">' + esc(entry.status) + "</span>"];
   if (entry.phase) bits.push('<span class="q-phase">' + esc(entry.phase) + "</span>");
   if (entry.age) bits.push('<span class="q-age">' + esc(entry.age) + "</span>");
   return '<div class="q-row' + (selected ? " is-selected" : "") +
     '" data-thread="' + esc(entry.thread_id || "") +
+    '" data-work-item="' + esc(entry.work_item_id || "") +
     '" data-archived="' + (entry.archived ? "1" : "") + '">' +
     '<div class="q-title">' + esc((entry.title || "").slice(0, 72)) + "</div>" +
     '<div class="q-meta">' + bits.join("") + "</div>" +
@@ -950,7 +961,8 @@ function buildQueueGroups() {
   lastWorkItems.forEach((it) => {
     if (it.kind === "packet" || it.kind === "rfi") {
       attention.push({
-        thread_id: it.thread_id, title: it.title || it.summary || it.packet_id,
+        thread_id: it.thread_id, work_item_id: it.work_item_id,
+        title: it.title || it.summary || it.packet_id,
         status: it.status || "open",
         phase: it.kind === "rfi" ? "Authority" : "Authority",
         age: relativeAge(it.created_at),
@@ -970,7 +982,8 @@ function buildQueueGroups() {
     if (it.kind !== "message" || !it.thread_id) return;
     seenThreads.add(it.thread_id);
     const entry = {
-      thread_id: it.thread_id, title: it.title || it.summary || "",
+      thread_id: it.thread_id, work_item_id: it.work_item_id,
+      title: it.title || it.summary || "",
       status: it.status || "open",
       phase: queuePhaseHint(it.thread_id, it.status),
       age: relativeAge(it.created_at),
@@ -986,7 +999,8 @@ function buildQueueGroups() {
   lastWorkItems.forEach((it) => {
     if (it.kind === "in_progress") {
       active.push({
-        thread_id: it.thread_id, title: it.title || it.packet_id,
+        thread_id: it.thread_id, work_item_id: it.work_item_id,
+        title: it.title || it.packet_id,
         status: "in progress", phase: "Execute", age: "",
       });
     }
@@ -1412,6 +1426,9 @@ function toggleHealthPanel() {
 // --------------------------------------------------------------------------- //
 
 let selectedConvThread = null;
+// The canonical work-item id of the selected task (primary selection key). A
+// thread id sharing two work items no longer collapses selection to one.
+let selectedWorkItemId = null;
 let lastConversations = [];
 let convDetailRun = null;
 let lastConvCouncils = [];
@@ -2465,7 +2482,13 @@ function renderState(state) {
   // task's state (the phase stepper above it is the authoritative display of
   // state.pulse-adjacent activity for the selected task).
   const p = state.pulse || {};
-  if (!p.source_thread_id || p.source_thread_id === selectedConvThread) {
+  // Bind the pulse to the SELECTED WORK ITEM: only pulse activity whose source
+  // work item is the selected one animates this display, so a sibling work item
+  // sharing the same thread can never drive or relabel it.
+  const pulseIsMine = selectedWorkItemId
+    ? (!p.source_work_item_id || p.source_work_item_id === selectedWorkItemId)
+    : (!p.source_thread_id || p.source_thread_id === selectedConvThread);
+  if (pulseIsMine) {
     renderPulseInspector(state.pulse);
   } else {
     renderPulseInspector({ active_phase: null,
@@ -2490,8 +2513,9 @@ function toggleToolLog() {
   if (footer) footer.hidden = !footer.hidden;
 }
 
-function selectTask(threadId) {
+function selectTask(threadId, workItemId) {
   selectedConvThread = threadId || null;
+  selectedWorkItemId = workItemId || null;
   convComposerNewThreadId = null;
   if (convComposer) convComposer.restoreDraft();
   if (operatorChatComposer) operatorChatComposer.updateBanner();
@@ -2549,7 +2573,8 @@ function wire() {
     const row = e.target.closest(".q-row");
     if (!row) return;
     const thread = row.getAttribute("data-thread");
-    if (thread) selectTask(thread);
+    const workItem = row.getAttribute("data-work-item");
+    if (thread || workItem) selectTask(thread, workItem);
   });
   document.getElementById("queue-new-btn").addEventListener("click", () => {
     selectTask(null);

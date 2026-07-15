@@ -269,9 +269,25 @@ def ensure_gate(root, work_item_id, council_id, phase, outcome,
     subject = canonical_subject(work_item_id)
     key = _dedup_key(subject, council_id, phase, outcome,
                      substantive_round_count, scope_hash)
+    # Lock-free fast path: a gate already recognized for this exact escalation
+    # AND this exact invocation is a pure READ - repeated heals must not take
+    # the writer token (they would needlessly contend, rewrite nothing, and
+    # fail during an archive-maintenance window even though no write is
+    # needed). Any miss - including a stale read - falls through to the
+    # atomic locked path below.
+    record = _load_record(root, subject)
+    for gate in record["gates"]:
+        if gate.get("dedup_key") == key:
+            triple = (council_id, "reconcile", invocation_id)
+            if any((e.get("council_id"), e.get("trigger"),
+                    e.get("invocation_id")) == triple
+                   for e in (gate.get("deduplicated_events") or [])):
+                return {"gate": gate, "deduplicated": True}
+            break
     with cwl.write_token(root, purpose="gate"):
         record = _load_record(root, subject)
         match = None
+        backfilled = False
         for gate in record["gates"]:
             stored = gate.get("dedup_key")
             if stored == key:
@@ -281,16 +297,23 @@ def ensure_gate(root, work_item_id, council_id, phase, outcome,
                                                outcome, substantive_round_count,
                                                scope_hash):
                 gate["dedup_key"] = key  # backfill the frozen match
+                backfilled = True
                 match = gate
                 break
         if match is not None:
             events = match.setdefault("deduplicated_events", [])
             triple = (council_id, "reconcile", invocation_id)
+            appended = False
             if not any((e.get("council_id"), e.get("trigger"),
                         e.get("invocation_id")) == triple for e in events):
                 events.append({"council_id": council_id, "trigger": "reconcile",
                                "invocation_id": invocation_id, "at": _now_iso()})
-            _write_record_locked(root, record)
+                appended = True
+            if appended or backfilled:
+                # Write only when something actually changed (a new dedup
+                # event or a legacy-key backfill); pure recognition rewrites
+                # nothing.
+                _write_record_locked(root, record)
             return {"gate": match, "deduplicated": True}
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
         gate = {
@@ -309,6 +332,279 @@ def ensure_gate(root, work_item_id, council_id, phase, outcome,
         record["gates"].append(gate)
         _write_record_locked(root, record)
         return {"gate": gate, "deduplicated": False}
+
+
+# --------------------------------------------------------------------------- #
+# Escalation-gate creation, healing, and fail-closed failure reporting
+# --------------------------------------------------------------------------- #
+# A plan/incident council whose persisted outcome is operator_required or
+# hard_gate MUST have a durable gate. These helpers create it from the
+# authoritative durable records (never from caller-held state), HEAL a missing
+# gate before any governed advancement (the failure-window containment), and
+# fail CLOSED with a durable notice when the records themselves are malformed.
+# Failure never masquerades as success, and a gate-creation failure can never
+# be silent: every failure posts one idempotent "use-cw-gate" notice through
+# _post_gate_failure_notice, the single shared notice primitive.
+
+ESCALATION_OUTCOMES = ("operator_required", "hard_gate")
+ESCALATION_PHASES = ("plan", "incident")
+GATE_FAILURE_ERROR = "gate_creation_failed"
+
+# Recognized council-directory names: the persisted council-id format. Anything
+# else under the councils root is not part of the governance record and is
+# IGNORED; a RECOGNIZED directory whose council.json is missing or unreadable
+# is a malformed governance record and fails closed (it could hide an
+# escalation). The predicate is a pure function of name + file readability, so
+# behavior is deterministic across repeated calls and process restarts.
+_COUNCIL_DIR_RE = re.compile(r"^cw-council-\d{8}T\d{12}$")
+
+
+def _strict_json(path):
+    """(data, state) with state 'ok' | 'absent' | 'unreadable'. Strict: a
+    present-but-unparseable (or non-object) file is NEVER silently skipped."""
+    if not os.path.isfile(path):
+        return None, "absent"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None, "unreadable"
+    if not isinstance(data, dict):
+        return None, "unreadable"
+    return data, "ok"
+
+
+def _failure_payload(invariant, council_id, work_item_id, phase, outcome_value,
+                     detail):
+    """The single fail-closed payload shape. `error` and `error_code` carry the
+    IDENTICAL value so status mapping works from either field."""
+    return {
+        "ok": False,
+        "error": GATE_FAILURE_ERROR,
+        "error_code": GATE_FAILURE_ERROR,
+        "error_class": "governance_integrity",
+        "invariant": invariant,
+        "council_id": council_id,
+        "work_item_id": work_item_id,
+        "phase": phase,
+        "outcome": outcome_value,
+        "detail": detail,
+    }
+
+
+def _post_gate_failure_notice(root, payload, reporting_context):
+    """The ONE shared primitive for the durable gate-failure notice. Guarded
+    best-effort: a posting failure adds payload['posting_failure'] and never
+    masks the fail-closed result. Idempotent: the deterministic key makes an
+    identical failure state replay the SAME notice instead of duplicating.
+    Thread resolution order: readable council record -> reporting_context ->
+    the work item's origin message -> a fresh thread bound by work_item_id."""
+    import clearwright_message as cwm  # lazy: avoids a circular import
+    ctx = reporting_context or {}
+    wid = payload.get("work_item_id")
+    council_id = payload.get("council_id")
+    thread_id = None
+    if council_id:
+        try:
+            import clearwright_review_council as cwrc  # lazy: avoids a circular import
+            rec = cwrc.load_council(root, council_id)
+            if isinstance(rec, dict):
+                thread_id = rec.get("thread_id")
+        except Exception:
+            thread_id = None
+    if not thread_id:
+        thread_id = ctx.get("thread_id")
+    if not thread_id and wid:
+        # Origin-thread resolution for ANY work-item id scheme (message: ids
+        # via their origin message; packet-derived ids via the shared work
+        # resolver), so the idempotent replay anchors to one stable thread.
+        try:
+            import clearwright_work as cww  # lazy: avoids a circular import
+            thread_id, _ = cww._resolve_target(root, wid)
+        except Exception:
+            thread_id = None
+    detail_tag = hashlib.sha256(
+        str(payload.get("detail") or "").encode("utf-8")).hexdigest()[:8]
+    ikey = "gate-fail:{}:{}:{}:{}".format(wid or "none", council_id or "none",
+                                          payload.get("invariant") or "none",
+                                          detail_tag)
+    text = ("GOVERNANCE INTEGRITY: mandatory gate creation failed for work "
+            "item {} (council {}). Invariant: {}. Detail: {}. The governed "
+            "workflow is fail-closed until the durable records are repaired; "
+            "no gate exists for this escalation and no advancement is "
+            "permitted.").format(wid or "<unknown>", council_id or "<none>",
+                                 payload.get("invariant"),
+                                 payload.get("detail"))
+    try:
+        msg = cwm.build_message("claude", text, role="orchestrator",
+                                thread_id=thread_id, direction="internal",
+                                status="posted", source="use-cw-gate",
+                                work_item_id=wid, idempotency_key=ikey)
+        cwm.write_message_idempotent(root, msg)
+    except Exception as exc:  # best-effort by contract; never masks the result
+        payload["posting_failure"] = str(exc)
+    return payload
+
+
+def ensure_escalation_gate(root, council_id, outcome):
+    """Create/recognize the mandatory gate for ONE escalated council, from a
+    single authoritative council.json read. Raises GateError carrying the
+    fail-closed payload on any integrity violation; cwl.MaintenanceInProgress
+    propagates untouched. Returns {ok, gate, deduplicated} on success."""
+    import clearwright_review_council as cwrc  # lazy: avoids a circular import
+    outcome_value = (outcome or {}).get("outcome")
+    council = cwrc.load_council(root, council_id)
+    if not isinstance(council, dict):
+        raise GateError(_failure_payload(
+            "council_record_unreadable", council_id, None,
+            (outcome or {}).get("phase"), outcome_value,
+            "council.json missing or unreadable for {}".format(council_id)))
+    wid = council.get("work_item_id")
+    phase = council.get("phase")
+    # Mandatory gates exist ONLY for work-item-bound plan/incident escalations
+    # (verify councils use the completion gate; unbound councils have no
+    # subject to gate) - the same rule the healing sweep's candidacy filter
+    # applies, judged here from the AUTHORITATIVE reload.
+    if not wid or phase not in ESCALATION_PHASES:
+        return None
+    recorded = council.get("rounds") or []
+    if (not isinstance(recorded, list)
+            or not all(isinstance(n, int) for n in recorded)
+            or len(set(recorded)) != len(recorded)):
+        raise GateError(_failure_payload(
+            "round_records_inconsistent", council_id, wid, phase,
+            outcome_value,
+            "recorded round list invalid: {!r}".format(recorded)))
+    loaded, missing = [], []
+    for n in sorted(recorded):
+        data, state = _strict_json(cwrc._round_path(root, council_id, n))
+        if state != "ok":
+            missing.append(n)
+            continue
+        if data.get("round") != n:
+            raise GateError(_failure_payload(
+                "round_records_inconsistent", council_id, wid, phase,
+                outcome_value,
+                "round file {} carries round={!r}".format(n, data.get("round"))))
+        loaded.append(data)
+    if missing:
+        raise GateError(_failure_payload(
+            "round_records_unreadable", council_id, wid, phase, outcome_value,
+            "recorded rounds missing/unreadable: {}".format(missing)))
+    substantive = cwrc.substantive_round_count(loaded)
+    scope_hash = council.get("approved_scope_sha256") or "none"
+    invocation_id = "gateeval-{}-{}-{}".format(council_id, outcome_value,
+                                               substantive)
+    result = ensure_gate(root, wid, council_id, phase, outcome_value,
+                         substantive, scope_hash, invocation_id)
+    return {"ok": True, "gate": result["gate"],
+            "deduplicated": result["deduplicated"]}
+
+
+def record_escalation_gate(root, council_id, outcome, reporting_context=None):
+    """The caller-facing single-council entry (outcome-time call sites and the
+    healing sweep both use it). Returns None for a non-escalating outcome;
+    ensure_escalation_gate's success shape unchanged on success; the FULL
+    fail-closed payload (after posting the single durable notice) on failure.
+    cwl.MaintenanceInProgress propagates untouched."""
+    if not outcome or outcome.get("outcome") not in ESCALATION_OUTCOMES:
+        return None
+    ctx = reporting_context or {}
+    try:
+        return ensure_escalation_gate(root, council_id, outcome)
+    except cwl.MaintenanceInProgress:
+        raise  # routine transient window; the caller's handler owns it
+    except GateError as exc:
+        raw = exc.payload if isinstance(exc.payload, dict) else {}
+        payload = _failure_payload(
+            raw.get("invariant") or raw.get("error") or "gate_error",
+            raw.get("council_id") or council_id,
+            raw.get("work_item_id") or ctx.get("work_item_id"),
+            raw.get("phase") or (outcome or {}).get("phase"),
+            outcome.get("outcome"),
+            raw.get("detail") or raw.get("error") or "gate creation failed")
+        return _post_gate_failure_notice(root, payload, ctx)
+    except Exception as exc:  # OSError, ValueError, anything: never silent,
+        payload = _failure_payload(  # never a bare traceback - fail closed.
+            "gate_error", council_id, ctx.get("work_item_id"),
+            (outcome or {}).get("phase"), outcome.get("outcome"), str(exc))
+        return _post_gate_failure_notice(root, payload, ctx)
+
+
+def heal_escalation_gates(root, work_item_id):
+    """The work-item-level healing preflight: ensure the mandatory gate exists
+    for EVERY authoritative plan/incident council of this work item whose
+    persisted outcome is operator_required or hard_gate. Strict deterministic
+    discovery (recognized-directory predicate + direct reads; list summaries
+    are never trusted). Returns {ok:true, healed:[...]} or the first fail-closed
+    payload; cwl.MaintenanceInProgress propagates untouched."""
+    import clearwright_review_council as cwrc  # lazy: avoids a circular import
+    croot = cwrc.councils_root(root)
+    healed = []
+    if not os.path.isdir(croot):
+        return {"ok": True, "healed": healed}
+    try:
+        names = sorted(os.listdir(croot))
+    except OSError as exc:
+        payload = _failure_payload(
+            "council_discovery_failed", None, work_item_id, None, None,
+            "cannot list {}: {}".format(croot, exc))
+        return _post_gate_failure_notice(root, payload,
+                                         {"work_item_id": work_item_id})
+    subject = canonical_subject(work_item_id)
+    for name in names:
+        cdir = os.path.join(croot, name)
+        if not _COUNCIL_DIR_RE.match(name) or not os.path.isdir(cdir):
+            continue  # not part of the governance record: ignored entirely
+        council, state = _strict_json(os.path.join(cdir, "council.json"))
+        if state == "absent":
+            # A COMPLETELY EMPTY recognized directory is an archived remnant
+            # (the archiver moves files and, by its zero-deletion policy,
+            # leaves the emptied directory behind) or an interrupted
+            # pre-write; it contains no files and therefore cannot hide an
+            # escalation - skip it. A recognized directory that DOES contain
+            # files but no readable council.json stays fail-closed.
+            try:
+                if not os.listdir(cdir):
+                    continue
+            except OSError:
+                pass
+            payload = _failure_payload(
+                "council_record_unreadable", name, work_item_id, None, None,
+                "council.json absent but directory is non-empty: {}".format(cdir))
+            return _post_gate_failure_notice(root, payload,
+                                             {"work_item_id": work_item_id})
+        if state != "ok":
+            payload = _failure_payload(
+                "council_record_unreadable", name, work_item_id, None, None,
+                "council.json {} in {}".format(state, cdir))
+            return _post_gate_failure_notice(root, payload,
+                                             {"work_item_id": work_item_id})
+        if (canonical_subject(council.get("work_item_id")) != subject
+                or council.get("phase") not in ESCALATION_PHASES):
+            continue
+        out, ostate = _strict_json(os.path.join(cdir, "outcome.json"))
+        if ostate == "absent":
+            continue  # a valid unfinished council blocks nothing
+        if ostate != "ok" or not isinstance(out.get("outcome"), str):
+            payload = _failure_payload(
+                "outcome_record_unreadable", name, work_item_id,
+                council.get("phase"), None,
+                "outcome.json unreadable or invalid in {}".format(cdir))
+            return _post_gate_failure_notice(
+                root, payload, {"work_item_id": work_item_id,
+                                "thread_id": council.get("thread_id")})
+        if out.get("outcome") not in ESCALATION_OUTCOMES:
+            continue
+        res = record_escalation_gate(
+            root, name, out, {"work_item_id": work_item_id,
+                              "thread_id": council.get("thread_id")})
+        if res is None:
+            continue
+        if not res.get("ok"):
+            return res
+        healed.append(res)
+    return {"ok": True, "healed": healed}
 
 
 def _legacy_matches(gate, subject, council_id, phase, outcome, rounds, scope_hash):

@@ -58,8 +58,22 @@ OPERATOR_ACTOR = "OPERATOR-0001"
 
 
 def _gate_block(root, work_item_id, actor):
-    """Return a refusal dict if an unresolved gate blocks an agent-actor
-    mutation on this work item; else None. The operator is never blocked."""
+    """Heal any MISSING mandatory escalation gate for this work item first
+    (an authoritative capped plan/incident council whose persisted outcome is
+    operator_required/hard_gate must always have a durable gate - the healing
+    closes the failure window in which gate creation previously crashed), then
+    return a refusal dict if an unresolved gate blocks an agent-actor mutation;
+    else None. Healing runs BEFORE the operator exemption so the gate
+    MATERIALIZES for operator visibility, but the operator is never blocked.
+    A healing integrity failure returns the fail-closed payload - the caller
+    must refuse, never proceed. Callers pass a validated existing work item."""
+    try:
+        healed = cwg.heal_escalation_gates(root, work_item_id)
+    except cwl.MaintenanceInProgress:
+        return {"ok": False, "error": "maintenance_in_progress",
+                "error_code": "maintenance_in_progress"}
+    if not healed.get("ok"):
+        return healed
     if str(actor).strip() == OPERATOR_ACTOR:
         return None
     gate = cwg.active_gate(root, work_item_id)
@@ -403,11 +417,14 @@ def claim_work_item(root, work_item_id, actor, role=cwm.DEFAULT_ROLE,
     kind, ref = parse_work_item_id(work_item_id)
     if kind is None:
         return {"ok": False, "error": "unrecognized work_item_id"}
+    # Existence FIRST: an unknown id performs no healing, creates no gate, and
+    # writes nothing (the no-write-on-unknown-id contract). The resolution
+    # reads are read-only and side-effect-free.
+    if find_work_item(root, work_item_id) is None:
+        return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
     blocked = _gate_block(root, work_item_id, actor)
     if blocked is not None:
         return blocked
-    if find_work_item(root, work_item_id) is None:
-        return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
 
     packet_claimed = None
     if kind == "packet":
@@ -419,7 +436,11 @@ def claim_work_item(root, work_item_id, actor, role=cwm.DEFAULT_ROLE,
             return {"ok": False, "error": "claim tool refused the packet claim (exit {})".format(code)}
         packet_claimed = ref
 
-    cwid.ensure_migrated(root)
+    try:
+        cwid.ensure_migrated(root)
+    except cwl.MaintenanceInProgress:
+        return {"ok": False, "error": "maintenance_in_progress",
+                "error_code": "maintenance_in_progress"}
     thread_id, packet_id = _resolve_target(root, work_item_id)
     note = ("claimed CTA packet " + ref) if kind == "packet" else ("claimed work item " + str(work_item_id))
     try:
@@ -449,12 +470,17 @@ def respond_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE,
     existing lifecycle tools for that."""
     if parse_work_item_id(work_item_id)[0] is None:
         return {"ok": False, "error": "unrecognized work_item_id"}
+    # Existence FIRST (no healing, no gate, no write on an unknown id).
+    if find_work_item(root, work_item_id) is None:
+        return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
     blocked = _gate_block(root, work_item_id, actor)
     if blocked is not None:
         return blocked
-    if find_work_item(root, work_item_id) is None:
-        return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
-    cwid.ensure_migrated(root)
+    try:
+        cwid.ensure_migrated(root)
+    except cwl.MaintenanceInProgress:
+        return {"ok": False, "error": "maintenance_in_progress",
+                "error_code": "maintenance_in_progress"}
     thread_id, packet_id = _resolve_target(root, work_item_id)
     try:
         msg = cwm.build_message(
@@ -480,12 +506,17 @@ def progress_work_item(root, work_item_id, actor, message, role=cwm.DEFAULT_ROLE
     item stays open."""
     if parse_work_item_id(work_item_id)[0] is None:
         return {"ok": False, "error": "unrecognized work_item_id"}
+    # Existence FIRST (no healing, no gate, no write on an unknown id).
+    if find_work_item(root, work_item_id) is None:
+        return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
     blocked = _gate_block(root, work_item_id, actor)
     if blocked is not None:
         return blocked
-    if find_work_item(root, work_item_id) is None:
-        return {"ok": False, "error": "work_item_not_found", "work_item_id": work_item_id}
-    cwid.ensure_migrated(root)
+    try:
+        cwid.ensure_migrated(root)
+    except cwl.MaintenanceInProgress:
+        return {"ok": False, "error": "maintenance_in_progress",
+                "error_code": "maintenance_in_progress"}
     thread_id, packet_id = _resolve_target(root, work_item_id)
     try:
         msg = cwm.build_message(

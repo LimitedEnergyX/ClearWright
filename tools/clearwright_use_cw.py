@@ -334,10 +334,25 @@ def _do_message(root, text, intent, thread_id, packet_id):
 
 
 def _gate_refusal(args, work_item_id):
-    """If the work item's canonical subject has an unresolved gate, return an
-    (payload, EXIT_GATE) emit; else None. Governed write paths call this first."""
+    """Heal any missing mandatory escalation gate for the work item, THEN
+    refuse if an unresolved gate blocks it. Returns an emitted exit code or
+    None to proceed: a healing integrity failure emits the FULL fail-closed
+    payload with EXIT_RUNTIME (8, no gate exists to refuse on); an unresolved
+    (possibly just-healed) gate emits the existing refusal with EXIT_GATE (9);
+    a maintenance window emits the standard retryable result."""
     if not work_item_id:
         return None
+    try:
+        healed = cwg.heal_escalation_gates(args.queue_root, work_item_id)
+    except cwl.MaintenanceInProgress:
+        return _emit({"ok": False, "command": "gate",
+                      "error": "maintenance_in_progress",
+                      "error_code": "maintenance_in_progress",
+                      "reason": "an archive operation currently holds "
+                                "exclusivity over this queue root"},
+                     EXIT_RUNTIME, args.json)
+    if not healed.get("ok"):
+        return _emit(dict(healed, command="gate"), EXIT_RUNTIME, args.json)
     gate = cwg.active_gate(args.queue_root, work_item_id)
     if gate is None:
         return None
@@ -345,41 +360,28 @@ def _gate_refusal(args, work_item_id):
                  EXIT_GATE, args.json)
 
 
-def _maybe_create_gate(root, council, outcome):
-    """Ensure ONE durable gate per unique escalation event when a plan or
-    incident council bound to a work item ends operator_required or hard_gate.
-    Idempotent: resolving a gate and later re-evaluating the SAME terminal
-    council (e.g. recording the final reconciliation) records a deduplicated
-    event, never a duplicate gate. Verify councils use the completion gate
-    instead. Never raises into the council path."""
-    wid = council.get("work_item_id")
-    phase = council.get("phase")
-    if not wid or phase not in ("plan", "incident"):
-        return
-    if outcome.get("outcome") not in ("operator_required", "hard_gate"):
-        return
-    rounds = council.get("rounds") or []
-    substantive = sum(1 for r in rounds if r.get("substantive", True))
-    scope_hash = council.get("approved_scope_sha256") or "none"
-    invocation_id = "gateeval-{}-{}-{}".format(
-        council.get("council_id"), outcome.get("outcome"), substantive)
-    try:
-        cwg.ensure_gate(root, wid, council.get("council_id"), phase,
-                        outcome.get("outcome"), substantive, scope_hash,
-                        invocation_id)
-    except cwg.GateError:
-        pass
+def _work_item_mismatch(args, council):
+    """The council record is the AUTHORITATIVE enforcement subject. A caller
+    supplying --work-item-id must match it exactly; a mismatch fails closed
+    BEFORE any healing or mutation (no gate is created or deduplicated on a
+    mismatched call). Returns an emitted exit code or None."""
+    subject = council.get("work_item_id")
+    supplied = getattr(args, "work_item_id", None)
+    if supplied and subject and str(supplied).strip() != str(subject).strip():
+        return _emit({"ok": False, "command": "council",
+                      "error": "work_item_id_mismatch",
+                      "supplied": supplied, "council_bound": subject},
+                     EXIT_USAGE, args.json)
+    return None
 
 
 def _council(args, phase):
     """Shared council driver for plan/council/incident/verify. Runs a review
-    round or attaches a reconciliation, then returns the outcome + exit code."""
+    round or attaches a reconciliation, then returns the outcome + exit code.
+    Gate enforcement happens INSIDE the body, bound to the durable council
+    record's work item (not the caller's arguments)."""
     root = args.queue_root
     stage = getattr(args, "stage", "review")
-
-    refusal = _gate_refusal(args, getattr(args, "work_item_id", None))
-    if refusal is not None:
-        return refusal
     try:
         return _council_body(args, phase, root, stage)
     except cwl.MaintenanceInProgress:
@@ -402,6 +404,19 @@ def _council_body(args, phase, root, stage):
         if not council:
             return _emit({"ok": False, "error": "reconcile requires an existing --council-id"},
                          EXIT_USAGE, args.json)
+        mismatch = _work_item_mismatch(args, council)
+        if mismatch is not None:
+            return mismatch
+        if getattr(args, "dry_run", False):
+            # Dry-run is validation-only and MUST NOT mutate, so it performs a
+            # READ-ONLY refusal check (no healing writes) against the durable
+            # subject - preserving the pre-existing refusal for gated items at
+            # zero cost.
+            subject = council.get("work_item_id")
+            gate = cwg.active_gate(root, subject) if subject else None
+            if gate is not None:
+                return _emit(dict(cwg.refusal_payload(gate), command="gate"),
+                             EXIT_GATE, args.json)
         recon_text = _load(None, args.reconciliation_file)
         if getattr(args, "dry_run", False):
             # Validate-only: schema plus exact-ref binding against the actual
@@ -425,6 +440,9 @@ def _council_body(args, phase, root, stage):
                           "valid": True, "unbound_refs": unbound,
                           "note": "validation only; nothing submitted"},
                          EXIT_OK if not unbound else EXIT_USAGE, args.json)
+        refusal = _gate_refusal(args, council.get("work_item_id"))
+        if refusal is not None:
+            return refusal
         council = cwrc.set_approved_scope(root, council, args.approved_scope)
         try:
             recon = cwrc.cwv.extract_json_object(recon_text)
@@ -434,7 +452,12 @@ def _council_body(args, phase, root, stage):
         outcome = cwrc.evaluate(cwrc.load_council(root, council["council_id"]),
                                 cwrc.load_rounds(root, council["council_id"]))
         cwrc.save_outcome(root, council["council_id"], outcome)
-        _maybe_create_gate(root, council, outcome)
+        gate_res = cwg.record_escalation_gate(
+            root, council.get("council_id"), outcome,
+            {"work_item_id": council.get("work_item_id"),
+             "thread_id": council.get("thread_id")})
+        if gate_res is not None and not gate_res.get("ok"):
+            return _emit(dict(gate_res, command="council"), EXIT_RUNTIME, args.json)
         _maybe_post_council_summary(root, council, outcome)
         return _emit(_council_result(outcome), OUTCOME_EXIT.get(outcome["outcome"], EXIT_RUNTIME), args.json)
 
@@ -444,6 +467,15 @@ def _council_body(args, phase, root, stage):
         if not args.thread_id:
             return _emit({"ok": False, "error": "a new council requires --thread-id"},
                          EXIT_USAGE, args.json)
+        # NEW-council pre-create healing/refusal: a work-item-bound new council
+        # must heal (or fail closed on) any unresolved escalation state BEFORE
+        # create_council or any round dispatch, so a fresh council can never
+        # bypass an operator_required failure window. A new council WITHOUT a
+        # work_item_id is unbound and unaffected (nothing to heal).
+        if getattr(args, "work_item_id", None):
+            refusal = _gate_refusal(args, args.work_item_id)
+            if refusal is not None:
+                return refusal
         profile = _review_profile(root, args.work_item_id)
         eff_max = args.max_rounds
         if profile == "editorial" and int(eff_max) >= cwrc.DEFAULT_MAX_ROUNDS:
@@ -459,6 +491,12 @@ def _council_body(args, phase, root, stage):
         except ValueError as exc:
             return _emit({"ok": False, "error": str(exc)}, EXIT_USAGE, args.json)
     else:
+        mismatch = _work_item_mismatch(args, council)
+        if mismatch is not None:
+            return mismatch
+        refusal = _gate_refusal(args, council.get("work_item_id"))
+        if refusal is not None:
+            return refusal
         council = cwrc.set_approved_scope(root, council, args.approved_scope)
 
     if getattr(args, "grant_attempts", None):
@@ -481,7 +519,12 @@ def _council_body(args, phase, root, stage):
             outcome["operator_required"] = True
             outcome["reason"] = "already at max rounds; no further rounds run"
         cwrc.save_outcome(root, council["council_id"], outcome)
-        _maybe_create_gate(root, council, outcome)
+        gate_res = cwg.record_escalation_gate(
+            root, council.get("council_id"), outcome,
+            {"work_item_id": council.get("work_item_id"),
+             "thread_id": council.get("thread_id")})
+        if gate_res is not None and not gate_res.get("ok"):
+            return _emit(dict(gate_res, command="council"), EXIT_RUNTIME, args.json)
         return _emit(_council_result(outcome), OUTCOME_EXIT.get(outcome["outcome"], EXIT_RUNTIME), args.json)
 
     context = _load(args.prompt, args.context_file or args.plan_file)
@@ -532,7 +575,12 @@ def _council_body(args, phase, root, stage):
     outcome["packet"] = {"gpt_delivery": report.get("gpt_delivery"),
                          "estimated_input_tokens": report.get("estimated_input_tokens")}
     cwrc.save_outcome(root, council["council_id"], outcome)
-    _maybe_create_gate(root, council, outcome)
+    gate_res = cwg.record_escalation_gate(
+        root, council.get("council_id"), outcome,
+        {"work_item_id": council.get("work_item_id"),
+         "thread_id": council.get("thread_id")})
+    if gate_res is not None and not gate_res.get("ok"):
+        return _emit(dict(gate_res, command="council"), EXIT_RUNTIME, args.json)
     _maybe_post_council_summary(root, council, outcome)
     return _emit(_council_result(outcome), OUTCOME_EXIT.get(outcome["outcome"], EXIT_RUNTIME), args.json)
 
@@ -580,8 +628,17 @@ def cmd_progress(args):
     res = cww.progress_work_item(args.queue_root, args.work_item_id, "claude", msg,
                                  role="orchestrator", source="use-cw")
     if not res.get("ok"):
-        code = EXIT_USAGE if res.get("error") == "work_item_not_found" else EXIT_RUNTIME
-        return _emit({"ok": False, "error": res.get("error")}, code, args.json)
+        # Payload preservation: the work-layer result IS the command result -
+        # every existing field survives byte-identical (gate_creation_failed /
+        # maintenance_in_progress especially); only the command envelope key is
+        # added. No {error}-only collapse.
+        if res.get("error") == "work_item_not_found":
+            code = EXIT_USAGE
+        elif res.get("error") == "unresolved_gate":
+            code = EXIT_GATE
+        else:
+            code = EXIT_RUNTIME
+        return _emit(dict(res, command="progress"), code, args.json)
     return _emit({"ok": True, "command": "progress", "work_item_id": args.work_item_id,
                   "thread_id": res["thread_id"], "message_id": res["message"]["message_id"]},
                  EXIT_OK, args.json)
@@ -865,8 +922,15 @@ def cmd_complete(args):
     res = cww.respond_work_item(args.queue_root, args.work_item_id, "claude", result_text,
                                 role="orchestrator", source="use-cw")
     if not res.get("ok"):
-        code = EXIT_USAGE if res.get("error") == "work_item_not_found" else EXIT_RUNTIME
-        return _emit({"ok": False, "error": res.get("error")}, code, args.json)
+        # Payload preservation (see cmd_progress): the work-layer result IS the
+        # command result; only the command envelope key is added.
+        if res.get("error") == "work_item_not_found":
+            code = EXIT_USAGE
+        elif res.get("error") == "unresolved_gate":
+            code = EXIT_GATE
+        else:
+            code = EXIT_RUNTIME
+        return _emit(dict(res, command="complete"), code, args.json)
     summary = build_canonical_summary(args.queue_root, args.work_item_id,
                                       "done" if verify_c else "done_unverified_not_required")
     persist_and_post_summary(args.queue_root, args.work_item_id, summary)
@@ -884,6 +948,22 @@ def cmd_close(args):
     its verify council and explicitly authorizes closing. The skill and the
     harness never invoke this autonomously; the underlying council outcome is
     not changed."""
+    # Heal FIRST so any missing mandatory escalation gate MATERIALIZES before
+    # closure is evaluated - the plan_gate read below then sees the freshly
+    # healed gate and closure records closed_unresolved against a REAL gate.
+    # A healing integrity failure fails closed BEFORE terminalization. The
+    # operator's authority to close is unchanged.
+    try:
+        healed = cwg.heal_escalation_gates(args.queue_root, args.work_item_id)
+    except cwl.MaintenanceInProgress:
+        return _emit({"ok": False, "command": "close",
+                      "error": "maintenance_in_progress",
+                      "error_code": "maintenance_in_progress",
+                      "reason": "an archive operation currently holds "
+                                "exclusivity over this queue root"},
+                     EXIT_RUNTIME, args.json)
+    if not healed.get("ok"):
+        return _emit(dict(healed, command="close"), EXIT_RUNTIME, args.json)
     required, verify_c = _verification_state(args.queue_root, args.work_item_id)
     plan_gate = cwg.active_gate(args.queue_root, args.work_item_id)
     if not verify_c and not required and plan_gate is None:

@@ -812,9 +812,17 @@ def compute_pulse(root, now=None):
 
 def wi_status_code(result):
     """HTTP status for a work-item result: 200 ok, 404 when the work item is
-    unknown, 400 otherwise. The shared functions never write on an unknown id."""
+    unknown, 503 while an archive-maintenance window holds exclusivity, 500 on
+    a governance-integrity gate-creation/healing failure, 400 otherwise. The
+    shared functions never write on an unknown id. The code is read from
+    error_code first with a fallback to error, so both payload forms map."""
     if result.get("ok"):
         return 200
+    code = result.get("error_code") or result.get("error")
+    if code == "maintenance_in_progress":
+        return 503
+    if code == "gate_creation_failed":
+        return 500
     return 404 if result.get("error") == "work_item_not_found" else 400
 
 

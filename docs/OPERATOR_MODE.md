@@ -224,3 +224,47 @@ HTTP, the CLI tools, and the queue on disk, never by clicking the operator page.
 - The clearance queue and audit trail remain the durable record behind the work.
 
 See [CONTROL_PLANE_DEMO.md](CONTROL_PLANE_DEMO.md) for the full console tour.
+
+## Manual launcher and clean stop (stabilization)
+
+The control plane has no startup persistence installed. Start and stop it
+manually with the repository-contained scripts (they register nothing - no
+scheduled task, no service, no startup entry - and require no elevation):
+
+```powershell
+# Start (idempotent: refuses a second instance and an occupied port)
+pwsh tools/start-clearwright.ps1
+
+# Clean stop (graceful via a filesystem-local sentinel, then force-stop fallback)
+pwsh tools/stop-clearwright.ps1
+```
+
+Both resolve one canonical control-artifact directory - `<parent of the queue
+root>/logs` - holding `lifecycle.jsonl`, the `clearwright-<port>.lock`
+single-instance lock, the `clearwright-<port>.stop` graceful-stop sentinel, and
+the rotated `control-plane.{out,err}.log`.
+
+**Server-authoritative protection.** The server is the source of truth for
+single-instance and occupied-port refusal: it acquires the instance lock before
+binding and records `startup_refused_duplicate` or `startup_refused_port` and
+exits non-zero. The launcher's port pre-check is a fast convenience only.
+
+**Lifecycle evidence.** Every start and stop appends a durable record to
+`lifecycle.jsonl`: `startup_ok` (only after a successful bind and an in-process
+readiness check), `startup_refused_port`, `startup_refused_duplicate`,
+`shutdown_graceful`, `shutdown_exception`, and `prior_unclean_shutdown` (written
+by the next start when a previous instance's lock was left by a dead process).
+Records carry the UTC time, application version, git commit, PID and parent PID,
+executable, a **secret-redacted** command line, working directory, queue root,
+mode, bind host, and port. A lifecycle-log write failure surfaces in
+`/api/health` (`instance.lifecycle_log_error`) rather than silently looking like
+a healthy start. `/api/health` also exposes the current instance
+(`instance` block) and `integrity_warning_count`.
+
+**Honest Windows stop contract.** `stop-clearwright.ps1` verifies the recorded
+process really is the ClearWright server (executable, `server.py`, queue root,
+and port all match) before any termination, then requests a graceful stop via
+the sentinel. If the process does not exit within the deadline it force-stops;
+a forced stop produces no `shutdown_graceful` record, so the next start records
+`prior_unclean_shutdown` - this is documented, not hidden. There is no HTTP stop
+route; the sentinel is filesystem-local and operator-controlled.

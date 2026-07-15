@@ -36,6 +36,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -54,6 +56,8 @@ import clearwright_work as cww  # noqa: E402
 import clearwright_review_council as cwrc  # noqa: E402
 import clearwright_archive as cwarch  # noqa: E402
 import clearwright_writer_lock as cwl  # noqa: E402
+import clearwright_identity as cwid  # noqa: E402
+import clearwright_server_lifecycle as csl  # noqa: E402
 
 # The single documented request-body cap for POST bodies: worst-case JSON
 # string-escape expansion of a MESSAGE_MAX_BYTES message, plus a fixed
@@ -1465,6 +1469,22 @@ def build_health(root, mode=None, durable=None, codex_check=_codex_cli_on_path,
 
         health["pulse"] = compute_pulse(root) if health["queue_root_exists"] else {}
 
+        # Current-instance status (lifecycle observability) and any
+        # integrity/lifecycle problems -- a lifecycle-log failure surfaces here
+        # rather than silently looking like a healthy start.
+        if INSTANCE is not None:
+            inst = dict(INSTANCE)
+            if LIFECYCLE_ERROR:
+                inst["lifecycle_log_error"] = LIFECYCLE_ERROR
+            health["instance"] = inst
+        try:
+            iw = cww.integrity_warnings(root) if health["queue_root_exists"] else []
+        except Exception:
+            iw = []
+        health["integrity_warning_count"] = len(iw)
+        if iw:
+            warnings.append("{} queue integrity warning(s).".format(len(iw)))
+
         capabilities = {
             "worker_bridge": os.path.isfile(os.path.join(TOOLS, "clearwright_worker.py")),
             "proof_tool": os.path.isfile(os.path.join(TOOLS, "clearwright_proof.py")),
@@ -1506,6 +1526,9 @@ QUEUE_ROOT = None  # set in main()
 DURABLE = False    # True when running against a persistent --queue-root
 MODE = DEMO_MODE   # "operator" (live local) or "demo" (walkthrough); set in main()
 DEMO_SEEDED = False  # True when demo packets were seeded into this queue
+INSTANCE = None    # current-instance descriptor for /api/health; set in main()
+LIFECYCLE_ERROR = None  # set if the lifecycle log could not be written
+APP_VERSION = "0.1.0-alpha"  # control-plane application version
 
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -1864,13 +1887,82 @@ def main():
              "--queue-root is given, otherwise demo.")
     args = parser.parse_args()
 
+    global INSTANCE, LIFECYCLE_ERROR
     QUEUE_ROOT, DURABLE, MODE, DEMO_SEEDED = resolve_queue(args.queue_root, args.mode)
     if not DURABLE:
         # Only a fresh temporary queue is removed on exit; a durable queue
         # must persist.
         atexit.register(lambda: shutil.rmtree(QUEUE_ROOT, ignore_errors=True))
 
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    # Freeze the legacy work-item origin manifest once, at a write boundary
+    # (never on a read path), so derived-queue reads stay pure.
+    try:
+        cwid.ensure_migrated(QUEUE_ROOT)
+    except Exception:
+        pass
+
+    # server.py lives at <repo>/apps/control-plane/server.py.
+    repo_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    commit = csl.git_commit(repo_dir)
+    lc = dict(version=APP_VERSION, git_commit=commit, mode=MODE,
+              bind_host=args.host, port=args.port, argv=sys.argv)
+
+    # (1) Server-authoritative single-instance lock BEFORE bind.
+    ok, note = csl.acquire_instance_lock(QUEUE_ROOT, args.port)
+    if note.get("prior_unclean"):
+        csl.record(QUEUE_ROOT, "prior_unclean_shutdown", **lc)
+    if not ok:
+        csl.record(QUEUE_ROOT, "startup_refused_duplicate", **lc)
+        sys.stderr.write("REFUSED: another ClearWright instance holds port "
+                         "{} (pid {}).\n".format(args.port, note.get("pid")))
+        return 5
+    csl.clear_stale_startup_sentinel(QUEUE_ROOT, args.port)
+
+    # (2) Bind.
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as exc:
+        csl.record(QUEUE_ROOT, "startup_refused_port", **lc)
+        csl.release_instance_lock(QUEUE_ROOT, args.port)
+        sys.stderr.write("REFUSED: could not bind {}:{} ({}).\n".format(
+            args.host, args.port, exc))
+        return 3
+
+    INSTANCE = {"pid": os.getpid(), "started_at_utc": csl._now_iso(),
+                "version": APP_VERSION, "git_commit": commit,
+                "bind": "{}:{}".format(args.host, args.port),
+                "port": args.port, "queue_root": QUEUE_ROOT, "mode": MODE,
+                "lifecycle_log": csl.lifecycle_path(QUEUE_ROOT)}
+
+    # (3) In-process readiness (no HTTP self-request).
+    try:
+        build_health(QUEUE_ROOT, mode=MODE, durable=DURABLE)
+    except Exception as exc:
+        csl.record(QUEUE_ROOT, "shutdown_exception", **lc)
+        httpd.server_close()
+        csl.release_instance_lock(QUEUE_ROOT, args.port)
+        sys.stderr.write("REFUSED: readiness check failed ({}).\n".format(exc))
+        return 1
+
+    # (4) startup_ok only after bind + readiness.
+    if csl.record(QUEUE_ROOT, "startup_ok", **lc) is None:
+        LIFECYCLE_ERROR = "startup lifecycle write failed"
+
+    # (5) Poll the graceful-stop sentinel on a daemon thread.
+    stop_flag = {"stop": False}
+
+    def _watch_stop():
+        while not stop_flag["stop"]:
+            try:
+                if csl.stop_sentinel_targets_me(QUEUE_ROOT, args.port):
+                    httpd.shutdown()
+                    return
+            except Exception:
+                pass
+            time.sleep(2)
+
+    threading.Thread(target=_watch_stop, daemon=True).start()
+
     url = "http://{}:{}/".format(args.host, args.port)
     print("ClearWright control plane ({} mode, local reference implementation, early alpha)".format(MODE))
     print("Queue root: {} ({}{})".format(
@@ -1878,12 +1970,28 @@ def main():
         ", demo-seeded" if DEMO_SEEDED else ""))
     print("Open: {}".format(url))
     print("Press Ctrl+C to stop.")
+    terminal_written = [False]
+
+    def _terminal(event):
+        if not terminal_written[0]:
+            terminal_written[0] = True
+            csl.record(QUEUE_ROOT, event, **lc)
+
     try:
         httpd.serve_forever()
+        _terminal("shutdown_graceful")  # sentinel-triggered clean shutdown
     except KeyboardInterrupt:
         print("\nStopping.")
+        _terminal("shutdown_graceful")
+    except Exception:
+        _terminal("shutdown_exception")
+        raise
     finally:
+        stop_flag["stop"] = True
         httpd.server_close()
+        csl.clear_stop_sentinel(QUEUE_ROOT, args.port)
+        csl.release_instance_lock(QUEUE_ROOT, args.port)
+    return 0
 
 
 if __name__ == "__main__":

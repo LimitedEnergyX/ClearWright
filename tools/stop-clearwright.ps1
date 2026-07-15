@@ -51,8 +51,22 @@ if (-not ($serverOk -and $queueOk -and $portOk)) {
 }
 
 # Graceful stop via the sentinel (server polls it, logs shutdown_graceful).
-$startTime = $proc.StartTime.ToUniversalTime().ToString('o')
-@{ pid = $procId; start_time = $startTime; at = (Get-Date).ToUniversalTime().ToString('o') } |
+# The server records its own process-start token (platform-specific) in the
+# instance-lock file and compares the sentinel against that exact value, so we
+# COPY the lock's start_time verbatim rather than re-deriving it in a different
+# format (a PowerShell ISO timestamp would never match and force-stop would
+# always fire). If the lock is missing/mismatched we still write the pid; the
+# server accepts a sentinel whose start_time matches, else the force-stop
+# fallback below handles it.
+$LockFile = Join-Path $LogsDir ("clearwright-{0}.lock" -f $Port)
+$lockStart = $null
+if (Test-Path -LiteralPath $LockFile) {
+    try {
+        $lock = Get-Content -LiteralPath $LockFile -Raw | ConvertFrom-Json
+        if ($lock.pid -eq $procId) { $lockStart = $lock.start_time }
+    } catch { }
+}
+@{ pid = $procId; start_time = $lockStart; at = (Get-Date).ToUniversalTime().ToString('o') } |
     ConvertTo-Json | Set-Content -LiteralPath $Sentinel -Encoding UTF8
 
 $deadline = (Get-Date).AddSeconds($GraceSeconds)

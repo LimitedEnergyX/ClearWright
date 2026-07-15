@@ -77,8 +77,12 @@ def run_proof(queue_root, message, actor="claude", role="orchestrator",
 
     repo_clean_before = _repo_clean(repo)
     steps = []
+    # The relay is an actionable request the proof flow immediately claims, so
+    # it must carry an explicit request intent under the v2 closed origin rule
+    # (a no-intent message never derives -- or resolves as -- a work item).
     relay = cwm.build_message(relay_actor, message, role="operator", source=source,
-                              direction="inbound", status="posted")
+                              direction="inbound", status="posted",
+                              intent="request")
     cwm.write_message(queue_root, relay)
     work_item_id = "message:" + relay["message_id"]
     thread_id = relay["thread_id"]

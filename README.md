@@ -111,9 +111,12 @@ This repository ships the local, single-machine foundation:
   thread continuation, and escalation to work items or clearance packets when a
   conversation turns into governed work.
 - A chat/work separation so normal conversation stays quiet: a message can carry
-  an `intent` (`chat` is plain conversation, `request` is actionable; omitted
-  means actionable). Chat messages are durable but never derive a work item and
-  never turn the health chip yellow; the composer defaults to Message and only
+  an `intent` (`chat` is plain conversation, `request` is actionable; under the
+  v2 closed origin rule a new message derives a work item ONLY with an explicit
+  `request` intent -- omitted means conversation, while pre-cutover records keep
+  the historical omitted-means-actionable convention via the frozen legacy
+  manifest). Chat messages are durable but never derive a work item and never
+  turn the health chip yellow; the composer defaults to Message and only
   Ask agent / Create work item / Request clearance make a message actionable.
 - An automated **Review Council** (`tools/clearwright_review_council.py`) that
   coordinates real GPT (OpenAI Responses API, `tools/clearwright_gpt_review.py`)

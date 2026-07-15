@@ -35,11 +35,13 @@ def run(func, **kw):
     return json.loads(buf.getvalue().strip().splitlines()[-1]), code
 
 
-def operator_msg(root, thread_id, work_item_id, body, at=None):
+def operator_msg(root, thread_id, work_item_id, body, at=None, intent=None):
+    # Authority/plain operator messages stay no-intent (they must never become
+    # origins); only the actionable setup request passes intent="request".
     msg = cwm.build_message("OPERATOR-0001", body, role="operator",
                             thread_id=thread_id, direction="inbound",
                             status="posted", source="operator-console",
-                            work_item_id=work_item_id)
+                            work_item_id=work_item_id, intent=intent)
     if at:
         msg["at"] = at
     cwm.write_message(root, msg)
@@ -85,8 +87,10 @@ class GateLifecycleTests(unittest.TestCase):
         base = tempfile.mkdtemp(prefix="gate_wf_")
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         self.root, *_ = server.resolve_queue(base)
-        # A real actionable work item so find_work_item resolves.
-        self.op = operator_msg(self.root, None, None, "Do the governed task X.")
+        # A real actionable work item so find_work_item resolves: under the v2
+        # closed origin rule that requires an explicit request intent.
+        self.op = operator_msg(self.root, None, None, "Do the governed task X.",
+                               intent="request")
         self.thread = self.op["thread_id"]
         self.wid = "message:" + self.op["message_id"]
 

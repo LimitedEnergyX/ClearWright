@@ -358,6 +358,19 @@ GATE_FAILURE_ERROR = "gate_creation_failed"
 # behavior is deterministic across repeated calls and process restarts.
 _COUNCIL_DIR_RE = re.compile(r"^cw-council-\d{8}T\d{12}$")
 
+# Sentinel distinguishing a genuinely ABSENT council "rounds" key (the one
+# supported legacy shape, treated as []) from any PRESENT value, which must
+# validate strictly -- truthiness never decides validity.
+_ABSENT = object()
+
+
+def _round_int(value):
+    """The exact supported round representation: a Python int parsed from a
+    JSON integer. bool is explicitly excluded (it subclasses int, so JSON
+    true == 1 would otherwise pass); floats, strings, and None are rejected.
+    true/false are never normalized to 1/0."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
 
 def _strict_json(path):
     """(data, state) with state 'ok' | 'absent' | 'unreadable'. Strict: a
@@ -467,9 +480,15 @@ def ensure_escalation_gate(root, council_id, outcome):
     # applies, judged here from the AUTHORITATIVE reload.
     if not wid or phase not in ESCALATION_PHASES:
         return None
-    recorded = council.get("rounds") or []
+    recorded = council.get("rounds", _ABSENT)
+    if recorded is _ABSENT:
+        # A genuinely ABSENT key is the one supported legacy shape. A PRESENT
+        # value must be a valid list -- including present null: truthiness
+        # never decides validity (`rounds or []` silently accepted false/0/""
+        # /{} and let gates build from unvalidated state).
+        recorded = []
     if (not isinstance(recorded, list)
-            or not all(isinstance(n, int) for n in recorded)
+            or not all(_round_int(n) for n in recorded)
             or len(set(recorded)) != len(recorded)):
         raise GateError(_failure_payload(
             "round_records_inconsistent", council_id, wid, phase,
@@ -481,11 +500,16 @@ def ensure_escalation_gate(root, council_id, outcome):
         if state != "ok":
             missing.append(n)
             continue
-        if data.get("round") != n:
+        # Valid-JSON non-object payloads never reach here: _strict_json
+        # classifies any non-dict as 'unreadable' (round_records_unreadable),
+        # so data is a dict on every 'ok' path -- deterministic, never an
+        # AttributeError on .get.
+        rv = data.get("round")
+        if not _round_int(rv) or rv != n:
             raise GateError(_failure_payload(
                 "round_records_inconsistent", council_id, wid, phase,
                 outcome_value,
-                "round file {} carries round={!r}".format(n, data.get("round"))))
+                "round file {} carries round={!r}".format(n, rv)))
         loaded.append(data)
     if missing:
         raise GateError(_failure_payload(

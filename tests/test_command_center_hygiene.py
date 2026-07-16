@@ -472,6 +472,16 @@ class IntegrationTests(unittest.TestCase):
         it = cww.derive_work_items(self.root, now=far)[0]
         self.assertEqual(it["presentation_state"], "stale")
 
+    def test_unclaimed_recently_active_is_waiting_on_claude(self):
+        # waiting_on_claude also covers an UNCLAIMED, recently-touched actionable
+        # item -> the UI summary for this state must be ownership-neutral.
+        request(self.root, "Fresh unclaimed request.")
+        it0 = cww.derive_work_items(self.root, now=NOW)[0]
+        just_after = plus_seconds(it0["created_at"], 60)
+        it = cww.derive_work_items(self.root, now=just_after)[0]
+        self.assertEqual(it["presentation_state"], "waiting_on_claude")
+        self.assertIsNone(it.get("claimed_by"))   # unclaimed
+
 
 # --------------------------------------------------------------------------- #
 # 25, 27, 28. Durable-input immutability, gate idempotency, unrelated records.
@@ -565,6 +575,12 @@ class UiWiringTests(unittest.TestCase):
 
     def test_context_actions_present(self):
         self.assertIn("function actionsForState", self.appjs)
+
+    def test_waiting_on_claude_summary_is_ownership_neutral(self):
+        # An unclaimed item can be waiting_on_claude, so the summary must not
+        # assert ownership ("Claimed and ...").
+        self.assertIn("Awaiting Claude's next step.", self.appjs)
+        self.assertNotIn("Claimed and awaiting", self.appjs)
 
     def test_summary_before_raw_records(self):
         # The human summary block is emitted before the collapsed raw records.

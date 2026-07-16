@@ -1084,17 +1084,22 @@ function filterSortQueue(items, mode, query) {
       return isGoverned(it) && DEFAULT_VIEW_STATES.includes(it.presentation_state) && matchQ(it);
     return isGoverned(it) && states.includes(it.presentation_state) && matchQ(it);
   };
-  // Sort tiebreak parses timestamps to instants (matching the Python
-  // derivation's parsed-time order), so mixed ISO encodings (trailing Z vs
-  // +00:00, differing fractional widths) order chronologically, not lexically.
-  // A timezone-naive string is treated as UTC (append 'Z') to match Python's
-  // _parse_iso, since Date.parse would otherwise read it in the browser's local
-  // zone and diverge from the server order.
+  // Sort tiebreak orders on MICROSECOND-precision instants to match the Python
+  // derivation exactly: Date.parse is millisecond-resolution, so the sub-
+  // millisecond microseconds (digits 4-6 of the fractional second) are added
+  // separately -> key = epoch_microseconds. Mixed ISO encodings (trailing Z vs
+  // +00:00, differing fractional widths) order chronologically, not lexically,
+  // and a timezone-naive string is treated as UTC (append 'Z') to match
+  // Python's _parse_iso (Date.parse would otherwise use the browser's local zone).
   const ts = (it) => {
     let s = it.last_activity_at || it.created_at || "";
-    if (s && !/[zZ]$|[+-]\d\d:?\d\d$/.test(s)) s += "Z";
-    const v = Date.parse(s);
-    return isNaN(v) ? -Infinity : v;
+    if (!s) return -Infinity;
+    if (!/[zZ]$|[+-]\d\d:?\d\d$/.test(s)) s += "Z";
+    const base = Date.parse(s);                 // milliseconds since epoch
+    if (isNaN(base)) return -Infinity;
+    const frac = /\.(\d+)/.exec(s);              // sub-second digits, if any
+    const micros = frac ? parseInt((frac[1] + "000000").slice(0, 6), 10) % 1000 : 0;
+    return base * 1000 + micros;                 // microseconds since epoch
   };
   return items.filter(inScope).sort((a, b) => {
     const ra = PSTATE_RANK[a.presentation_state] == null ? 9 : PSTATE_RANK[a.presentation_state];

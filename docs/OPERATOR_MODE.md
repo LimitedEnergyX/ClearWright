@@ -268,3 +268,34 @@ the sentinel. If the process does not exit within the deadline it force-stops;
 a forced stop produces no `shutdown_graceful` record, so the next start records
 `prior_unclean_shutdown` - this is documented, not hidden. There is no HTTP stop
 route; the sentinel is filesystem-local and operator-controlled.
+
+## Command Center: current-state view and queue hygiene
+
+The Command Center work queue shows **genuinely current, actionable governed
+work** by default. Every card's left value is the **last meaningful activity**
+(claim, progress, council round, gate action, verification, response, or
+completion) - not creation age; creation time appears only as a clearly labeled
+`created ·` fallback when nothing has happened since. Hover shows the exact event
+and source record.
+
+Presentation states are **derived, never written to durable governance state**
+(`clearwright_work.presentation_state`, Python-tested): `needs_operator`,
+`blocked`, `running`, `waiting_on_claude`, `waiting_on_operator`,
+`recently_completed`, `stale`, `superseded`, `historical`. Operator-required and
+blocked work is surfaced first and is never hidden by staleness or a missing
+heartbeat. **Claimed is not running:** ClearWright has no runner heartbeat
+channel, so runner state is derived honestly from claim age and recent activity
+and labeled `no heartbeat` / `runner unknown` when evidence is absent.
+
+Only governed work items appear in the queue; authority, chat, and note records
+are separated out (`record_class`) and remain reachable in the message tree and
+under History / All - **no durable record is closed, moved, reclassified, or
+altered** to clean the screen. Filters (Current / Needs attention / Running /
+Blocked / Stale / Recently completed / History-All), title/work-item-ID search,
+and attention-first sorting are pure presentation over the derived fields.
+
+A persistent top-bar **attention bar** shows live counts (operator-required,
+running, blocked, stale); a new unseen operator-required or incoming request
+pulses and plays one mutable ding, and clicking it navigates to the work item
+and highlights the message. **Opening the alert approves or executes nothing** -
+it is read-only navigation.

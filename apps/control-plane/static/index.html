@@ -21,7 +21,14 @@
       <button id="nav-history" class="nav-btn" type="button">History</button>
     </nav>
     <div class="topbar-actions">
-      <button id="attention-chip" class="attention-chip" type="button" title="Items needing an operator decision; click to filter the queue" hidden>Attention <span id="attention-count">0</span></button>
+      <div class="attention-bar" id="attention-bar" role="group" aria-label="Attention counts" hidden>
+        <button id="att-pulse" class="att-pulse" type="button" title="New item needs attention — open it (opening approves nothing)" hidden>●</button>
+        <button id="att-btn-operator" class="att-count att-count-operator" type="button" title="Operator required — click to filter"><span class="att-dot"></span>op <span id="att-count-operator">0</span></button>
+        <button id="att-btn-running" class="att-count att-count-running" type="button" title="Running — click to filter">run <span id="att-count-running">0</span></button>
+        <button id="att-btn-blocked" class="att-count att-count-blocked" type="button" title="Blocked — click to filter">blk <span id="att-count-blocked">0</span></button>
+        <button id="att-btn-stale" class="att-count att-count-stale" type="button" title="Stale — click to filter">stale <span id="att-count-stale">0</span></button>
+        <button id="att-mute" class="att-mute" type="button" aria-pressed="false" title="Mute the attention sound">🔔</button>
+      </div>
       <span class="actor" id="actor-label">operator</span>
       <button id="health-chip" class="health-chip" type="button" aria-label="System health details"><span class="health-dot" aria-hidden="true"></span><span id="health-label">Checking</span></button>
       <button id="reset-btn" class="btn btn-quiet" type="button">Reset demo</button>
@@ -52,6 +59,16 @@
           <span>Work queue <span class="help" tabindex="0" role="button" aria-label="About the work queue">?<span class="tip">Actionable work only, derived from the live queue and messages: unanswered actionable requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Normal chat stays in the Conversation tab and never appears here. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></span>
           <button id="queue-new-btn" class="btn btn-quiet" type="button" title="Start a new conversation">New</button>
         </div>
+        <div class="queue-filters" id="queue-filters" role="tablist" aria-label="Queue filters">
+          <button class="qf-chip is-active" data-filter="current" type="button">Current</button>
+          <button class="qf-chip" data-filter="needs_attention" type="button">Needs attention</button>
+          <button class="qf-chip" data-filter="running" type="button">Running</button>
+          <button class="qf-chip" data-filter="blocked" type="button">Blocked</button>
+          <button class="qf-chip" data-filter="stale" type="button">Stale</button>
+          <button class="qf-chip" data-filter="recently_completed" type="button">Recently completed</button>
+          <button class="qf-chip" data-filter="all" type="button">History / All</button>
+        </div>
+        <input id="queue-search" class="queue-search" type="search" placeholder="Search title or work-item ID" aria-label="Search the work queue">
         <div id="queue-groups"><p class="muted queue-empty">Loading queue...</p></div>
 
         <details class="panel panel-secondary diag-panel" id="comms-panel">

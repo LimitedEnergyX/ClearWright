@@ -126,16 +126,23 @@ class WorkQueueTests(SourceTestCase):
     attention reason); the full request text lives in Overview."""
 
     def test_groups_and_row_fields(self):
-        self.assertIn("function buildQueueGroups", self.appjs)
-        for group in ("attention", "active", "recent", "archived"):
-            self.assertIn(group, self.appjs)
+        # Rows are presentation-state cards rendered by renderQueue/queueCard,
+        # showing last-meaningful-activity age (with a labeled creation
+        # fallback) rather than raw creation age.
+        self.assertIn("function renderQueue", self.appjs)
+        self.assertIn("function queueCard", self.appjs)
+        for state in ("needs_operator", "running", "waiting_on_claude"):
+            self.assertIn(state, self.appjs)
         self.assertIn("relativeAge", self.appjs)
-        self.assertIn("queuePhaseHint", self.appjs)
+        self.assertIn("function activityAge", self.appjs)
 
     def test_attention_rows_carry_a_reason(self):
-        self.assertIn("CTA decision required", self.appjs)
-        self.assertIn("RFI awaiting clarification", self.appjs)
-        self.assertIn("council escalated: operator required", self.appjs)
+        # The generic per-row reason strings became per-state plain-English
+        # summaries plus honest runner labels (Command Center Queue Hygiene).
+        self.assertIn("function stateSummaryText", self.appjs)
+        self.assertIn("Waiting on an operator decision", self.appjs)
+        self.assertIn("function runnerLabel", self.appjs)
+        self.assertIn("no heartbeat", self.appjs)
 
     def test_recent_group_loads_on_every_view(self):
         # Live post-archive regression: conversations feed the queue's Recent
@@ -147,17 +154,17 @@ class WorkQueueTests(SourceTestCase):
         self.assertIn('currentView !== "work"', self.appjs)
 
     def test_attention_grouping_is_work_item_scoped(self):
-        # Stabilization: Attention and the phase hint are decided by each work
-        # item's OWN server-derived state, not by thread-level council scans, so
-        # a superseded escalation on one item never flags a sibling and two
-        # items in one thread route independently. (Supersedes the thread-based
-        # latestCouncilFor fix.)
+        # Attention and the current-state grouping are decided by each work
+        # item's OWN server-derived presentation_state, not by thread-level
+        # council scans, so a superseded escalation on one item never flags a
+        # sibling and two items in one thread route independently.
         self.assertNotIn("function latestCouncilFor", self.appjs)
         self.assertNotIn("const gatedThreads", self.appjs)
-        self.assertIn('it.status === "operator_required"', self.appjs)
-        hint_at = self.appjs.index("function queuePhaseHint")
-        hint_body = self.appjs[hint_at:self.appjs.index("\n}", hint_at)]
-        self.assertNotIn("lastQueueCouncils", hint_body)
+        # Grouping keys on the per-item presentation_state field.
+        self.assertIn("it.presentation_state", self.appjs)
+        render_at = self.appjs.index("function renderQueue")
+        render_body = self.appjs[render_at:self.appjs.index("\n}", render_at)]
+        self.assertNotIn("lastQueueCouncils", render_body)
 
 
 class ThreeRegionLayoutTests(SourceTestCase):
@@ -307,8 +314,10 @@ class NavigationTests(SourceTestCase):
         for nav in ("nav-command", "nav-work", "nav-history"):
             self.assertIn('id="' + nav + '"', self.html)
         self.assertIn("function showView", self.appjs)
-        self.assertIn('id="attention-chip"', self.html)
-        self.assertIn("queueAttentionOnly", self.appjs)
+        # The single Attention chip became the persistent top-bar attention bar
+        # with live counts; filtering is driven by queueFilterMode + chips.
+        self.assertIn('id="attention-bar"', self.html)
+        self.assertIn("queueFilterMode", self.appjs)
 
 
 class ToolLogTests(SourceTestCase):

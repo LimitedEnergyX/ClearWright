@@ -160,9 +160,11 @@ class UiTests(unittest.TestCase):
         self.assertIn("copy-btn", self.appjs)
         self.assertIn("data-copy-summary", self.appjs)
         self.assertIn("runSummaryText", self.appjs)
-        # Run filters became queue groups plus the Attention filter chip.
-        self.assertIn("function buildQueueGroups", self.appjs)
-        self.assertIn('id="attention-chip"', self.html)
+        # Run filters became presentation-state queue groups plus the persistent
+        # top-bar attention bar and filter chips (Command Center Queue Hygiene).
+        self.assertIn("function renderQueue", self.appjs)
+        self.assertIn('id="attention-bar"', self.html)
+        self.assertIn('id="queue-filters"', self.html)
 
     def test_history_view_intact(self):
         self.assertIn('id="history-view"', self.html)

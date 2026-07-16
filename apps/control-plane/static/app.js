@@ -137,6 +137,33 @@ function renderPhaseStepper(ts) {
   }).join('<span class="step-link" aria-hidden="true"></span>');
 }
 
+// The derived work item currently selected (carries presentation_state,
+// runner_state, last_activity_*, record_class). Read-only lookup.
+function selectedDerivedItem() {
+  if (!selectedWorkItemId) return null;
+  return (lastWorkItems || []).find((it) => it.work_item_id === selectedWorkItemId) || null;
+}
+
+// Plain-English "what is happening" line derived from presentation state
+// (section 7). Presentation only; never replaces the authoritative records.
+function stateSummaryText(pstate, canonical) {
+  switch (pstate) {
+    case "needs_operator": return "Waiting on an operator decision before work can continue.";
+    case "running": return "Claude is actively working this item (recent activity).";
+    case "blocked": return "Blocked by an integrity/record issue that needs resolving.";
+    case "waiting_on_operator": return "Claude has asked the operator and is awaiting a reply.";
+    case "waiting_on_claude":
+      if (canonical === "planning") return "In plan review with the council.";
+      if (canonical === "verification") return "In verification with the council.";
+      return "Claimed and awaiting Claude's next step.";
+    case "recently_completed": return "Recently completed.";
+    case "stale": return "No meaningful activity recently; may need a nudge.";
+    case "superseded": return "Superseded by a later decision.";
+    case "historical": return "Historical record.";
+    default: return "";
+  }
+}
+
 function renderTaskHeader(ts) {
   const el = document.getElementById("task-header");
   if (!el) return;
@@ -147,8 +174,44 @@ function renderTaskHeader(ts) {
   const gate = ts.gate;
   const claim = ts.claim || {};
   const council = ts.current_council;
+  const di = selectedDerivedItem();
+  const pstate = di && di.presentation_state;
+
+  // Human summary FIRST (section 7): one primary status + one primary
+  // next-action, plus what/owner/last-activity. Raw records follow, collapsed.
   let html = '<div class="th-title">' + esc(ts.title || ts.thread_id) + "</div>";
-  html += '<div class="th-meta">';
+  html += '<div class="th-summary">';
+  if (pstate) {
+    html += '<span class="th-chip q-state q-state-' + esc(pstate) + '">' +
+      esc(PSTATE_LABEL[pstate] || pstate) + "</span>";
+  } else {
+    html += '<span class="th-chip th-status th-status-' + esc(ts.status) + '">' + esc(ts.status) + "</span>";
+  }
+  const owner = claim.claimed ? "claimed by " + (claim.claimed_by || "?") : "unclaimed";
+  html += '<span class="th-owner">' + esc(owner) + "</span>";
+  if (di) {
+    const rl = runnerLabel(di);
+    if (rl) html += '<span class="th-runner">' + esc(rl) + "</span>";
+    const age = activityAge(di);
+    if (age) html += '<span class="th-activity" title="last meaningful activity: ' +
+      esc(di.last_activity_event || "created") + '">' + esc(age) + " ago</span>";
+  }
+  html += "</div>";
+  if (pstate) html += '<div class="th-what">' + esc(stateSummaryText(pstate, ts.status)) + "</div>";
+  html += '<div class="th-next">Next: ' + esc(ts.next_action || "") + "</div>";
+
+  // Context-aware, read-only actions (section 9). PRIMARY key is the derived
+  // presentation state; each button navigates only -- no write path.
+  if (pstate) {
+    const acts = actionsForState(pstate, ts.status);
+    html += '<div class="th-actions">' + acts.map(function (a) {
+      return '<button class="th-action" type="button" data-nav="' + esc(a[1]) + '">' + esc(a[0]) + "</button>";
+    }).join("") + "</div>";
+  }
+
+  // Technical records, collapsed (section 7): ids, canonical status, council,
+  // gate. The summary above never replaces these authoritative fields.
+  html += '<details class="th-raw"><summary>Technical records</summary><div class="th-meta">';
   if (ts.work_item_id) html += '<span class="th-chip mono" title="work item">' + esc(ts.work_item_id) + "</span>";
   html += '<span class="th-chip th-status th-status-' + esc(ts.status) + '">' + esc(ts.status) + "</span>";
   html += '<span class="th-chip th-phase">' + esc(PHASE_LABELS[ts.phase] || ts.phase) + "</span>";
@@ -160,11 +223,7 @@ function renderTaskHeader(ts) {
   if (gate) {
     html += '<span class="th-chip th-gate">unresolved gate ' + esc(gate.gate_id) + "</span>";
   }
-  html += '<span class="th-chip">' + (claim.claimed
-    ? "claimed by " + esc(claim.claimed_by || "?")
-    : "unclaimed") + "</span>";
-  html += "</div>";
-  html += '<div class="th-next">Next: ' + esc(ts.next_action || "") + "</div>";
+  html += "</div></details>";
   el.innerHTML = html;
 }
 
@@ -898,7 +957,6 @@ const WORK_KIND_LABEL = {
 let lastWorkItems = [];
 let lastQueueCouncils = [];
 let lastArchiveIndex = { archived: [], count: 0 };
-let queueAttentionOnly = false;
 
 function relativeAge(iso) {
   if (!iso) return "";
@@ -911,145 +969,317 @@ function relativeAge(iso) {
   return Math.floor(sec / 86400) + "d";
 }
 
-// The newest council per thread (the API returns councils newest-first). A
-// A phase hint for queue rows derived from the WORK ITEM'S OWN server-derived
-// state (the selected task gets the precise phase via /api/task-state). Because
-// the state is per work item, a superseded escalation on a sibling item can
-// never flag this row, and two items in one thread hint independently.
-const _STATE_PHASE = {
-  operator_required: "Authority", verification: "Verify", planning: "Plan Review",
-  done: "Complete", closed: "Complete", superseded: "Complete",
-  claimed: "Execute", open: "Request", malformed: "Malformed",
-  legacy_ambiguity: "Ambiguous",
+// --------------------------------------------------------------------------- //
+// Command Center current-state view. The DETERMINISTIC classification lives
+// server-side in clearwright_work.py (presentation_state / record_class /
+// last_activity_* / runner_state / queue_view, all Python-tested). This UI is a
+// THIN renderer over those derived fields; filterSortQueue/attentionCounts below
+// mirror the Python queue_view/attention_counts for identical behavior.
+// --------------------------------------------------------------------------- //
+
+const PSTATE_LABEL = {
+  needs_operator: "Needs operator", running: "Running", blocked: "Blocked",
+  waiting_on_operator: "Waiting on operator", waiting_on_claude: "Waiting on Claude",
+  recently_completed: "Recently completed", stale: "Stale",
+  superseded: "Superseded", historical: "Historical",
+};
+// Mirrors clearwright_work._DEFAULT_VIEW_STATES / _SORT_RANK / _FILTER_STATES.
+const DEFAULT_VIEW_STATES = ["needs_operator", "blocked", "running",
+  "waiting_on_claude", "waiting_on_operator", "recently_completed"];
+const PSTATE_RANK = { needs_operator: 0, running: 1, blocked: 2,
+  waiting_on_operator: 3, waiting_on_claude: 3, recently_completed: 4,
+  stale: 5, superseded: 6, historical: 7 };
+const FILTER_STATES = {
+  needs_attention: ["needs_operator"], running: ["running"],
+  blocked: ["blocked"], stale: ["stale"], recently_completed: ["recently_completed"],
 };
 
-function queuePhaseHint(threadId, status) {
-  return _STATE_PHASE[status] || "Request";
+let queueFilterMode = "current";
+let queueSearch = "";
+
+// Only governed work items appear in the governed queue; authority/chat/note
+// records are separated out (section 5). Non-message kinds are always governed.
+function isGoverned(it) {
+  return it.kind !== "message" ||
+    (it.record_class || "governed_work") === "governed_work";
 }
 
-function queueRow(entry) {
-  // Selection is keyed on the CANONICAL work-item id so two work items sharing
-  // one conversation thread select independently; thread id rides along only
-  // for the conversation timeline.
-  const selected = (entry.work_item_id && entry.work_item_id === selectedWorkItemId)
-    || (!entry.work_item_id && entry.thread_id && entry.thread_id === selectedConvThread);
-  const bits = ['<span class="q-status q-status-' + esc(entry.status) + '">' + esc(entry.status) + "</span>"];
-  if (entry.phase) bits.push('<span class="q-phase">' + esc(entry.phase) + "</span>");
-  if (entry.age) bits.push('<span class="q-age">' + esc(entry.age) + "</span>");
-  return '<div class="q-row' + (selected ? " is-selected" : "") +
-    '" data-thread="' + esc(entry.thread_id || "") +
-    '" data-work-item="' + esc(entry.work_item_id || "") +
-    '" data-archived="' + (entry.archived ? "1" : "") + '">' +
-    '<div class="q-title">' + esc((entry.title || "").slice(0, 72)) + "</div>" +
-    '<div class="q-meta">' + bits.join("") + "</div>" +
-    (entry.reason ? '<div class="q-reason">' + esc(entry.reason) + "</div>" : "") +
+// Last meaningful activity age with a LABELED creation-time fallback, so
+// creation age is never silently presented as recency (section 3).
+function activityAge(it) {
+  if (it.last_activity_at) return relativeAge(it.last_activity_at);
+  const base = relativeAge(it.created_at);
+  return base ? "created · " + base : "";
+}
+
+function runnerLabel(it) {
+  const r = it.runner_state;
+  if (!r || r === "active_runner") return "";
+  return { claimed_idle: "idle", waiting_on_operator: "awaiting operator",
+    waiting_on_council: "in council", waiting_on_ci_or_external: "awaiting external",
+    unowned: "unclaimed", stale_or_no_heartbeat: "no heartbeat",
+    unknown: "runner unknown" }[r] || "";
+}
+
+// Read-only context actions from canonical + presentation state (section 9).
+// PRIMARY key is presentation_state; canonical only refines the verb. Every
+// action is a GET/navigation destination -- there is no write path.
+function actionsForState(pstate, canonical) {
+  switch (pstate) {
+    case "needs_operator":
+      return canonical === "operator_required"
+        ? [["View gate", "gate"], ["View council", "council"]]
+        : [["Open request", "conv"], ["View council", "council"]];
+    case "blocked": return [["Inspect record", "conv"], ["View history", "history"]];
+    case "running": return [["Open conversation", "conv"], ["View evidence", "evidence"]];
+    case "waiting_on_claude":
+      if (canonical === "planning") return [["View council", "council"], ["View findings", "evidence"]];
+      if (canonical === "verification") return [["View verification", "council"], ["View evidence", "evidence"]];
+      return [["Open request", "conv"], ["Open conversation", "conv"]];
+    case "waiting_on_operator": return [["Open conversation", "conv"], ["View council", "council"]];
+    case "stale": return [["Open conversation", "conv"], ["View history", "history"]];
+    default: return [["View evidence", "evidence"], ["View history", "history"]];
+  }
+}
+
+function queueCard(it) {
+  const ps = it.presentation_state || "waiting_on_claude";
+  const selected = it.work_item_id && it.work_item_id === selectedWorkItemId;
+  const bits = ['<span class="q-state q-state-' + esc(ps) + '">' +
+    esc(PSTATE_LABEL[ps] || ps) + "</span>"];
+  const owner = it.claimed_by || (it.kind !== "message" ? "unclaimed" : "");
+  if (owner) bits.push('<span class="q-owner">' + esc(owner) + "</span>");
+  const rl = runnerLabel(it);
+  if (rl) bits.push('<span class="q-runner">' + esc(rl) + "</span>");
+  const age = activityAge(it);
+  if (age) bits.push('<span class="q-age" title="last meaningful activity: ' +
+    esc(it.last_activity_event || "created") + '">' + esc(age) + "</span>");
+  const opFlag = ps === "needs_operator"
+    ? '<span class="q-opflag" title="operator action required">◉ operator</span>' : "";
+  // Technical ids ride on data attributes only; the primary card stays readable.
+  const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
+  return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
+    '" data-thread="' + esc(it.thread_id || "") +
+    '" data-work-item="' + esc(it.work_item_id || "") + '">' +
+    '<div class="q-title">' + title + "</div>" +
+    '<div class="q-meta">' + bits.join("") + opFlag + "</div>" +
     "</div>";
 }
 
-function buildQueueGroups() {
-  const attention = [];
-  const active = [];
-  const seenThreads = new Set();
-
-  // Attention: anything waiting on an operator decision -- CTA packets, RFI
-  // packets, and threads whose latest council escalated operator_required.
-  lastWorkItems.forEach((it) => {
-    if (it.kind === "packet" || it.kind === "rfi") {
-      attention.push({
-        thread_id: it.thread_id, work_item_id: it.work_item_id,
-        title: it.title || it.summary || it.packet_id,
-        status: it.status || "open",
-        phase: it.kind === "rfi" ? "Authority" : "Authority",
-        age: relativeAge(it.created_at),
-        reason: it.kind === "rfi" ? "RFI awaiting clarification"
-          : "CTA decision required (clear, deny, or RFI)",
-      });
-    }
+// Pure filter + sort mirroring clearwright_work.queue_view (Python-tested). No
+// mutating request is ever issued; durable order is never changed.
+function filterSortQueue(items, mode, query) {
+  const q = (query || "").trim().toLowerCase();
+  const matchQ = (it) => !q || (String(it.title || "").toLowerCase().includes(q) ||
+    String(it.work_item_id || "").toLowerCase().includes(q));
+  const inScope = (it) => {
+    if (mode === "all") return matchQ(it);
+    if (mode === "current")
+      return isGoverned(it) && DEFAULT_VIEW_STATES.includes(it.presentation_state) && matchQ(it);
+    const states = FILTER_STATES[mode];
+    if (!states)
+      return isGoverned(it) && DEFAULT_VIEW_STATES.includes(it.presentation_state) && matchQ(it);
+    return isGoverned(it) && states.includes(it.presentation_state) && matchQ(it);
+  };
+  return items.filter(inScope).sort((a, b) => {
+    const ra = PSTATE_RANK[a.presentation_state] == null ? 9 : PSTATE_RANK[a.presentation_state];
+    const rb = PSTATE_RANK[b.presentation_state] == null ? 9 : PSTATE_RANK[b.presentation_state];
+    if (ra !== rb) return ra - rb;
+    const ta = a.last_activity_at || a.created_at || "";
+    const tb = b.last_activity_at || b.created_at || "";
+    return tb < ta ? -1 : (tb > ta ? 1 : 0);
   });
-  // Attention is decided by each WORK ITEM'S OWN state, not the thread's:
-  // the server derives operator_required per work item (its own unresolved
-  // gate), so two items sharing one thread route independently -- a gated
-  // item goes to Attention while its non-gated sibling stays Active.
-  lastWorkItems.forEach((it) => {
-    if (it.kind !== "message") return;
-    if (it.thread_id) seenThreads.add(it.thread_id);
-    const entry = {
-      thread_id: it.thread_id, work_item_id: it.work_item_id,
-      title: it.title || it.summary || "",
-      status: it.status || "open",
-      phase: queuePhaseHint(it.thread_id, it.status),
-      age: relativeAge(it.created_at),
-    };
-    if (it.status === "operator_required") {
-      entry.reason = "council escalated: operator required";
-      entry.phase = "Authority";
-      attention.push(entry);
-    } else if (it.status === "legacy_ambiguity") {
-      entry.reason = "legacy record ambiguity (see integrity warnings)";
-      attention.push(entry);
-    } else {
-      active.push(entry);
-    }
+}
+
+function attentionCounts(items) {
+  const c = { running: 0, needs_operator: 0, blocked: 0, stale: 0 };
+  items.forEach((it) => {
+    if (isGoverned(it) && c[it.presentation_state] !== undefined) c[it.presentation_state]++;
   });
-  lastWorkItems.forEach((it) => {
-    if (it.kind === "in_progress") {
-      active.push({
-        thread_id: it.thread_id, work_item_id: it.work_item_id,
-        title: it.title || it.packet_id,
-        status: "in progress", phase: "Execute", age: "",
-      });
-    }
-  });
-
-  // Recent: terminal conversations (responded / chat), newest first.
-  const recent = (lastConversations || [])
-    .filter((c) => !seenThreads.has(c.thread_id) &&
-      (c.status === "responded" || c.status === "chat"))
-    .slice(0, 12)
-    .map((c) => ({
-      thread_id: c.thread_id, title: c.title || c.thread_id,
-      status: c.status, phase: queuePhaseHint(c.thread_id, c.status),
-      age: relativeAge(c.last_timestamp),
-    }));
-
-  const archived = (lastArchiveIndex.archived || [])
-    .filter((r) => r.type === "thread")
-    .map((r) => ({
-      thread_id: r.id, title: r.id, status: "archived", phase: "",
-      age: "", archived: true,
-    }));
-
-  return { attention, active, recent, archived };
+  return c;
 }
 
 function renderQueue() {
   const el = document.getElementById("queue-groups");
   if (!el) return;
-  const groups = buildQueueGroups();
-  updateAttentionChip(groups.attention.length);
-  const order = queueAttentionOnly
-    ? [["Attention", groups.attention]]
-    : [["Attention", groups.attention], ["Active", groups.active],
-       ["Recent", groups.recent], ["Archived", groups.archived]];
-  let html = "";
-  order.forEach(([label, rows]) => {
-    if (label !== "Attention" && !rows.length) return;
-    html += '<div class="q-group"><div class="q-group-head">' + esc(label) +
-      ' <span class="q-count">' + rows.length + "</span></div>";
-    html += rows.length ? rows.map(queueRow).join("")
-      : '<p class="muted q-empty">Nothing needs an operator decision.</p>';
-    html += "</div>";
+  updateAttentionBar(attentionCounts(lastWorkItems), lastWorkItems);
+  const rows = filterSortQueue(lastWorkItems, queueFilterMode, queueSearch);
+  syncFilterChips();
+  if (!rows.length) {
+    el.innerHTML = '<p class="muted queue-empty">Nothing here in this view. Try the History / All filter.</p>';
+    return;
+  }
+  let html = "", curState = null;
+  rows.forEach((it) => {
+    if (it.presentation_state !== curState) {
+      if (curState !== null) html += "</div>";
+      curState = it.presentation_state;
+      html += '<div class="q-group"><div class="q-group-head">' +
+        esc(PSTATE_LABEL[curState] || curState) + "</div>";
+    }
+    html += queueCard(it);
   });
-  el.innerHTML = html || '<p class="muted queue-empty">No work yet.</p>';
+  if (curState !== null) html += "</div>";
+  el.innerHTML = html;
 }
 
-function updateAttentionChip(count) {
-  const chip = document.getElementById("attention-chip");
-  if (!chip) return;
-  chip.hidden = false;
-  chip.classList.toggle("attention-on", count > 0);
-  chip.classList.toggle("is-filtering", queueAttentionOnly);
-  document.getElementById("attention-count").textContent = String(count);
+function syncFilterChips() {
+  document.querySelectorAll("#queue-filters [data-filter]").forEach((b) => {
+    b.classList.toggle("is-active", b.getAttribute("data-filter") === queueFilterMode);
+  });
+}
+
+// --------------------------------------------------------------------------- //
+// Persistent global attention alert (section 10): top-bar counts plus a
+// one-shot pulse + audible ding for each NEW unseen operator-required / incoming
+// request, keyed on the stable work item id. Opening navigates only -- it
+// approves/executes nothing. Seen-set and mute persist in localStorage.
+// --------------------------------------------------------------------------- //
+
+const ATT_SEEN_KEY = "cw_att_seen_v1";
+const ATT_MUTE_KEY = "cw_att_mute_v1";
+// Keys already audibly announced this session, so each NEW unseen alert_key
+// dings exactly once even when several are outstanding at the same time.
+const _attDinged = new Set();
+
+function attSeenSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(ATT_SEEN_KEY) || "[]")); }
+  catch (e) { return new Set(); }
+}
+function attMarkSeen(keys) {
+  const s = attSeenSet();
+  keys.forEach((k) => s.add(k));
+  try { localStorage.setItem(ATT_SEEN_KEY, JSON.stringify(Array.from(s))); } catch (e) { /* private mode */ }
+}
+function attIsMuted() {
+  try { return localStorage.getItem(ATT_MUTE_KEY) === "1"; } catch (e) { return false; }
+}
+function attSetMuted(muted) {
+  try { localStorage.setItem(ATT_MUTE_KEY, muted ? "1" : "0"); } catch (e) { /* private mode */ }
+  const btn = document.getElementById("att-mute");
+  if (btn) {
+    btn.classList.toggle("is-muted", muted);
+    btn.textContent = muted ? "🔇" : "🔔";
+    btn.setAttribute("aria-pressed", muted ? "true" : "false");
+  }
+}
+
+let _attAudioCtx = null;
+// ONE synthesized beep (no external asset). Never loops. Muted -> silent.
+function playAttentionDing() {
+  if (attIsMuted()) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    _attAudioCtx = _attAudioCtx || new Ctx();
+    const ctx = _attAudioCtx;
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.16, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.34);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.35);
+  } catch (e) { /* audio is best-effort; the visual pulse still shows */ }
+}
+
+// Every attention event keys on the stable work item id ("wi:" + work_item_id).
+// Sources: needs_operator work items, and a pulse.incoming source. Fail closed
+// on an unresolved target (no key). The highlight message id is derived from the
+// work item id itself, never an ambiguous message search.
+function currentAlertKeys(items) {
+  const keys = new Map();
+  (items || []).forEach((it) => {
+    if (isGoverned(it) && it.presentation_state === "needs_operator" && it.work_item_id) {
+      keys.set("wi:" + it.work_item_id, it.work_item_id);
+    }
+  });
+  const p = lastHealth && lastHealth.pulse;
+  if (p && p.incoming && p.source_work_item_id) {
+    keys.set("wi:" + p.source_work_item_id, p.source_work_item_id);
+  }
+  return keys;
+}
+
+function updateAttentionBar(counts, items) {
+  const setC = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = String(n); };
+  setC("att-count-running", counts.running);
+  setC("att-count-operator", counts.needs_operator);
+  setC("att-count-blocked", counts.blocked);
+  setC("att-count-stale", counts.stale);
+  const bar = document.getElementById("attention-bar");
+  if (bar) bar.hidden = false;
+
+  const keys = currentAlertKeys(items || lastWorkItems);
+  const seen = attSeenSet();
+  const fresh = Array.from(keys.keys()).filter((k) => !seen.has(k));
+  const pulse = document.getElementById("att-pulse");
+  if (fresh.length) {
+    if (pulse) {
+      pulse.hidden = false;
+      pulse.dataset.target = keys.get(fresh[0]);
+    }
+    // Ding once per NEW unseen key, even when several are outstanding: a second
+    // operator-required item that arrives before the first is opened still dings.
+    const undinged = fresh.filter((k) => !_attDinged.has(k));
+    if (undinged.length) {
+      undinged.forEach((k) => _attDinged.add(k));
+      playAttentionDing();           // one-shot; never loops
+    }
+  } else if (pulse) {
+    pulse.hidden = true;
+  }
+}
+
+// Opening the alert NAVIGATES ONLY -- it approves/executes nothing. Only the
+// opened record is marked seen, so any other unseen record keeps pulsing (one
+// alert per durable record).
+function openAttention() {
+  const pulse = document.getElementById("att-pulse");
+  const wid = pulse && pulse.dataset.target;
+  if (wid) {
+    attMarkSeen(["wi:" + wid]);
+    navigateToWorkItem(wid);
+  }
+}
+
+// Deterministic hash route: #work=<work_item_id>[&msg=<message_id>]. The
+// highlight message id is derived from the work item id itself (a message work
+// item id IS "message:" + message_id) -- no message search, no ambiguity.
+function navigateToWorkItem(workItemId) {
+  const msgId = workItemId && workItemId.indexOf("message:") === 0
+    ? workItemId.slice("message:".length) : "";
+  location.hash = "#work=" + encodeURIComponent(workItemId) +
+    (msgId ? "&msg=" + encodeURIComponent(msgId) : "");
+  selectTask(null, workItemId);
+  showView("work");
+  if (msgId) setTimeout(() => highlightMessage(msgId), 200);
+}
+
+function highlightMessage(messageId) {
+  try {
+    const sel = '[data-message-id="' +
+      (window.CSS && CSS.escape ? CSS.escape(messageId) : messageId) + '"]';
+    const node = document.querySelector(sel);
+    if (node) {
+      node.classList.add("msg-highlight");
+      node.scrollIntoView({ block: "center" });
+    }
+  } catch (e) { /* malformed id -> no highlight, never throws */ }
+}
+
+// Apply a #work=...&msg=... route on load / hashchange (navigation only).
+function applyWorkHashRoute() {
+  const h = location.hash || "";
+  const m = /[#&]work=([^&]+)/.exec(h);
+  if (!m) return;
+  const wid = decodeURIComponent(m[1]);
+  selectTask(null, wid);
+  showView("work");
+  const mm = /[#&]msg=([^&]+)/.exec(h);
+  if (mm) setTimeout(() => highlightMessage(decodeURIComponent(mm[1])), 200);
 }
 
 async function refreshWorkItems() {
@@ -1559,7 +1789,7 @@ function buildConversationTab(run) {
     const cls = "conv-msg" + (mine ? " conv-msg-operator" : "") +
       (m.direction === "outbound" ? " conv-msg-outbound" : "") +
       (tag ? " " + tag.cls : "");
-    html += '<div class="' + cls + '">' +
+    html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
       (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
       '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
       '<div class="conv-msg-meta">' + meta + "</div></div>";
@@ -2556,12 +2786,41 @@ function wire() {
   document.getElementById("nav-command").addEventListener("click", () => showView("command"));
   document.getElementById("nav-work").addEventListener("click", () => showView("work"));
   document.getElementById("nav-history").addEventListener("click", () => showView("history"));
-  // Attention is a queue filter, never a separate page.
-  document.getElementById("attention-chip").addEventListener("click", () => {
-    queueAttentionOnly = !queueAttentionOnly;
+  // Global attention bar: each count click applies the matching filter; the
+  // pulse opens (navigates to) the flagged item; mute toggles the audible ding.
+  const attGoto = (mode) => {
+    queueFilterMode = mode;
     if (currentView === "history") showView("command");
     renderQueue();
+  };
+  const wireCount = (id, mode) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", () => attGoto(mode));
+  };
+  wireCount("att-btn-running", "running");
+  wireCount("att-btn-operator", "needs_attention");
+  wireCount("att-btn-blocked", "blocked");
+  wireCount("att-btn-stale", "stale");
+  const attMuteBtn = document.getElementById("att-mute");
+  if (attMuteBtn) attMuteBtn.addEventListener("click", () => attSetMuted(!attIsMuted()));
+  const attPulse = document.getElementById("att-pulse");
+  if (attPulse) attPulse.addEventListener("click", openAttention);
+  attSetMuted(attIsMuted());   // reflect the persisted mute state on load
+
+  // Queue filter chips + search (pure presentation over the derived fields).
+  const filtersEl = document.getElementById("queue-filters");
+  if (filtersEl) filtersEl.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-filter]");
+    if (!b) return;
+    queueFilterMode = b.getAttribute("data-filter");
+    renderQueue();
   });
+  const searchEl = document.getElementById("queue-search");
+  if (searchEl) searchEl.addEventListener("input", (e) => {
+    queueSearch = e.target.value || "";
+    renderQueue();
+  });
+  window.addEventListener("hashchange", applyWorkHashRoute);
 
   // Work queue: clicking a row selects that task everywhere.
   document.getElementById("queue-groups").addEventListener("click", (e) => {
@@ -2570,6 +2829,17 @@ function wire() {
     const thread = row.getAttribute("data-thread");
     const workItem = row.getAttribute("data-work-item");
     if (thread || workItem) selectTask(thread, workItem);
+  });
+
+  // Context-aware task actions are READ-ONLY navigation only: they switch view
+  // or open a read-only tab and NEVER issue a write/lifecycle request.
+  const taskHeaderEl = document.getElementById("task-header");
+  if (taskHeaderEl) taskHeaderEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".th-action");
+    if (!btn) return;
+    const nav = btn.getAttribute("data-nav");
+    if (nav === "history") showView("history");
+    else showView("work");   // conv / council / evidence / gate / verification tabs
   });
   document.getElementById("queue-new-btn").addEventListener("click", () => {
     selectTask(null);
@@ -2681,6 +2951,7 @@ function wire() {
   // Conversations feed the queue's Recent group on every view, so load once
   // at boot; the fast poll below only runs while the Work view is open.
   loadConversations();
+  applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
   setInterval(refresh, LIVE_MS);
   setInterval(refreshAgentEvents, LIVE_MS);
   setInterval(refreshMessages, LIVE_MS);

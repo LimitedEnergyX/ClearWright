@@ -1087,8 +1087,13 @@ function filterSortQueue(items, mode, query) {
   // Sort tiebreak parses timestamps to instants (matching the Python
   // derivation's parsed-time order), so mixed ISO encodings (trailing Z vs
   // +00:00, differing fractional widths) order chronologically, not lexically.
+  // A timezone-naive string is treated as UTC (append 'Z') to match Python's
+  // _parse_iso, since Date.parse would otherwise read it in the browser's local
+  // zone and diverge from the server order.
   const ts = (it) => {
-    const v = Date.parse(it.last_activity_at || it.created_at || "");
+    let s = it.last_activity_at || it.created_at || "";
+    if (s && !/[zZ]$|[+-]\d\d:?\d\d$/.test(s)) s += "Z";
+    const v = Date.parse(s);
     return isNaN(v) ? -Infinity : v;
   };
   return items.filter(inScope).sort((a, b) => {

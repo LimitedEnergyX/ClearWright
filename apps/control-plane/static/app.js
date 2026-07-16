@@ -1084,13 +1084,18 @@ function filterSortQueue(items, mode, query) {
       return isGoverned(it) && DEFAULT_VIEW_STATES.includes(it.presentation_state) && matchQ(it);
     return isGoverned(it) && states.includes(it.presentation_state) && matchQ(it);
   };
+  // Sort tiebreak parses timestamps to instants (matching the Python
+  // derivation's parsed-time order), so mixed ISO encodings (trailing Z vs
+  // +00:00, differing fractional widths) order chronologically, not lexically.
+  const ts = (it) => {
+    const v = Date.parse(it.last_activity_at || it.created_at || "");
+    return isNaN(v) ? -Infinity : v;
+  };
   return items.filter(inScope).sort((a, b) => {
     const ra = PSTATE_RANK[a.presentation_state] == null ? 9 : PSTATE_RANK[a.presentation_state];
     const rb = PSTATE_RANK[b.presentation_state] == null ? 9 : PSTATE_RANK[b.presentation_state];
     if (ra !== rb) return ra - rb;
-    const ta = a.last_activity_at || a.created_at || "";
-    const tb = b.last_activity_at || b.created_at || "";
-    return tb < ta ? -1 : (tb > ta ? 1 : 0);
+    return ts(b) - ts(a);   // most-recent activity first
   });
 }
 

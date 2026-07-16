@@ -155,7 +155,10 @@ function stateSummaryText(pstate, canonical) {
     case "waiting_on_claude":
       if (canonical === "planning") return "In plan review with the council.";
       if (canonical === "verification") return "In verification with the council.";
-      return "Claimed and awaiting Claude's next step.";
+      // Ownership-neutral: waiting_on_claude covers BOTH a claimed item with no
+      // recent activity AND an unclaimed, recently-touched actionable item, so
+      // the summary must not assert it is claimed.
+      return "Awaiting Claude's next step.";
     case "recently_completed": return "Recently completed.";
     case "stale": return "No meaningful activity recently; may need a nudge.";
     case "superseded": return "Superseded by a later decision.";

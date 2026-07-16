@@ -1144,15 +1144,24 @@ function syncFilterChips() {
 // approves/executes nothing. Seen-set and mute persist in localStorage.
 // --------------------------------------------------------------------------- //
 
-const ATT_SEEN_KEY = "cw_att_seen_v1";
+const ATT_SEEN_KEY = "cw_att_seen_v1";     // keys the operator has OPENED
 const ATT_MUTE_KEY = "cw_att_mute_v1";
-// Keys already audibly announced this session, so each NEW unseen alert_key
-// dings exactly once even when several are outstanding at the same time.
-const _attDinged = new Set();
+const ATT_DINGED_KEY = "cw_att_dinged_v1"; // keys already AUDIBLY announced (persisted,
+                                           // separate from seen), so a batch that was
+                                           // announced does not re-ding after a reload.
 
 function attSeenSet() {
   try { return new Set(JSON.parse(localStorage.getItem(ATT_SEEN_KEY) || "[]")); }
   catch (e) { return new Set(); }
+}
+function attDingedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(ATT_DINGED_KEY) || "[]")); }
+  catch (e) { return new Set(); }
+}
+function attMarkDinged(keys) {
+  const s = attDingedSet();
+  keys.forEach((k) => s.add(k));
+  try { localStorage.setItem(ATT_DINGED_KEY, JSON.stringify(Array.from(s))); } catch (e) { /* private mode */ }
 }
 function attMarkSeen(keys) {
   const s = attSeenSet();
@@ -1197,9 +1206,14 @@ function playAttentionDing() {
 // Sources: needs_operator work items, and a pulse.incoming source. Fail closed
 // on an unresolved target (no key). The highlight message id is derived from the
 // work item id itself, never an ambiguous message search.
+// A work item is alert-eligible only if it is GOVERNED and in the current view
+// (never authority/chat/note, never stale/historical/superseded).
+function alertEligible(it) {
+  return !!it && isGoverned(it) && DEFAULT_VIEW_STATES.includes(it.presentation_state);
+}
+
 function currentAlertKeys(items) {
   const list = items || [];
-  const known = new Set(list.map((it) => it.work_item_id).filter(Boolean));
   const keys = new Map();
   list.forEach((it) => {
     if (isGoverned(it) && it.presentation_state === "needs_operator" && it.work_item_id) {
@@ -1207,10 +1221,14 @@ function currentAlertKeys(items) {
     }
   });
   // Incoming-pulse alert: FAIL CLOSED -- only when the pulse target resolves to a
-  // current work item. An absent/unresolvable source_work_item_id fires no alert.
+  // GOVERNED, CURRENT work item (not authority/chat/note, not stale/historical).
+  // An absent/unresolvable/ineligible source_work_item_id fires no alert.
   const p = lastHealth && lastHealth.pulse;
-  if (p && p.incoming && p.source_work_item_id && known.has(p.source_work_item_id)) {
-    keys.set("wi:" + p.source_work_item_id, p.source_work_item_id);
+  if (p && p.incoming && p.source_work_item_id) {
+    const target = list.find((it) => it.work_item_id === p.source_work_item_id);
+    if (alertEligible(target)) {
+      keys.set("wi:" + p.source_work_item_id, p.source_work_item_id);
+    }
   }
   return keys;
 }
@@ -1235,13 +1253,14 @@ function updateAttentionBar(counts, items) {
     }
     // Notification contract (explicitly BATCH-LEVEL to never loop/spam): one
     // audible cue announces the current batch of NEW unseen keys, and each such
-    // key is marked announced. A key arriving in a LATER refresh is a new batch
-    // and dings again -- so a second operator-required item that appears after
-    // the first is still announced. The visual pulse + counts always reflect
-    // every outstanding key regardless of the audio.
-    const undinged = fresh.filter((k) => !_attDinged.has(k));
+    // key is marked announced in the PERSISTED dinged-set -- so a key arriving in
+    // a LATER refresh is a new batch and dings again, but a reload does NOT
+    // re-ding already-announced keys. The visual pulse + counts still reflect
+    // every outstanding unseen key regardless of the audio.
+    const dinged = attDingedSet();
+    const undinged = fresh.filter((k) => !dinged.has(k));
     if (undinged.length) {
-      undinged.forEach((k) => _attDinged.add(k));
+      attMarkDinged(undinged);
       playAttentionDing();           // one-shot; never loops
     }
   } else if (pulse) {

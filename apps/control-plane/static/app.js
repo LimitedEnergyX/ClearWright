@@ -1190,14 +1190,18 @@ function playAttentionDing() {
 // on an unresolved target (no key). The highlight message id is derived from the
 // work item id itself, never an ambiguous message search.
 function currentAlertKeys(items) {
+  const list = items || [];
+  const known = new Set(list.map((it) => it.work_item_id).filter(Boolean));
   const keys = new Map();
-  (items || []).forEach((it) => {
+  list.forEach((it) => {
     if (isGoverned(it) && it.presentation_state === "needs_operator" && it.work_item_id) {
       keys.set("wi:" + it.work_item_id, it.work_item_id);
     }
   });
+  // Incoming-pulse alert: FAIL CLOSED -- only when the pulse target resolves to a
+  // current work item. An absent/unresolvable source_work_item_id fires no alert.
   const p = lastHealth && lastHealth.pulse;
-  if (p && p.incoming && p.source_work_item_id) {
+  if (p && p.incoming && p.source_work_item_id && known.has(p.source_work_item_id)) {
     keys.set("wi:" + p.source_work_item_id, p.source_work_item_id);
   }
   return keys;
@@ -1221,8 +1225,12 @@ function updateAttentionBar(counts, items) {
       pulse.hidden = false;
       pulse.dataset.target = keys.get(fresh[0]);
     }
-    // Ding once per NEW unseen key, even when several are outstanding: a second
-    // operator-required item that arrives before the first is opened still dings.
+    // Notification contract (explicitly BATCH-LEVEL to never loop/spam): one
+    // audible cue announces the current batch of NEW unseen keys, and each such
+    // key is marked announced. A key arriving in a LATER refresh is a new batch
+    // and dings again -- so a second operator-required item that appears after
+    // the first is still announced. The visual pulse + counts always reflect
+    // every outstanding key regardless of the audio.
     const undinged = fresh.filter((k) => !_attDinged.has(k));
     if (undinged.length) {
       undinged.forEach((k) => _attDinged.add(k));

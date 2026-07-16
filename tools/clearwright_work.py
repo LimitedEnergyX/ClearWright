@@ -175,27 +175,40 @@ def _activity_candidates(bound, councils, gate):
     return out
 
 
-def last_activity(bound, councils, gate):
-    """Return (last_activity_at, last_activity_event, last_activity_source_id)
-    for a work item using the TOTAL order (at DESC, event_class_precedence ASC,
-    source_id ASC). Deterministic and order-independent. When no qualifying
-    activity exists, returns (None, "created", None) -- the labeled creation
-    fallback (section 3)."""
-    best = None  # (at, prec, source_id, label)
-    for cand in _activity_candidates(bound, councils, gate):
+def _total_order_winner(candidates):
+    """Winner under the TOTAL order (parsed-time DESC, event_class_precedence
+    ASC, source_id ASC) over (at_str, precedence, source_id, label) candidates.
+    Comparison is on PARSED UTC instants, so mixed ISO encodings (trailing Z vs
+    +00:00, differing fractional-second widths) order chronologically, not
+    lexicographically. Unparseable timestamps are dropped. Returns the winning
+    candidate tuple, or None."""
+    best = None      # (dt, at_str, precedence, source_id, label)
+    for at, prec, sid, label in candidates:
+        dt = _parse_iso(at)
+        if dt is None:
+            continue
+        cand = (dt, at, prec, sid, label)
         if best is None:
             best = cand
             continue
-        at, prec, sid, _ = cand
-        b_at, b_prec, b_sid, _ = best
-        if at > b_at:
+        if dt > best[0] or (dt == best[0] and (prec < best[2]
+                            or (prec == best[2] and sid < best[3]))):
             best = cand
-        elif at == b_at:
-            if prec < b_prec or (prec == b_prec and sid < b_sid):
-                best = cand
+    return best
+
+
+def last_activity(bound, councils, gate):
+    """Return (last_activity_at, last_activity_event, last_activity_source_id)
+    for a work item using the TOTAL order (parsed-time DESC, event_class_
+    precedence ASC, source_id ASC). Deterministic and order-independent; the
+    returned last_activity_at is the winner's original ISO string. When no
+    qualifying activity exists, returns (None, "created", None) -- the labeled
+    creation fallback (section 3)."""
+    best = _total_order_winner(_activity_candidates(bound, councils, gate))
     if best is None:
         return None, "created", None
-    return best[0], best[3], best[2]
+    _dt, at_str, _prec, sid, label = best
+    return at_str, label, sid
 
 
 def _has_lifecycle(bound, councils, gate, claim_msg):
@@ -241,24 +254,37 @@ def _awaiting_operator_reply(bound):
     so on today's records this is dormant and `waiting_on_operator` is reserved
     for when an agent->operator question marker is recorded. The operator-required
     case is already covered by `needs_operator` (an unresolved gate / CTA / RFI)."""
-    best = None  # (at, precedence, source_id, message)
+    by_id = {}
+    cands = []
     for m in bound:
         at = m.get("at")
         if not at:
             continue
         prec, _label = _message_event_class(m)
-        cand = (at, prec, str(m.get("message_id") or ""), m)
-        if best is None or at > best[0] or (
-                at == best[0] and (prec < best[1]
-                                   or (prec == best[1] and cand[2] < best[2]))):
-            best = cand
+        mid = str(m.get("message_id") or "")
+        by_id[mid] = m
+        cands.append((at, prec, mid, _label))
+    best = _total_order_winner(cands)   # parsed-time total order (Rule R3)
     if best is None:
         return False
-    latest = best[3]
-    return (latest.get("direction") == "outbound"
+    latest = by_id.get(best[3])
+    return (latest is not None
+            and latest.get("direction") == "outbound"
             and str(latest.get("status") or "") not in ("responded",)
             and str(latest.get("role") or "") != "operator"
             and bool(latest.get("awaiting_operator")))
+
+
+def _latest_claim(bound):
+    """The latest claim record by the same total order (parsed-time DESC,
+    source_id ASC), so claimed_by/claimed_at are deterministic and input-order
+    independent even if multiple claim records exist (Rule R3, GPT verify b0)."""
+    cands = [(m.get("at"), _EVENT_CLAIM[0], str(m.get("message_id") or ""), m)
+             for m in bound if m.get("status") == "claimed" and m.get("at")]
+    best = _total_order_winner([(c[0], c[1], c[2], "claim") for c in cands])
+    if best is None:
+        return None
+    return next((c[3] for c in cands if c[2] == best[3]), None)
 
 
 def runner_state(claimed, claim_at, active_runner, in_council, awaiting_operator,
@@ -655,7 +681,7 @@ def derive_work_items(root, include="nonterminal", active_run=None, now=None):
             councils = [c for c in all_councils if c.get("thread_id") == tid]
         state = _derive_state(origin, bound, gate, councils, warnings, wid)
 
-        claim_msg = next((m for m in bound if m.get("status") == "claimed"), None)
+        claim_msg = _latest_claim(bound)   # deterministic latest claim (Rule R3)
 
         # ---- presentation-only derived fields (no durable write) -------------
         # The origin message IS the creation event, not post-creation activity;

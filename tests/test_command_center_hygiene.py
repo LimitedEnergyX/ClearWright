@@ -135,6 +135,52 @@ class LastActivityTests(unittest.TestCase):
         self.assertEqual((at2, event2, sid2), (T_RECENT, "gate", "gate-1"))
 
 
+class TimestampOrderingTests(unittest.TestCase):
+    """Ordering is on PARSED instants, not raw strings (verify-council fix): a
+    no-fractional 'Z' string must not sort after an earlier fractional one, and
+    equivalent Z vs +00:00 encodings are the same instant."""
+
+    def test_later_no_fractional_wins_over_earlier_fractional(self):
+        bound = [bmsg("m-early", "2026-07-16T00:00:00.500000Z", status="posted"),
+                 bmsg("m-late", "2026-07-16T00:00:01Z", status="posted")]
+        at, _event, sid = cww.last_activity(bound, [], None)
+        self.assertEqual(sid, "m-late")           # 00:00:01 > 00:00:00.5
+        self.assertEqual(at, "2026-07-16T00:00:01Z")   # original string preserved
+
+    def test_equal_instant_across_encodings_is_order_independent(self):
+        z = bmsg("m-a", "2026-07-16T00:00:00.000000Z", status="posted")
+        off = bmsg("m-b", "2026-07-16T00:00:00+00:00", status="posted")
+        _, _, sid1 = cww.last_activity([z, off], [], None)
+        _, _, sid2 = cww.last_activity([off, z], [], None)
+        self.assertEqual(sid1, "m-a")             # same instant -> id tie-break
+        self.assertEqual(sid2, "m-a")
+
+
+class LatestClaimTests(unittest.TestCase):
+    """claimed_by/claimed_at come from the LATEST claim by the total order, not
+    the first record encountered (verify-council fix: input-order independence)."""
+
+    def test_latest_claim_deterministic_under_reversed_input(self):
+        older = bmsg("c-old", "2026-07-16T00:00:00.000000Z", status="claimed", actor="alice")
+        newer = bmsg("c-new", "2026-07-16T00:05:00.000000Z", status="claimed", actor="bob")
+        noise = bmsg("m-x", "2026-07-16T00:03:00.000000Z", status="posted")
+        c1 = cww._latest_claim([older, newer, noise])
+        c2 = cww._latest_claim([noise, newer, older])
+        self.assertEqual(c1["message_id"], "c-new")
+        self.assertEqual(c2["message_id"], "c-new")
+        self.assertEqual(c1["actor"], "bob")
+
+    def test_equal_timestamp_claims_tie_break_by_id(self):
+        a = bmsg("c-aaa", "2026-07-16T00:00:00.000000Z", status="claimed")
+        b = bmsg("c-bbb", "2026-07-16T00:00:00.000000Z", status="claimed")
+        self.assertEqual(cww._latest_claim([a, b])["message_id"], "c-aaa")
+        self.assertEqual(cww._latest_claim([b, a])["message_id"], "c-aaa")
+
+    def test_no_claim_returns_none(self):
+        self.assertIsNone(cww._latest_claim(
+            [bmsg("m", "2026-07-16T00:00:00.000000Z", status="posted")]))
+
+
 # --------------------------------------------------------------------------- #
 # 5, 6, 8. Deterministic total presentation-state precedence, R1, claimed !=
 #          running, terminal-first, awaiting-operator ordering, band boundaries.

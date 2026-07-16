@@ -212,12 +212,14 @@ class UiTests(unittest.TestCase):
         self.assertIn("copy-btn", self.appjs)
 
     def test_queue_grouping_replaces_run_filters(self):
-        # Run filters became queue groups: Attention / Active / Recent /
-        # Archived, plus the topbar Attention chip acting as a filter.
-        self.assertIn("function buildQueueGroups", self.appjs)
-        for group in ("attention", "active", "recent", "archived"):
-            self.assertIn(group, self.appjs)
-        self.assertIn('id="attention-chip"', self.html)
+        # Command Center Queue Hygiene: run filters became presentation-state
+        # groups rendered by renderQueue/filterSortQueue, plus the persistent
+        # top-bar attention bar and the filter chips acting as filters.
+        self.assertIn("function renderQueue", self.appjs)
+        self.assertIn("function filterSortQueue", self.appjs)
+        self.assertIn("presentation_state", self.appjs)
+        self.assertIn('id="attention-bar"', self.html)
+        self.assertIn('id="queue-filters"', self.html)
 
     def test_placeholder_and_comms_and_history_intact(self):
         self.assertIn('placeholder="Send Agents a Message (Shift+Enter for a new line, Ctrl+Enter to send)"', self.html)

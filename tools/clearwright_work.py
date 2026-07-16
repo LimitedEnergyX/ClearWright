@@ -42,6 +42,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 import clearwright_message as cwm
 import clearwright_claim as cwc
@@ -51,6 +52,344 @@ import clearwright_identity as cwid
 
 LANES = ["clearance_outbox", "clearance_in_progress",
          "clearance_done", "clearance_failed"]
+
+# --------------------------------------------------------------------------- #
+# Command Center Queue Hygiene and Current-State UX (presentation derivation).
+#
+# Everything below is PRESENTATION-ONLY and additive: it derives display fields
+# from durable records already loaded by derive_work_items and writes NOTHING.
+# Canonical governance state (_derive_state) is unchanged and authoritative.
+# --------------------------------------------------------------------------- #
+
+# Pinned windows (single source of truth; seconds). See the plan, section 2.
+RECENT_WINDOW = 24 * 3600     # a completed item stays "current" for one day
+STALE_WINDOW = 24 * 3600      # no meaningful activity for a day -> eligible stale
+RUNNING_WINDOW = 15 * 60      # activity within 15 min counts as an active runner
+
+# Canonical status groupings used by the presentation derivation.
+_TERMINAL = frozenset(("superseded", "done", "closed"))
+_ACTIONABLE = frozenset(("open", "claimed", "planning", "verification",
+                         "operator_required"))
+
+# Presentation states shown in the current-only default view (section 2).
+_DEFAULT_VIEW_STATES = frozenset((
+    "needs_operator", "blocked", "running", "waiting_on_claude",
+    "waiting_on_operator", "recently_completed"))
+
+# Last-meaningful-activity event classes, lowest number = highest tie-break
+# precedence (section 3). The value is (precedence, label).
+_EVENT_COMPLETION = (1, "completion")
+_EVENT_VERIFICATION = (2, "verification")
+_EVENT_COUNCIL = (3, "council")
+_EVENT_GATE = (4, "gate")
+_EVENT_PROGRESS = (5, "progress")
+_EVENT_CLAIM = (6, "claim")
+_EVENT_RESPONSE = (7, "response")
+_EVENT_EVIDENCE = (8, "evidence")
+
+
+def _parse_iso(at):
+    """Parse a durable `at`/ISO timestamp to an aware UTC datetime, or None.
+    Tolerates a trailing Z and variable fractional-second digits."""
+    if not at or not isinstance(at, str):
+        return None
+    s = at.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    # Normalise fractional seconds to at most 6 digits for fromisoformat.
+    if "." in s:
+        head, _, tail = s.partition(".")
+        frac = ""
+        off = ""
+        for i, ch in enumerate(tail):
+            if ch.isdigit():
+                frac += ch
+            else:
+                off = tail[i:]
+                break
+        s = head + "." + (frac[:6] or "0") + off
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _now_dt(now=None):
+    """Resolve the injected `now` (ISO string or datetime) to an aware UTC
+    datetime. `now` is injected for testability; callers in production pass the
+    server's wall clock."""
+    if isinstance(now, datetime):
+        return now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    parsed = _parse_iso(now) if isinstance(now, str) else None
+    return parsed or datetime.now(timezone.utc)
+
+
+def _age_seconds(activity_at, created_at, now_dt):
+    """Seconds since the reference activity (last activity, else creation).
+    Missing/unparseable timestamps yield a very large age (treated as old)."""
+    ref = _parse_iso(activity_at) or _parse_iso(created_at)
+    if ref is None:
+        return float("inf")
+    return max(0.0, (now_dt - ref).total_seconds())
+
+
+def _message_event_class(message):
+    """Map a bound durable message to a last-activity event class."""
+    closure = str(message.get("closure") or "").strip().casefold()
+    if closure in cwid.RECOGNIZED_CLOSURES:
+        return _EVENT_COMPLETION
+    status = message.get("status")
+    if status == "claimed":
+        return _EVENT_CLAIM
+    if status == "responded" or message.get("direction") == "outbound":
+        return _EVENT_RESPONSE
+    if status == "posted" or message.get("direction") == "internal":
+        return _EVENT_PROGRESS
+    return _EVENT_EVIDENCE
+
+
+def _activity_candidates(bound, councils, gate):
+    """Every (at, precedence, source_id, label) qualifying-activity candidate
+    for one work item, drawn from records already loaded. Read-only."""
+    out = []
+    for m in bound:
+        at = m.get("at")
+        if not at:
+            continue
+        prec, label = _message_event_class(m)
+        out.append((at, prec, str(m.get("message_id") or ""), label))
+    for c in councils or []:
+        at = c.get("created_at")
+        if not at:
+            continue
+        prec, label = _EVENT_COUNCIL
+        out.append((at, prec, str(c.get("council_id") or ""), label))
+    if gate is not None:
+        at = gate.get("resolved_at") or gate.get("created_at")
+        if at:
+            prec, label = _EVENT_GATE
+            out.append((at, prec, str(gate.get("gate_id") or ""), label))
+    return out
+
+
+def last_activity(bound, councils, gate):
+    """Return (last_activity_at, last_activity_event, last_activity_source_id)
+    for a work item using the TOTAL order (at DESC, event_class_precedence ASC,
+    source_id ASC). Deterministic and order-independent. When no qualifying
+    activity exists, returns (None, "created", None) -- the labeled creation
+    fallback (section 3)."""
+    best = None  # (at, prec, source_id, label)
+    for cand in _activity_candidates(bound, councils, gate):
+        if best is None:
+            best = cand
+            continue
+        at, prec, sid, _ = cand
+        b_at, b_prec, b_sid, _ = best
+        if at > b_at:
+            best = cand
+        elif at == b_at:
+            if prec < b_prec or (prec == b_prec and sid < b_sid):
+                best = cand
+    if best is None:
+        return None, "created", None
+    return best[0], best[3], best[2]
+
+
+def _has_lifecycle(bound, councils, gate, claim_msg):
+    """True when the item shows real work activity (claim/council/gate/progress/
+    response/closure) -- the structural signal that separates governed work from
+    an inert authority/note record. Read-only."""
+    if claim_msg or councils or gate is not None:
+        return True
+    for m in bound:
+        if m.get("closure") or m.get("status") in ("claimed", "posted",
+                                                    "responded"):
+            return True
+    return False
+
+
+def classify_record(origin, has_lifecycle, status):
+    """Presentation `record_class` for a message work item -- STRUCTURAL fields
+    only (intent/role/source/lifecycle/status), never message content. Only
+    `governed_work` appears in the default governed queue (section 5)."""
+    intent = str(origin.get("intent") or "").strip()
+    role = str(origin.get("role") or "").strip()
+    source = str(origin.get("source") or "").strip()
+    if intent == "chat":
+        return "chat"
+    if has_lifecycle:
+        return "governed_work"
+    if intent == "request":
+        return "governed_work"
+    if role == "operator" and source == "operator-ui":
+        return "authority"
+    if status in _ACTIONABLE:
+        return "governed_work"
+    return "note"
+
+
+def _awaiting_operator_reply(bound):
+    """True when the latest bound record is an agent->operator ask still awaiting
+    the operator. Selects the latest record with the SAME total order as
+    last_activity -- (at DESC, event_class_precedence ASC, source_id ASC) -- so
+    equal-timestamp records are order-independent (Rule R3).
+
+    NOTE (honest limitation): no current durable writer sets `awaiting_operator`,
+    so on today's records this is dormant and `waiting_on_operator` is reserved
+    for when an agent->operator question marker is recorded. The operator-required
+    case is already covered by `needs_operator` (an unresolved gate / CTA / RFI)."""
+    best = None  # (at, precedence, source_id, message)
+    for m in bound:
+        at = m.get("at")
+        if not at:
+            continue
+        prec, _label = _message_event_class(m)
+        cand = (at, prec, str(m.get("message_id") or ""), m)
+        if best is None or at > best[0] or (
+                at == best[0] and (prec < best[1]
+                                   or (prec == best[1] and cand[2] < best[2]))):
+            best = cand
+    if best is None:
+        return False
+    latest = best[3]
+    return (latest.get("direction") == "outbound"
+            and str(latest.get("status") or "") not in ("responded",)
+            and str(latest.get("role") or "") != "operator"
+            and bool(latest.get("awaiting_operator")))
+
+
+def runner_state(claimed, claim_at, active_runner, in_council, awaiting_operator,
+                 has_gate, status, now_dt):
+    """Honest runner state (section 4). Claimed is NOT running. Degrades to
+    claimed_idle/stale_or_no_heartbeat/unknown when positive evidence is absent
+    -- ClearWright has no heartbeat channel, so this is derived, never asserted."""
+    if not claimed:
+        return "unowned"
+    if active_runner:
+        return "active_runner"
+    if in_council:
+        return "waiting_on_council"
+    if has_gate or status == "operator_required" or awaiting_operator:
+        return "waiting_on_operator"
+    claim_age = _age_seconds(claim_at, claim_at, now_dt)
+    if claim_age <= RUNNING_WINDOW:
+        return "claimed_idle"
+    if claim_age > STALE_WINDOW:
+        return "stale_or_no_heartbeat"
+    return "claimed_idle"
+
+
+def presentation_state(signals, now=None):
+    """The ONE ordered, total, mutually-exclusive presentation-state function
+    (section 1). Pure: identical `signals` -> identical result, no writes.
+    `signals` keys: status, kind, needs_operator, blocked, awaiting_operator,
+    claimed, active_runner, last_activity_at, created_at."""
+    now_dt = _now_dt(now)
+    status = signals.get("status")
+    age = _age_seconds(signals.get("last_activity_at"),
+                       signals.get("created_at"), now_dt)
+    # 1-2: terminal states first, so a terminal item is never pulled into
+    # Current by needs_operator/blocked.
+    if status == "superseded":
+        return "superseded"
+    if status in ("done", "closed"):
+        return "recently_completed" if age <= RECENT_WINDOW else "historical"
+    # 3-8: non-terminal only.
+    if signals.get("needs_operator"):
+        return "needs_operator"
+    if signals.get("blocked"):
+        return "blocked"
+    if signals.get("awaiting_operator"):
+        return "waiting_on_operator"
+    if signals.get("claimed"):
+        if signals.get("active_runner"):
+            return "running"
+        return "waiting_on_claude" if age <= STALE_WINDOW else "stale"
+    if age > STALE_WINDOW:
+        return "stale"
+    return "waiting_on_claude"
+
+
+def in_default_view(item):
+    """True when a derived item belongs in the current-only default view
+    (section 2): a governed work item whose presentation state is current.
+    Non-governed records (authority/chat/note) are excluded."""
+    if item.get("kind") == "message" and \
+            item.get("record_class", "governed_work") != "governed_work":
+        return False
+    return item.get("presentation_state") in _DEFAULT_VIEW_STATES
+
+
+# Sort rank for the attention-first default order (section 11).
+_SORT_RANK = {
+    "needs_operator": 0, "running": 1, "blocked": 2,
+    "waiting_on_operator": 3, "waiting_on_claude": 3,
+    "recently_completed": 4, "stale": 5, "superseded": 6, "historical": 7,
+}
+
+# Filter chips (section 11). Each maps to the presentation states it includes;
+# "current" and "all" are handled specially.
+_FILTER_STATES = {
+    "needs_attention": frozenset(("needs_operator",)),
+    "running": frozenset(("running",)),
+    "blocked": frozenset(("blocked",)),
+    "stale": frozenset(("stale",)),
+    "recently_completed": frozenset(("recently_completed",)),
+}
+
+
+def queue_view(items, mode="current", query=""):
+    """Pure presentation filter+sort over derived items (sections 2, 11).
+    Never mutates items or durable state; returns a new ordered list.
+    mode: current | needs_attention | running | blocked | stale |
+    recently_completed | all. query matches title or work_item_id."""
+    q = (query or "").strip().casefold()
+
+    def matches_query(it):
+        if not q:
+            return True
+        return (q in str(it.get("title") or "").casefold()
+                or q in str(it.get("work_item_id") or "").casefold())
+
+    def in_scope(it):
+        if mode == "all":
+            keep = True
+        elif mode == "current":
+            keep = in_default_view(it)
+        else:
+            states = _FILTER_STATES.get(mode)
+            if states is None:
+                keep = in_default_view(it)
+            else:
+                # A filter still shows only governed work, except "all".
+                governed = (it.get("kind") != "message"
+                            or it.get("record_class", "governed_work")
+                            == "governed_work")
+                keep = governed and it.get("presentation_state") in states
+        return keep and matches_query(it)
+
+    selected = [it for it in items if in_scope(it)]
+    selected.sort(key=lambda it: (
+        _SORT_RANK.get(it.get("presentation_state"), 9),
+        _neg_time(it.get("last_activity_at") or it.get("created_at"))))
+    return selected
+
+
+def attention_counts(items):
+    """Top-bar counts (section 10): running / operator-required / blocked /
+    stale over governed work items. Pure."""
+    counts = {"running": 0, "needs_operator": 0, "blocked": 0, "stale": 0}
+    for it in items:
+        if it.get("kind") == "message" and \
+                it.get("record_class", "governed_work") != "governed_work":
+            continue
+        ps = it.get("presentation_state")
+        if ps in counts:
+            counts[ps] += 1
+    return counts
 
 # The operator acts through the authority channel and is never gated; every
 # other actor is an agent whose governed mutations on a gated item are refused.
@@ -231,14 +570,32 @@ def _derive_state(origin, bound, gate, councils, warnings, wid):
     return "claimed" if claims else "open"
 
 
-def derive_work_items(root, include="nonterminal"):
+def _council_in_flight(councils):
+    """True when any bound council has no terminal agreement outcome yet."""
+    for c in councils or []:
+        if c.get("outcome") != "agreement_threshold_met":
+            return True
+    return False
+
+
+def derive_work_items(root, include="nonterminal", active_run=None, now=None):
     """Return the derived work-item list. include="nonterminal" (default) lists
     open/claimed/planning/operator_required/verification/legacy_ambiguity/
     malformed items; include="all" also lists done/closed/superseded with their
     true state. Nothing is written. Message work items are MESSAGE-SCOPED: every
     actionable message derives its own item, so two actionable messages in one
-    thread remain fully independent."""
+    thread remain fully independent.
+
+    Each item additionally carries PRESENTATION-ONLY derived fields (no durable
+    write): last_activity_at/last_activity_event/last_activity_source_id (section
+    3), runner_state (section 4), record_class (section 5, message items), and
+    presentation_state (section 1). `active_run` is an OPTIONAL read-only snapshot
+    (dict keyed by work_item_id or thread_id) injected by the server; when None
+    the derivation is fully deterministic from durable records alone and never
+    asserts a false active runner. `now` is injected for testability."""
     import clearwright_review_council as cwrc
+    now_dt = _now_dt(now)
+    active_run = active_run or {}
     items = []
     warnings = []
     for p in _read_packets(root):
@@ -248,16 +605,23 @@ def derive_work_items(root, include="nonterminal"):
         if lane == "clearance_outbox" and status == "CTA":
             items.append(_work_item(
                 "packet:{}:cta".format(pid), "packet", "open", "claim",
-                packet_id=pid, title=p["title"], summary=p["title"]))
+                packet_id=pid, title=p["title"], summary=p["title"],
+                record_class="governed_work", presentation_state="needs_operator",
+                runner_state="waiting_on_operator", last_activity_event="created"))
         elif lane == "clearance_outbox" and status == "RFI_PENDING":
             items.append(_work_item(
                 "rfi:{}".format(pid), "rfi", "open", "answer clarification",
-                packet_id=pid, title=p["title"], summary=p["title"]))
+                packet_id=pid, title=p["title"], summary=p["title"],
+                record_class="governed_work", presentation_state="needs_operator",
+                runner_state="waiting_on_operator", last_activity_event="created"))
         elif lane == "clearance_in_progress" and status == "IN_PROGRESS":
             items.append(_work_item(
                 "in_progress:{}".format(pid), "in_progress", "open",
                 "post progress or complete",
-                packet_id=pid, title=p["title"], summary=p["title"]))
+                packet_id=pid, title=p["title"], summary=p["title"],
+                record_class="governed_work",
+                presentation_state="waiting_on_claude",
+                runner_state="unknown", last_activity_event="created"))
 
     messages = cwm.read_messages(root)
     by_id = {m.get("message_id"): m for m in messages if m.get("message_id")}
@@ -292,6 +656,43 @@ def derive_work_items(root, include="nonterminal"):
         state = _derive_state(origin, bound, gate, councils, warnings, wid)
 
         claim_msg = next((m for m in bound if m.get("status") == "claimed"), None)
+
+        # ---- presentation-only derived fields (no durable write) -------------
+        # The origin message IS the creation event, not post-creation activity;
+        # exclude it so a brand-new, untouched request falls to the labeled
+        # "created" fallback rather than showing its own creation as "activity".
+        activity_bound = [m for m in bound if m.get("message_id") != mid]
+        la_at, la_event, la_sid = last_activity(activity_bound, councils, gate)
+        has_lifecycle = _has_lifecycle(activity_bound, councils, gate, claim_msg)
+        record_class = classify_record(origin, has_lifecycle, state)
+        claimed = claim_msg is not None
+        claim_at = (claim_msg or {}).get("at")
+        # "running" requires positive evidence of ACTIVE work -- a fresh CLAIM is
+        # NOT running (the plan's core "claimed != running" honesty). Running
+        # evidence = a non-claim activity record (progress/council/verify/
+        # completion/gate) within RUNNING_WINDOW, OR the optional injected
+        # active_run snapshot. The claim alone never sets active_runner.
+        run_bound = [m for m in activity_bound if m.get("status") != "claimed"]
+        run_at, _run_event, _run_sid = last_activity(run_bound, councils, gate)
+        run_age = _age_seconds(run_at, None, now_dt)
+        active = claimed and run_at is not None and run_age <= RUNNING_WINDOW
+        if active_run.get(wid) or active_run.get(tid):
+            active = True
+        awaiting_op = _awaiting_operator_reply(bound)
+        wid_warned = any(w.get("work_item_id") == wid for w in warnings)
+        signals = {
+            "status": state, "kind": "message",
+            "needs_operator": state == "operator_required",
+            "blocked": state == "malformed" or wid_warned,
+            "awaiting_operator": awaiting_op,
+            "claimed": claimed, "active_runner": active,
+            "last_activity_at": la_at, "created_at": origin.get("at"),
+        }
+        pstate = presentation_state(signals, now_dt)
+        rstate = runner_state(
+            claimed, claim_at, active, _council_in_flight(councils),
+            awaiting_op, gate is not None, state, now_dt)
+
         items.append(_work_item(
             wid, "message", state, _next_action_for(state),
             thread_id=tid, packet_id=origin.get("packet_id"),
@@ -299,7 +700,10 @@ def derive_work_items(root, include="nonterminal"):
             title=origin.get("message"), summary=origin.get("message"),
             created_at=origin.get("at"),
             claimed_by=(claim_msg or {}).get("actor"),
-            claimed_at=(claim_msg or {}).get("at")))
+            claimed_at=claim_at,
+            last_activity_at=la_at, last_activity_event=la_event,
+            last_activity_source_id=la_sid, runner_state=rstate,
+            record_class=record_class, presentation_state=pstate))
 
     if include != "all":
         items = [it for it in items if it["status"] not in _TERMINAL_STATES]

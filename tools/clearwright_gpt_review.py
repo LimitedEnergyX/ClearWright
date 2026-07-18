@@ -183,7 +183,9 @@ def call_gpt(context_text, model, *, key_getter=None, timeout=DEFAULT_TIMEOUT,
             ],
             "max_output_tokens": max_output_tokens,
         }
-        body_bytes = json.dumps(payload).encode("utf-8")
+        # ensure_ascii=False so the guard's final_scan sees the REAL characters
+        # (incl. Unicode confusables) that the model will read, not \\uXXXX.
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     input_chars = len(context_text or "")
 
     start = time.monotonic()

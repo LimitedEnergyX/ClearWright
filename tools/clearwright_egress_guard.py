@@ -665,7 +665,10 @@ def build_sensitive_gpt_body(model, derivative_text, max_output_tokens):
             "input": [{"role": "developer", "content": SENSITIVE_INSTRUCTION},
                       {"role": "user", "content": derivative_text}],
             "max_output_tokens": max_output_tokens}
-    return json.dumps(body).encode("utf-8")
+    # ensure_ascii=False so the wire bytes carry the REAL characters and the
+    # guard's final_scan (incl. the Unicode-confusable detector) sees exactly
+    # what the model will read, not \\uXXXX escapes.
+    return json.dumps(body, ensure_ascii=False).encode("utf-8")
 
 
 def build_sensitive_codex_prompt(derivative_text):
@@ -813,15 +816,22 @@ def codex_launch(cmd, prompt, timeout, *, context, cwd=None,
         if marker in lowered:
             raise EgressBlocked("provenance_outside_allowlist",
                                 {"detail": "cw_path_in_prompt"})
-    # Byte-mutation proof: what we send is exactly what we validated.
-    if (prompt or "").encode("utf-8") != data or _sha256_bytes(data) != validated_sha:
-        raise EgressBlocked("bytes_mutated_after_validation")
     import tempfile
     run_cwd = cwd or tempfile.mkdtemp(prefix="cw-egress-")
     try:
-        proc = subprocess.run(cmd, input=(prompt or ""), capture_output=True,
-                              text=True, timeout=timeout, cwd=run_cwd,
-                              encoding="utf-8", errors="replace")
+        # Send BINARY stdin (the exact validated bytes). Text mode would wrap the
+        # child's stdin in a newline-translating TextIOWrapper (on Windows every
+        # \n -> \r\n), so the wire bytes would differ from the validated bytes.
+        # Binary input disables that translation, so what is sent == what was
+        # validated (== validated_sha). Decode the captured output ourselves.
+        if _sha256_bytes(data) != validated_sha:
+            raise EgressBlocked("bytes_mutated_after_validation")
+        proc = subprocess.run(cmd, input=data, capture_output=True,
+                              timeout=timeout, cwd=run_cwd)
+        if isinstance(proc.stdout, (bytes, bytearray)):
+            proc.stdout = bytes(proc.stdout).decode("utf-8", "replace")
+        if isinstance(proc.stderr, (bytes, bytearray)):
+            proc.stderr = bytes(proc.stderr).decode("utf-8", "replace")
         return proc
     finally:
         try:

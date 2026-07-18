@@ -478,6 +478,31 @@ class ByteMutationProof(unittest.TestCase):
                          guard._sha256_bytes(body))
 
 
+class WireByteFidelity(unittest.TestCase):
+    def test_codex_sends_binary_stdin_no_newline_translation(self):
+        # Regression (confirmed low finding): text-mode stdin would translate
+        # \n -> \r\n on Windows, so the wire bytes differ from validated bytes.
+        # The guard must send BINARY input (input=data), not a text string.
+        src = read_source("clearwright_egress_guard.py")
+        self.assertIn("input=data", src)
+        self.assertNotIn("input=(prompt or \"\")", src)
+
+    def test_confusable_visible_on_wire_when_ensure_ascii_false(self):
+        # Regression (confirmed low finding): an ensure_ascii=True body hides
+        # Unicode confusables behind \\uXXXX so final_scan cannot see them. The
+        # real outbound bytes must carry the real characters.
+        import json as _j
+        ctx = guard.EgressContext("standard")
+        body = _j.dumps({"model": "m", "input": [
+            {"role": "developer", "content": "x"},
+            {"role": "user", "content": "Jоhn reviewed the code"}],  # cyrillic o
+            "max_output_tokens": 10}, ensure_ascii=False).encode("utf-8")
+        with self.assertRaises(guard.EgressBlocked) as cm:
+            guard.gpt_send(body, 5, context=ctx, transport=lambda *a: (200, "{}"),
+                           key_getter=lambda: "k", caller="clearwright_gpt_review")
+        self.assertEqual(cm.exception.reason, "tripwire_hit")
+
+
 class CredentialConfinement(unittest.TestCase):
     """Confirm direct adapters do not resolve credentials, construct auth
     headers, know provider URLs, or retain alternate transports."""

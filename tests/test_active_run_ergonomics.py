@@ -104,10 +104,15 @@ class CodexErgonomicsTests(unittest.TestCase):
     def test_codex_accepts_repo(self):
         self.assertIn("--repo", help_text(CODEX))
 
-    def test_codex_runs_from_repo_cwd(self):
+    def test_codex_dispatch_flows_through_egress_guard(self):
+        # SDEG Decision 2A: run_codex no longer hands a repo cwd to a direct
+        # subprocess; it delegates to the egress guard's codex_launch, which is
+        # stdin-only and owns a fresh temp cwd (never a ClearWright tree). The
+        # security-relevant property is that the guarded path is the one used.
         src = read(CODEX)
-        self.assertIn("cwd=cwd", src)       # run_codex passes cwd through
-        self.assertIn("cwd=args.repo", src)  # main uses --repo
+        self.assertIn("_egress.codex_launch", src)   # guard owns the launch
+        self.assertIn("GUARDED = True", src)          # self-test can confirm it
+        self.assertIn("cwd=args.repo", src)           # main still uses --repo
 
     def test_unavailable_timeout_do_not_post_codex(self):
         r1 = ccr.review(self.root, self.wid, available_fn=lambda: False)

@@ -1,0 +1,60 @@
+{
+  "policy_version": "1.0.0",
+  "description": "Egress-guard policy: detector patterns, provenance allowlists, and the closed vocabulary for sanitized_derivative-v1. Versioned and hash-bound: every validation record cites policy_version + the file sha256. Synthetic fixtures only in tests.",
+  "covered_languages": ["en"],
+  "tripwires": {
+    "ssn_like": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+    "phone_like": "\\b(?:\\+1[ .-]?)?\\(?\\d{3}\\)?[ .-]\\d{3}[ .-]\\d{4}\\b",
+    "email_address": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b",
+    "identifier_labeled": "\\b(?:MRN|SSN|DOB|policy\\s*(?:no|number)|member\\s*id|account\\s*(?:no|number)|case\\s*(?:no|number))\\b\\s*[:#]?\\s*[A-Za-z0-9-]{3,}",
+    "credential_like": "\\b(?:sk-[A-Za-z0-9]{16,}|AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{20,}|xox[bap]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)",
+    "street_address": "\\b\\d{1,5}\\s+[A-Z][a-z]+\\s+(?:St|Ave|Rd|Blvd|Ln|Dr|Ct|Way|Pl)\\b\\.?",
+    "titled_person": "\\b(?:Dr|Mr|Mrs|Ms|Prof)\\.\\s+[A-Z][a-z]+",
+    "labeled_person": "\\b(?:patient name|employee name|client name|full name)\\b\\s*[:#]"
+  },
+  "contextual_terms": [
+    "\\bpatient\\b", "\\bdiagnos(?:is|es|ed)\\b", "\\bprescri(?:ption|bed)\\b",
+    "\\bmedical record\\b", "\\bhealth record\\b", "\\bclinical\\b",
+    "\\bphysician\\b", "\\btreatment plan\\b", "\\bdate of birth\\b",
+    "\\bemployee record\\b", "\\bsalary\\b", "\\btermination\\b",
+    "\\bplaintiff\\b", "\\bdefendant\\b", "\\bsettlement\\b",
+    "\\baccount balance\\b", "\\brouting number\\b"
+  ],
+  "identity_signals": [
+    "\\b(?:Dr|Mr|Mrs|Ms|Prof)\\.\\s+[A-Z][a-z]+",
+    "\\b[A-Z][a-z]{2,}\\s+[A-Z][a-z]{2,}\\b\\s*(?:,\\s*(?:MD|RN|DO|NP|Esq)\\b)",
+    "\\b\\d{1,2}/\\d{1,2}/\\d{2,4}\\b",
+    "\\b(?:19|20)\\d{2}-\\d{2}-\\d{2}\\b\\s*(?:birth|born|DOB)",
+    "\\bMRN\\b", "\\bSSN\\b",
+    "\\bborn\\s+(?:on|in)\\b"
+  ],
+  "approved_repo_paths": [
+    "tools/", "apps/", "tests/", "docs/", ".github/", "*.md"
+  ],
+  "synthetic_fixture_paths": [
+    "tests/fixtures/synthetic/"
+  ],
+  "controlled_vocabulary": [
+    "condition_musculoskeletal", "condition_neurological", "condition_cardiac",
+    "condition_respiratory", "condition_gastrointestinal", "condition_dermatological",
+    "condition_endocrine", "condition_other",
+    "symptom_pain", "symptom_fatigue", "symptom_fever", "symptom_other",
+    "severity_mild", "severity_moderate", "severity_severe",
+    "trend_improving", "trend_stable", "trend_worsening",
+    "encounter_primary_care", "encounter_specialist", "encounter_emergency",
+    "encounter_imaging", "encounter_lab",
+    "med_class_analgesic", "med_class_antibiotic", "med_class_other",
+    "finding_normal", "finding_abnormal", "finding_inconclusive",
+    "question_adequacy", "question_differential", "question_followup",
+    "region_head", "region_torso", "region_limb", "region_other",
+    "laterality_left", "laterality_right", "laterality_bilateral"
+  ],
+  "derivative_templates": {
+    "clinical_review_v1": "Structured, de-identified clinical review request. Fields carry category codes from the policy vocabulary, neutral tokens, relative day offsets, and bucketed values only.",
+    "records_correlation_v1": "Structured, de-identified longitudinal correlation request. Same field constraints."
+  },
+  "buckets": {
+    "age_band": ["age:0_17", "age:18_39", "age:40_64", "age:65_plus"],
+    "duration": ["duration:days", "duration:weeks", "duration:months", "duration:years"]
+  }
+}

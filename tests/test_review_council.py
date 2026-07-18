@@ -31,6 +31,7 @@ import clearwright_message as cwm  # noqa: E402
 import clearwright_work as cww  # noqa: E402
 import clearwright_verdict as cwv  # noqa: E402
 import clearwright_gpt_review as gpt  # noqa: E402
+import clearwright_egress_guard as _egress  # noqa: E402
 import clearwright_codex_review as ccr  # noqa: E402
 import clearwright_review_council as council  # noqa: E402
 
@@ -156,8 +157,13 @@ class GptAdapterTests(unittest.TestCase):
         self.thread = res["thread_id"]
 
     def _gpt(self, **kw):
+        # Production always dispatches through the egress guard with a tier
+        # context; these adapter tests use clean synthetic technical text, so a
+        # standard-tier context is the faithful equivalent. The guard scans the
+        # exact serialized request bytes and passes clean content through.
         base = dict(thread_id=self.thread, key_getter=lambda: FAKE_KEY,
-                    note_on_failure=False, model="gpt-5.6-terra")
+                    note_on_failure=False, model="gpt-5.6-terra",
+                    egress_context=_egress.EgressContext("standard"))
         base.update(kw)
         return gpt.review(self.root, base.pop("context", "please review"), **base)
 

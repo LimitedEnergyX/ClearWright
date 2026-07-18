@@ -835,10 +835,23 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     ctx_sha = hashlib.sha256(context.encode("utf-8")).hexdigest()
     packet_bytes = len(codex_prompt.encode("utf-8"))
     requested_model = model or council.get("model")
+
+    # SDEG egress boundary (Decision 1A/2A): the tier travels with the council
+    # (set from the work item's declared data_sensitivity at creation). The
+    # guard validates the EXACT outbound bytes at each adapter; an un-annotated
+    # council defaults to the standard tier, where every byte is still scanned
+    # by the guard's tripwires and the final-serialized-request check. Operator-
+    # declared SENSITIVE work items carry "sensitive" and may dispatch only a
+    # construction-proven closed-schema derivative.
+    import clearwright_egress_guard as _egress
+    tier = "sensitive" if council.get("data_sensitivity") == "sensitive" else "standard"
+    egress_context = _egress.EgressContext(tier, work_item_id=council.get("work_item_id"))
+
     kw = dict(thread_id=council.get("thread_id"),
               work_item_id=council.get("work_item_id"),
               packet_id=council.get("packet_id"),
-              council_id=council_id, round_no=round_no, phase=phase)
+              council_id=council_id, round_no=round_no, phase=phase,
+              egress_context=egress_context)
 
     # Codex readable-workspace contract (verified in the acceptance regression:
     # the read-only sandbox reads within its workspace ROOT, not arbitrary

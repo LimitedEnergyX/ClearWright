@@ -44,6 +44,13 @@ import urllib.request
 
 import clearwright_message as cwm
 import clearwright_verdict as cwv
+import clearwright_egress_guard as _egress
+
+# SDEG (Decision 2A): this adapter dispatches ONLY through the egress guard.
+# The marker lets the guard's startup self-test confirm the guarded adapter is
+# the live implementation before the control plane accepts council dispatch.
+GUARDED = True
+_egress.register_adapter("clearwright_gpt_review")
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 DEFAULT_GPT_MODEL = "gpt-5.6-terra"
@@ -157,44 +164,34 @@ def _usage_tokens(resp_json):
 
 
 def resolve_api_key(env_get=os.environ.get, user_scope_get=None):
-    """Resolve OPENAI_API_KEY: process environment first, then the Windows
-    User-scope registry (HKCU\\Environment) — because a User-scope variable set
-    after a parent process started is NOT inherited by spawned children, which
-    otherwise fails every council as reviewer_unavailable with no clear cause.
-    Returns (key_or_None, source). The value is never logged or printed."""
-    key = env_get("OPENAI_API_KEY")
+    """Resolve the provider key by DELEGATING to the egress guard's sole
+    credential resolver (SDEG Decision 2A: credential resolution is removed
+    from direct adapters and centralized in the guard). Returns (key_or_None,
+    source). The value is never logged or printed. The injectable getters are
+    retained for tests and forwarded to the guard resolver."""
+    key = _egress.resolve_provider_key(env_get=env_get, user_scope_get=user_scope_get)
     if key and str(key).strip():
-        return str(key).strip(), "process_env"
-    if user_scope_get is None:
-        def user_scope_get():
-            try:
-                import winreg
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as h:
-                    value, _t = winreg.QueryValueEx(h, "OPENAI_API_KEY")
-                    return value
-            except OSError:
-                return None
-            except ImportError:
-                return None
-    try:
-        key = user_scope_get()
-    except Exception:  # noqa: BLE001 - a probe failure means "not found"
-        key = None
-    if key and str(key).strip():
-        return str(key).strip(), "windows_user_scope"
+        src = "process_env" if env_get("OPENAI_API_KEY") else "windows_user_scope"
+        return str(key).strip(), src
     return None, None
 
 
 def call_gpt(context_text, model, *, key, timeout=DEFAULT_TIMEOUT,
              max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-             transport=_real_transport):
+             transport=None, egress_context=None):
     """Perform exactly ONE GPT call. The Review Council engine is the sole
     retry owner (one adapter invocation = one API call), so worst-case API
     spend per reviewer per round is bounded by the council's attempt budget,
     never multiplied by hidden adapter retries. Returns a dict with keys:
     ok, text, actual_model, response_id, api_status, error, detail,
     input_chars, output_chars, actual token usage, elapsed_seconds. Never
-    includes the key/headers."""
+    includes the key/headers.
+
+    Egress boundary (SDEG, Decision 2A): the exact serialized request bytes
+    are validated by the egress guard before transmission. ``egress_context``
+    is REQUIRED (an EgressGuard EgressContext); its absence is fail-closed.
+    ``transport`` overrides the private wire transport for tests only; in
+    production the guard owns the send."""
     headers = {
         "Authorization": "Bearer " + key,
         "Content-Type": "application/json",
@@ -210,9 +207,22 @@ def call_gpt(context_text, model, *, key, timeout=DEFAULT_TIMEOUT,
     body_bytes = json.dumps(payload).encode("utf-8")
     input_chars = len(context_text or "")
 
+    real = transport or _real_transport
     start = time.monotonic()
     try:
-        status, text = transport(OPENAI_RESPONSES_URL, dict(headers), body_bytes, timeout)
+        # The guard validates body_bytes (final serialized provider request)
+        # and only then delegates to the private wire transport. Fail-closed:
+        # a missing/invalid context or any guard refusal blocks the send.
+        status, text = _egress.gpt_transport(
+            OPENAI_RESPONSES_URL, dict(headers), body_bytes, timeout,
+            context=egress_context, real_transport=real)
+    except _egress.EgressBlocked as exc:
+        return {
+            "ok": False, "error": "egress_blocked", "detail": exc.reason,
+            "api_status": None, "input_chars": input_chars, "output_chars": 0,
+            "actual_input_tokens": None, "actual_output_tokens": None,
+            "elapsed_seconds": round(time.monotonic() - start, 3),
+        }
     except Exception as exc:  # noqa: BLE001 - a transport failure is one failed call
         return {
             "ok": False, "error": "transport_error", "detail": type(exc).__name__,
@@ -298,7 +308,7 @@ def review(root, context_text, *, thread_id, work_item_id=None, packet_id=None,
            council_id=None, round=None, phase="plan", model=None,
            timeout=DEFAULT_TIMEOUT, max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
            transport=_real_transport, key_getter=None, env_get=os.environ.get,
-           note_on_failure=True):
+           note_on_failure=True, egress_context=None):
     """Run ONE real GPT structured review and post it into the thread, ONLY on
     a validated success. Exactly one API call per invocation; the Review
     Council engine owns all retry policy. Returns a compact machine-readable
@@ -322,7 +332,7 @@ def review(root, context_text, *, thread_id, work_item_id=None, packet_id=None,
 
     call = call_gpt(context_text, requested_model, key=str(key).strip(),
                     timeout=timeout, max_output_tokens=max_output_tokens,
-                    transport=transport)
+                    transport=transport, egress_context=egress_context)
 
     if not call.get("ok"):
         error = call.get("error", "api_error")

@@ -870,6 +870,18 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     _lineage = council.get("lineage")
     _cand = council.get("lineage_candidate")
     _graph_obj = _egress.LineageGraph.from_records(_lineage) if _lineage else None
+    # CONTENT-TO-LINEAGE BINDING (engine choke point, covers EVERY caller):
+    # the persisted lineage was built for a specific packet content, stamped
+    # with its sha256. If the content dispatched THIS round differs from the
+    # stamp (a continuation that did not rebuild the lineage — e.g. the lower-
+    # level engine CLI, or any future caller), the graph does not describe these
+    # bytes: force SENSITIVE so a stale STANDARD graph cannot launder fresh
+    # content. Fail-closed and caller-independent.
+    _incoming_sha = hashlib.sha256((base_context or "").encode("utf-8")).hexdigest()
+    _stamp = council.get("lineage_context_sha256")
+    _stale = bool(_stamp) and _stamp != _incoming_sha
+    if _stale:
+        tier = "sensitive"
     # EVERY inlined artifact is content-bearing but carries NO git provenance
     # (register() pins any path). They reach the packet through the artifact_id /
     # council-remembered channel, which bypasses --source, so they MUST be added
@@ -1181,6 +1193,17 @@ def set_approved_scope(root, council, scope):
         council["approved_scope"] = str(scope)
         council["approved_scope_sha256"] = _scope_hash(scope)
         _atomic_write_json(os.path.join(council_dir(root, council["council_id"]), "council.json"), council)
+    return council
+
+
+def stamp_context(root, council, context_sha256):
+    """Bind the council's live lineage to the EXACT packet content it was built
+    for by recording that content's sha256. run_round refuses to dispatch under
+    a lineage whose stamp does not match the current packet, so a stale graph
+    cannot launder fresh content (caller-independent)."""
+    council["lineage_context_sha256"] = context_sha256
+    _atomic_write_json(os.path.join(council_dir(root, council["council_id"]),
+                                    "council.json"), council)
     return council
 
 

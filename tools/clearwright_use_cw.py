@@ -585,6 +585,13 @@ def _council_body(args, phase, root, stage):
         except cwa.ArtifactError as exc:
             return _emit({"ok": False, "error": str(exc)}, EXIT_USAGE, args.json)
 
+    # Bind the (freshly rebuilt) lineage to the EXACT content this round
+    # dispatches, so run_round can refuse a stale graph over different bytes.
+    if str(getattr(args, "stage", "review")) == "review":
+        council = cwrc.stamp_context(
+            root, council,
+            __import__("hashlib").sha256((context or "").encode("utf-8")).hexdigest())
+
     report = cwrc.run_round(root, council, context, model=args.model, repo=args.repo,
                             timeout=args.timeout, artifact_ids=artifact_ids)
     council = cwrc.load_council(root, council["council_id"])

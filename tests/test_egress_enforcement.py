@@ -220,6 +220,92 @@ class LiveLineageWiring(unittest.TestCase):
         with self.assertRaises(guard.EgressBlocked):
             ctx.resolve()
 
+    def test_stale_lineage_over_different_content_is_forced_sensitive(self):
+        # Engine-choke binding (round-6 finding): a STANDARD lineage stamped for
+        # round-1 content must NOT gate DIFFERENT round-2 bytes — run_round
+        # forces SENSITIVE when the packet does not match the stamp, regardless
+        # of caller.
+        import tempfile, hashlib as _h
+        import clearwright_review_council as cwrc
+        import clearwright_egress_guard as guard
+        root = tempfile.mkdtemp(prefix="cw-stale-bind-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        g = guard.LineageGraph()
+        g.add("src", guard.CLASS_RAW,
+              provenance={"class": "approved_repo_file", "path_rel": "tools/x.py",
+                          "sha256": "0" * 64})
+        g.add("packet", guard.CLASS_MACHINE, source_ids=["src"])
+        council = cwrc.create_council(root, thread_id="t", data_sensitivity="standard",
+                                      lineage=g.to_records(), lineage_candidate="packet",
+                                      source_bindings=[])
+        # stamp the lineage for round-1 content
+        council = cwrc.stamp_context(root, council,
+                                     _h.sha256(b"round-1 clean content").hexdigest())
+
+        seen = {}
+
+        def _v(r):
+            return {"reviewer": r, "verdict": "approve", "confidence": 0.9,
+                    "risk_level": "low", "blocking_findings": [], "required_changes": [],
+                    "nonblocking_findings": [], "disagreements": [], "assumptions": [],
+                    "questions": [], "recommended_plan": [], "summary": "ok"}
+
+        def fake(r, packet, **kw):
+            seen["ctx"] = kw.get("egress_context")
+            return {"ok": True, "posted": True, "reviewer": "gpt", "validated": True,
+                    "verdict": _v("gpt"), "telemetry": {}, "message_id": "m"}
+
+        # dispatch DIFFERENT round-2 content under the same council
+        cwrc.run_round(root, council, "round-2 FRESH sensitive content",
+                       gpt_fn=fake, codex_fn=fake, sleep=lambda *_: None)
+        ctx = seen["ctx"]
+        self.assertEqual(ctx.tier, "sensitive")  # forced by the mismatch
+        # escalated to sensitive: a plain standard packet now needs a derivative,
+        # so a real GPT dispatch of the fresh content fails closed.
+        self.assertEqual(ctx.resolve()["tier"], "sensitive")
+        import json as _j
+        body = _j.dumps({"model": "m", "input": [
+            {"role": "developer", "content": "x"},
+            {"role": "user", "content": "round-2 FRESH sensitive content"}],
+            "max_output_tokens": 10}).encode("utf-8")
+        with self.assertRaises(guard.EgressBlocked):
+            guard.gpt_send(body, 5, context=ctx, key_getter=lambda: "k",
+                           transport=lambda *a: (200, "{}"),
+                           caller="clearwright_gpt_review")
+
+    def test_matching_stamp_permits_standard(self):
+        import tempfile, hashlib as _h
+        import clearwright_review_council as cwrc
+        import clearwright_egress_guard as guard
+        root = tempfile.mkdtemp(prefix="cw-match-bind-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        g = guard.LineageGraph()
+        g.add("src", guard.CLASS_RAW,
+              provenance={"class": "approved_repo_file", "path_rel": "tools/x.py",
+                          "sha256": "0" * 64})
+        g.add("packet", guard.CLASS_MACHINE, source_ids=["src"])
+        content = "the exact standard content"
+        council = cwrc.create_council(root, thread_id="t", data_sensitivity="standard",
+                                      lineage=g.to_records(), lineage_candidate="packet",
+                                      source_bindings=[])
+        council = cwrc.stamp_context(root, council,
+                                     _h.sha256(content.encode()).hexdigest())
+        seen = {}
+
+        def fake(r, packet, **kw):
+            seen["ctx"] = kw.get("egress_context")
+            return {"ok": True, "posted": True, "reviewer": "gpt", "validated": True,
+                    "verdict": {"reviewer": "gpt", "verdict": "approve", "confidence": 0.9,
+                                "risk_level": "low", "blocking_findings": [],
+                                "required_changes": [], "nonblocking_findings": [],
+                                "disagreements": [], "assumptions": [], "questions": [],
+                                "recommended_plan": [], "summary": "ok"}, "telemetry": {},
+                    "message_id": "m"}
+
+        cwrc.run_round(root, council, content, gpt_fn=fake, codex_fn=fake,
+                       sleep=lambda *_: None)
+        self.assertEqual(seen["ctx"].resolve()["tier"], "standard")
+
     def test_missing_lineage_context_fails_closed_on_resolve(self):
         import clearwright_egress_guard as guard
         ctx = guard.EgressContext("standard", require_graph=True)

@@ -55,11 +55,19 @@ OUTCOME_STOP = "stop"
 
 ERROR_CLASS = "egress_blocked"
 
-# --- Sensitivity lattice (monotonic): STANDARD < SENSITIVE. SANITIZED_OK is a
-# SEPARATE derivative classification, not a point on this axis. ---
+# --- Sensitivity lattice (monotonic): STANDARD < INTERNAL_TECHNICAL_STANDARD <
+# SENSITIVE. SANITIZED_OK is a SEPARATE derivative classification, not a point
+# on this axis. Both STANDARD and INTERNAL_TECHNICAL_STANDARD (ITS) are
+# dispatchable; ITS is the lane for ClearWright's OWN multi-round technical
+# self-review, where generated content (findings, reconciliations, augmentation)
+# is a first-class hash-bound derived artifact whose complete ancestry is
+# STANDARD or ITS. ITS is NEVER available for user/medical/legal/financial/etc.
+# content, and NO operator override can relabel SENSITIVE ancestry as ITS. ---
 SENSITIVITY_STANDARD = "standard"
+SENSITIVITY_ITS = "internal_technical_standard"
 SENSITIVITY_SENSITIVE = "sensitive"
-_SENS_ORDER = {SENSITIVITY_STANDARD: 0, SENSITIVITY_SENSITIVE: 1}
+_SENS_ORDER = {SENSITIVITY_STANDARD: 0, SENSITIVITY_ITS: 1, SENSITIVITY_SENSITIVE: 2}
+_DISPATCHABLE_SENSITIVITY = (SENSITIVITY_STANDARD, SENSITIVITY_ITS)
 
 # Lineage node classifications.
 CLASS_RAW = "raw"
@@ -74,6 +82,12 @@ CLASS_SANITIZED_OK = "sanitized_ok"
 # generated artifact earns STANDARD only through CLASS_MACHINE with a complete
 # STANDARD ancestry of git-verified sources.
 _STANDARD_PROVENANCE = ("approved_repo_file", "synthetic_fixture")
+
+# RAW provenance classes that establish a node as INTERNAL_TECHNICAL_STANDARD:
+# a FIXED, versioned ClearWright council scaffold or schema shipped in the repo.
+# The scaffold registry pins each scaffold's content hash; a scaffold whose
+# recorded hash does not match its shipped content is SENSITIVE (fail-closed).
+_ITS_ROOT_PROVENANCE = ("fixed_scaffold",)
 
 # The ONE approved sanitizer + the ONE approved closed-schema domain. Non-
 # clinical sensitive content has no approved schema yet => NO_DISPATCH.
@@ -101,6 +115,10 @@ REASONS = (
     "lineage_missing", "candidate_missing", "source_symlink",
     "source_traversal", "source_outside_repo", "source_not_a_file",
     "source_mutated_after_verification", "repo_unresolvable",
+    # INTERNAL_TECHNICAL_STANDARD lane
+    "its_lane_not_authorized", "its_composition_unbound",
+    "its_component_missing", "its_component_mismatch", "its_scaffold_stale",
+    "its_generated_scan_failed",
 )
 
 
@@ -542,14 +560,21 @@ class LineageGraph(object):
         self._nodes = {}
 
     def add(self, node_id, classification, *, source_ids=None, provenance=None,
-            escalated=False, domain=None, sanitizer=None):
+            escalated=False, domain=None, sanitizer=None, derived=None):
         if classification not in (CLASS_RAW, CLASS_MACHINE, CLASS_SANITIZED_OK):
             raise EgressBlocked("lineage_unverifiable",
                                 {"detail": "bad classification"})
+        # ``derived`` marks a node as GENERATED content (a reviewer finding,
+        # reconciliation, augmentation, capability statement, round summary):
+        # {content_hash, scan_passed(bool), producer, council_id, round,
+        #  policy_version, scaffold_version}. Its presence forces the node to be
+        # at best INTERNAL_TECHNICAL_STANDARD (never plain STANDARD), and it is
+        # SENSITIVE unless scan_passed is exactly True.
         self._nodes[node_id] = {
             "id": node_id, "classification": classification,
             "source_ids": list(source_ids or []), "provenance": provenance,
-            "escalated": bool(escalated), "domain": domain, "sanitizer": sanitizer}
+            "escalated": bool(escalated), "domain": domain, "sanitizer": sanitizer,
+            "derived": derived}
         return node_id
 
     def get(self, node_id):
@@ -567,11 +592,13 @@ class LineageGraph(object):
         for n in records or []:
             g.add(n["id"], n["classification"], source_ids=n.get("source_ids"),
                   provenance=n.get("provenance"), escalated=n.get("escalated", False),
-                  domain=n.get("domain"), sanitizer=n.get("sanitizer"))
+                  domain=n.get("domain"), sanitizer=n.get("sanitizer"),
+                  derived=n.get("derived"))
         return g
 
     def resolve_sensitivity(self, node_id, _stack=None):
-        """Monotonic, fail-closed resolution. Returns SENSITIVITY_STANDARD or
+        """Monotonic, fail-closed resolution over STANDARD < ITS < SENSITIVE.
+        Returns one of SENSITIVITY_STANDARD / SENSITIVITY_ITS /
         SENSITIVITY_SENSITIVE; raises EgressBlocked on any lineage defect."""
         _stack = _stack or ()
         if node_id in _stack:
@@ -585,30 +612,42 @@ class LineageGraph(object):
         if cls == CLASS_RAW:
             prov = node.get("provenance") or {}
             pclass = prov.get("class")
-            # Monotonic: a RAW node that declares standard provenance still
+            # Monotonic: a RAW node that declares a standard/ITS provenance still
             # inherits the MAX sensitivity of any declared sources. A raw leaf
             # normally has none; a raw node carrying sources cannot launder a
-            # sensitive ancestor to standard by asserting a standard class.
+            # sensitive ancestor by asserting a clean class.
+            base = (SENSITIVITY_STANDARD if pclass in _STANDARD_PROVENANCE
+                    else SENSITIVITY_ITS if pclass in _ITS_ROOT_PROVENANCE
+                    else SENSITIVITY_SENSITIVE)
             if node["source_ids"]:
                 worst = self._max_sources(node_id, _stack)
-                if pclass in _STANDARD_PROVENANCE:
-                    return worst
-                return SENSITIVITY_SENSITIVE
-            if pclass in _STANDARD_PROVENANCE:
-                return SENSITIVITY_STANDARD
-            # missing / unknown / ambiguous provenance is SENSITIVE
-            return SENSITIVITY_SENSITIVE
+                if base == SENSITIVITY_SENSITIVE:
+                    return SENSITIVITY_SENSITIVE
+                return worst if _SENS_ORDER[worst] >= _SENS_ORDER[base] else base
+            return base
         if cls == CLASS_SANITIZED_OK:
             # A sanitized_ok node's own sensitivity for lattice purposes is the
             # max of its sources (its source stays SENSITIVE); dispatchability
-            # is decided separately in decide_outcome. Resolving it here still
-            # enforces source integrity.
+            # is decided separately in decide_outcome.
             return self._max_sources(node_id, _stack)
-        # machine_generated: STANDARD only if EVERY source is STANDARD.
+        # machine_generated. A node with no declared sources is ambiguous.
         if not node["source_ids"]:
-            # A generated artifact with no declared sources is ambiguous.
             raise EgressBlocked("lineage_ambiguous", {"node_sha16": _h(node_id)})
-        return self._max_sources(node_id, _stack)
+        worst = self._max_sources(node_id, _stack)
+        d = node.get("derived")
+        if d is not None:
+            # GENERATED content: SENSITIVE unless it passed pre-persistence
+            # scanning, and never plain STANDARD — clean generated content is
+            # INTERNAL_TECHNICAL_STANDARD at best.
+            if d.get("scan_passed") is not True:
+                return SENSITIVITY_SENSITIVE
+            if worst == SENSITIVITY_SENSITIVE:
+                return SENSITIVITY_SENSITIVE
+            return SENSITIVITY_ITS
+        # A pure ASSEMBLY node (no generated content of its own) inherits the max
+        # of its sources: STANDARD if all standard, ITS if any ITS ancestor,
+        # SENSITIVE if any sensitive ancestor.
+        return worst
 
     def _max_sources(self, node_id, _stack):
         node = self._nodes[node_id]
@@ -663,6 +702,11 @@ class LineageGraph(object):
         eff = self.resolve_sensitivity(node_id)
         if eff == SENSITIVITY_STANDARD:
             return {"outcome": "standard_ok", "tier": "standard"}
+        if eff == SENSITIVITY_ITS:
+            # Dispatchable only in the internal-technical lane (enforced by
+            # EgressContext.resolve against the work item's lane); a stale/
+            # unscanned/mixed ancestry would already have resolved SENSITIVE.
+            return {"outcome": "its_ok", "tier": "internal_technical"}
         # SENSITIVE raw/machine content cannot dispatch directly.
         domain = node.get("domain")
         if domain in NON_CLINICAL_DOMAINS:
@@ -728,15 +772,25 @@ class EgressContext(object):
 
     def __init__(self, tier, provenance=None, work_item_id=None,
                  graph=None, candidate_id=None, domain=None,
-                 source_bindings=None, require_graph=False):
-        if tier not in ("standard", "sensitive"):
+                 source_bindings=None, require_graph=False, lane="user",
+                 its_composition=None):
+        if tier not in ("standard", "sensitive", "internal_technical"):
             raise EgressBlocked("context_missing", {"detail": "bad tier"})
+        # The recorded {scaffold_version, scaffold_sha256, components:[{id,sha}]}
+        # that the ITS packet must decompose into exactly (rule 7/8).
+        self.its_composition = its_composition
         self.tier = tier
         self.provenance = provenance
         self.work_item_id = work_item_id
         self.graph = graph
         self.candidate_id = candidate_id
         self.domain = domain
+        # The dispatch LANE authorizes INTERNAL_TECHNICAL_STANDARD. Only a work
+        # item classified for ClearWright technical self-review is in the
+        # "internal_technical" lane; user/medical/etc. items are "user" and can
+        # NEVER dispatch ITS-resolved content. The lane only ENABLES ITS for
+        # clean technical ancestry — it can never relabel SENSITIVE ancestry.
+        self.lane = lane if lane in ("user", "internal_technical") else "user"
         # {abspath, sha256} of verified-STANDARD sources, for the TOCTOU re-check
         # at dispatch (any source mutation after verification blocks the send).
         self.source_bindings = list(source_bindings or [])
@@ -752,16 +806,18 @@ class EgressContext(object):
         if self.graph is not None and self.candidate_id is not None:
             decision = self.graph.decide_outcome(self.candidate_id, loaded)
             # Escalation-only (rule 4): an explicit SENSITIVE declaration forces
-            # SENSITIVE even over standard-resolving lineage — the item may then
-            # dispatch only as a construction-proven derivative, never as a plain
-            # standard packet.
-            if self.tier == "sensitive" and decision["tier"] == "standard":
+            # SENSITIVE even over a standard/ITS-resolving lineage.
+            if self.tier == "sensitive" and decision["tier"] in ("standard", "internal_technical"):
                 return {"outcome": OUTCOME_SANITIZED_OK, "tier": "sensitive",
                         "escalated": True}
             # A declared standard tier can NEVER override a resolved sensitive
             # outcome (no downgrade).
             if decision["tier"] == "sensitive" and self.tier == "standard":
                 raise EgressBlocked("sensitivity_downgrade_forbidden")
+            # INTERNAL_TECHNICAL_STANDARD is dispatchable ONLY in the internal-
+            # technical lane. ITS content in a user work item is refused (rule 8).
+            if decision["tier"] == "internal_technical" and self.lane != "internal_technical":
+                raise EgressBlocked("its_lane_not_authorized")
             return decision
         if self.require_graph:
             raise EgressBlocked("lineage_missing" if self.graph is None
@@ -860,6 +916,109 @@ def build_sensitive_codex_prompt(derivative_text):
             + "\nEND_DERIVATIVE\n")
 
 
+# --------------------------------------------------------------------------- #
+# INTERNAL_TECHNICAL_STANDARD composition: an ITS packet is assembled ONLY from
+# a fixed versioned scaffold plus hash-bound components (git sources and scanned
+# derived artifacts). Framing is LENGTH-DELIMITED (byte length in the header),
+# so component content can contain anything — including the frame marker — and
+# still be parsed deterministically; nothing can be smuggled between frames.
+# --------------------------------------------------------------------------- #
+
+# Registry of the FIXED, versioned ClearWright council scaffolds/schemas. A
+# scaffold is INTERNAL_TECHNICAL_STANDARD only when its recorded hash matches the
+# text registered here. Phase-2 engine registers the real scaffolds at import.
+_ITS_SCAFFOLDS = {}
+_ITS_MARK = "CWITS\x1f"
+
+
+def register_its_scaffold(version, text):
+    _ITS_SCAFFOLDS[str(version)] = {
+        "text": text, "sha256": _sha256_bytes(text.encode("utf-8"))}
+    return _ITS_SCAFFOLDS[str(version)]["sha256"]
+
+
+def its_scaffold_sha(version):
+    sc = _ITS_SCAFFOLDS.get(str(version))
+    return sc["sha256"] if sc else None
+
+
+def _its_frame(kind, ident, text):
+    b = text.encode("utf-8")
+    return "{}{}\x1f{}\x1f{}\x1f{}\x1f\n{}\n".format(
+        _ITS_MARK, kind, ident, len(b), _sha256_bytes(b), text)
+
+
+def build_its_packet(scaffold_version, components):
+    """Assemble the canonical ITS packet text and its composition manifest.
+    ``components`` = ordered [{id, text}] (git-source renderings + scanned
+    derived artifacts). Returns (packet_text, composition). The engine dispatches
+    packet_text; the guard re-verifies it against composition at send."""
+    sc = _ITS_SCAFFOLDS.get(str(scaffold_version))
+    if not sc:
+        raise EgressBlocked("its_scaffold_stale", {"scaffold_version": scaffold_version})
+    parts = [_its_frame("scaffold", str(scaffold_version), sc["text"])]
+    manifest = {"scaffold_version": str(scaffold_version),
+                "scaffold_sha256": sc["sha256"], "components": []}
+    for c in components:
+        text = c["text"]
+        h = _sha256_bytes(text.encode("utf-8"))
+        parts.append(_its_frame("component", c["id"], text))
+        manifest["components"].append({"id": c["id"], "sha256": h})
+    return "".join(parts), manifest
+
+
+def verify_its_composition(packet_text, composition, loaded=None):
+    """Verify the ITS packet is EXACTLY the fixed scaffold + the recorded
+    components, in order, with every content hash matching the manifest and the
+    scaffold hash matching the shipped registry — and NO bytes outside the
+    frames (rule 7). Fail-closed on any deviation."""
+    data = (packet_text or "").encode("utf-8")
+    mark = _ITS_MARK.encode("utf-8")
+    pos = 0
+    parsed = []
+    n = len(data)
+    while pos < n:
+        if data[pos:pos + len(mark)] != mark:
+            raise EgressBlocked("its_component_mismatch", {"detail": "stray_bytes"})
+        pos += len(mark)
+        nl = data.find(b"\n", pos)
+        if nl < 0:
+            raise EgressBlocked("its_component_mismatch", {"detail": "bad_header"})
+        header = data[pos:nl].split(b"\x1f")
+        # header = [kind, id, len, sha, ''] (trailing \x1f before newline)
+        if len(header) != 5 or header[4] != b"":
+            raise EgressBlocked("its_component_mismatch", {"detail": "bad_header"})
+        kind, ident, blen_s, sha_s = (header[0].decode("utf-8", "replace"),
+                                      header[1].decode("utf-8", "replace"),
+                                      header[2], header[3].decode("utf-8", "replace"))
+        try:
+            blen = int(blen_s)
+        except ValueError:
+            raise EgressBlocked("its_component_mismatch", {"detail": "bad_len"})
+        cstart = nl + 1
+        cend = cstart + blen
+        if cend > n or data[cend:cend + 1] != b"\n":
+            raise EgressBlocked("its_component_mismatch", {"detail": "bad_frame"})
+        content = data[cstart:cend]
+        if _sha256_bytes(content) != sha_s:
+            raise EgressBlocked("its_component_mismatch", {"detail": "content_hash"})
+        parsed.append((kind, ident, sha_s))
+        pos = cend + 1
+    # Structure: exactly one scaffold first, then the components in order.
+    if not parsed or parsed[0][0] != "scaffold":
+        raise EgressBlocked("its_composition_unbound", {"detail": "no_scaffold"})
+    sk, sid, ssha = parsed[0]
+    if composition.get("scaffold_sha256") != ssha or its_scaffold_sha(sid) != ssha:
+        raise EgressBlocked("its_scaffold_stale")
+    got = [(ident, sha) for (kind, ident, sha) in parsed[1:] if kind == "component"]
+    if any(k != "component" for (k, _i, _s) in parsed[1:]):
+        raise EgressBlocked("its_component_mismatch", {"detail": "unexpected_frame"})
+    want = [(c["id"], c["sha256"]) for c in (composition.get("components") or [])]
+    if got != want:
+        raise EgressBlocked("its_component_mismatch", {"detail": "set_mismatch"})
+    return {"scaffold_version": sid, "component_count": len(got)}
+
+
 def _enforce(data_bytes, context, loaded, *, codex_prompt=None):
     """Resolve the enforced outcome from the context (lineage-driven when a
     graph is present) and validate the EXACT outbound bytes for that outcome.
@@ -915,6 +1074,32 @@ def _enforce(data_bytes, context, loaded, *, codex_prompt=None):
             if bytes(data_bytes) != canonical:
                 raise EgressBlocked("sensitive_requires_derivative",
                                     {"detail": "noncanonical_body"})
+    elif decision["tier"] == "internal_technical":
+        # ITS: the tripwire already passed over the FULL bytes (rule 3). Now the
+        # packet content must be assembled ONLY from the recorded, hash-bound
+        # component set plus a fixed versioned scaffold (rule 7/8): every byte of
+        # the reviewer-visible packet is accounted for by a component whose sha
+        # matches its lineage record, or by the verified scaffold. Absent a
+        # composition manifest, fail closed — ITS never falls back to tripwire-
+        # only.
+        comp = getattr(context, "its_composition", None)
+        if not comp:
+            raise EgressBlocked("its_composition_unbound")
+        if codex_prompt is not None:
+            packet_text = codex_prompt
+        else:
+            try:
+                body = json.loads(bytes(data_bytes).decode("utf-8"))
+            except Exception:  # noqa: BLE001
+                raise EgressBlocked("construction_parse_failed")
+            users = [it.get("content") for it in (body.get("input") or [])
+                     if isinstance(it, dict) and it.get("role") == "user"
+                     and isinstance(it.get("content"), str)]
+            if len(users) != 1:
+                raise EgressBlocked("its_composition_unbound",
+                                    {"user_items": len(users)})
+            packet_text = users[0]
+        verify_its_composition(packet_text, comp, loaded)
     return decision
 
 

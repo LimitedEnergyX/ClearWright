@@ -501,28 +501,13 @@ def _council_body(args, phase, root, stage):
             # Editorial work targets 2 rounds and defaults to a max of 3; an
             # operator raises it by passing an explicit --max-rounds below 5.
             eff_max = cwrc.EDITORIAL_DEFAULT_MAX_ROUNDS
-        # SDEG live lineage BINDS the outbound packet to its content sources.
-        # The lineage sources are the actual content-bearing inputs — the packet
-        # text file(s) AND every inlined artifact — not a separate declaration.
-        # Each is classified by verified git/synthetic provenance; the packet
-        # candidate resolves STANDARD only if EVERY content source verifies
-        # STANDARD. Inline --prompt text (or a packet with no content file) has
-        # no provenance and forces SENSITIVE. This closes the decoy where a
-        # clean --source is named while sensitive content rides in the packet.
+        # SDEG live lineage BINDS the outbound packet to its content sources
+        # (packet text file(s) + inlined artifacts + declared sources), rebuilt
+        # from the CURRENT round's inputs so a later round cannot ride a stale
+        # graph. See _assemble_lineage.
         import clearwright_egress_guard as _egress
-        _content_sources = []
-        for _p in (getattr(args, "plan_file", None), getattr(args, "context_file", None)):
-            if _p:
-                _content_sources.append(_p)
-        _content_sources += (getattr(args, "artifact", None) or [])
-        _content_sources += (getattr(args, "source", None) or [])
-        _inline = bool(getattr(args, "prompt", None)) or not (
-            getattr(args, "plan_file", None) or getattr(args, "context_file", None))
         try:
-            _graph, _cand, _binds = _egress.build_candidate_graph(
-                _content_sources, getattr(args, "repo", None),
-                candidate_id="packet", inline_unverified=_inline)
-            lineage_records = _graph.to_records()
+            lineage_records, _cand, _binds = _assemble_lineage(args)
         except _egress.EgressBlocked as exc:
             return _emit({"ok": False, "command": "council",
                           "error": "lineage_assembly_failed",
@@ -546,6 +531,18 @@ def _council_body(args, phase, root, stage):
         if refusal is not None:
             return refusal
         council = cwrc.set_approved_scope(root, council, args.approved_scope)
+        # REBUILD the lineage from THIS round's content on a continuation review
+        # dispatch — a round >=2 packet must never be dispatched under the frozen
+        # round-1 graph. (Reconcile stage does not dispatch, so it is skipped.)
+        if str(getattr(args, "stage", "review")) == "review":
+            import clearwright_egress_guard as _egress
+            try:
+                _lr, _cand, _binds = _assemble_lineage(args)
+            except _egress.EgressBlocked as exc:
+                return _emit({"ok": False, "command": "council",
+                              "error": "lineage_assembly_failed",
+                              "reason": exc.reason}, EXIT_HARD_GATE, args.json)
+            council = cwrc.set_lineage(root, council, _lr, _cand, _binds)
 
     if getattr(args, "grant_attempts", None):
         if not getattr(args, "operator_message_id", None):
@@ -710,6 +707,28 @@ def _review_profile(root, work_item_id):
     audit = _envelope_audit(root, work_item_id) or {}
     rp = str(audit.get("review_profile") or "").strip().lower()
     return rp if rp in cwrc.REVIEW_PROFILES else "code"
+
+
+def _assemble_lineage(args):
+    """Build the live candidate lineage from the CURRENT round's content-bearing
+    inputs (packet text file(s) + inlined artifacts + declared sources). Inline
+    --prompt or a packet with no content file forces SENSITIVE. Returns
+    (records, candidate_id, bindings) or raises EgressBlocked. Called on EVERY
+    review dispatch (round 1 AND every continuation) so a later round can never
+    ride a stale round-1 graph."""
+    import clearwright_egress_guard as _egress
+    content_sources = []
+    for p in (getattr(args, "plan_file", None), getattr(args, "context_file", None)):
+        if p:
+            content_sources.append(p)
+    content_sources += (getattr(args, "artifact", None) or [])
+    content_sources += (getattr(args, "source", None) or [])
+    inline = bool(getattr(args, "prompt", None)) or not (
+        getattr(args, "plan_file", None) or getattr(args, "context_file", None))
+    graph, cand, binds = _egress.build_candidate_graph(
+        content_sources, getattr(args, "repo", None),
+        candidate_id="packet", inline_unverified=inline)
+    return graph.to_records(), cand, binds
 
 
 def _data_sensitivity(root, work_item_id):

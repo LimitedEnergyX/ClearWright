@@ -268,18 +268,26 @@ def _git_head(repo):
         return None
 
 
-def _git_unmodified(repo, rel_path):
-    """True only when the working-tree file is IDENTICAL to its committed
-    content at HEAD, using git's own (autocrlf/eol-aware) comparison. A locally
-    modified, staged-but-uncommitted, or otherwise-diverged tracked file returns
-    False (its content is not provably the committed STANDARD content). Any git
-    error is fail-closed (False)."""
+def _git_object_id(args, cwd, stdin=None):
     try:
-        r = subprocess.run(["git", "-C", repo, "diff", "--quiet", "HEAD",
-                            "--", rel_path], capture_output=True, timeout=30)
-        return r.returncode == 0
+        r = subprocess.run(["git", "-C", cwd] + args, capture_output=True,
+                           text=True, timeout=30, input=stdin)
+        return (r.stdout or "").strip() if r.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return None
+
+
+def _git_content_matches_head(repo, rel_path, abspath):
+    """True only when the ACTUAL working-tree content equals the committed blob
+    at HEAD. Compares git blob object-ids: `git hash-object` over the real file
+    (applies the same clean/eol filters git would, and reads the FILE, not the
+    index) vs `git rev-parse HEAD:<rel>` (the committed blob id). This defeats
+    both autocrlf false-flags AND the assume-unchanged / skip-worktree index
+    bits (which make `git diff --quiet` lie). Any error/absence is fail-closed."""
+    worktree_id = _git_object_id(["hash-object", "--", abspath], repo)
+    committed_id = _git_object_id(["rev-parse", "--verify", "--quiet",
+                                   "HEAD:" + rel_path], repo)
+    return bool(worktree_id) and bool(committed_id) and worktree_id == committed_id
 
 
 def _sha256_file(path):
@@ -369,11 +377,12 @@ def classify_source(path, repo, loaded=None):
     if not _git_tracked(repo_real, rel):
         return {"class": "sensitive_source", "reason": "source_untracked",
                 "path_sha16": _sha256_bytes(rel.encode())[:16]}
-    # ...and its working-tree content must be IDENTICAL to the committed content
-    # at HEAD. A locally-modified/uncommitted tracked file carries unverifiable
-    # content and is therefore SENSITIVE — only committed content is provably
-    # STANDARD. (git's own comparison so autocrlf/eol filters do not false-flag.)
-    if not _git_unmodified(repo_real, rel):
+    # ...and its ACTUAL working-tree content must equal the committed blob at
+    # HEAD (blob-id comparison — defeats autocrlf false-flags AND the
+    # assume-unchanged/skip-worktree index bits). A locally-modified/uncommitted
+    # tracked file carries unverifiable content and is therefore SENSITIVE —
+    # only committed content is provably STANDARD.
+    if not _git_content_matches_head(repo_real, rel, real):
         return {"class": "sensitive_source", "reason": "source_uncommitted",
                 "path_sha16": _sha256_bytes(rel.encode())[:16]}
     return {"class": "approved_repo_file", "path_rel": rel,
@@ -399,8 +408,10 @@ def build_candidate_graph(source_paths, repo, *, candidate_id="cand",
     src_ids = []
     for i, p in enumerate(source_paths or []):
         rec = classify_source(p, repo, loaded)
-        # persist only content-free provenance (no abspath)
-        prov = {k: v for k, v in rec.items() if k != "abspath"}
+        # persist only content-free provenance in the durable node: class,
+        # reason, the public repo-relative path, the content hash, and the
+        # committed commit id. NO absolute path (abspath/repo) is stored.
+        prov = {k: v for k, v in rec.items() if k not in ("abspath", "repo")}
         nid = "src-{}-{}".format(i, (rec.get("path_rel") and
                                       _sha256_bytes(rec["path_rel"].encode())[:12])
                                  or rec.get("path_sha16") or _sha256_bytes(str(p).encode())[:12])

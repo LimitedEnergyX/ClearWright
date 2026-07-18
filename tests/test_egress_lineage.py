@@ -268,6 +268,65 @@ class Uncommitted(unittest.TestCase):
         self.assertEqual(rec.get("reason"), "source_uncommitted")
 
 
+class GitIndexBitBypass(unittest.TestCase):
+    def test_assume_unchanged_modified_file_is_sensitive(self):
+        # A tracked approved file marked assume-unchanged then modified must NOT
+        # classify STANDARD (git diff --quiet lies; blob-id comparison catches).
+        import subprocess
+        with open(TRACKED, "r", encoding="utf-8") as fh:
+            original = fh.read()
+        rel = os.path.relpath(os.path.realpath(TRACKED), os.path.realpath(REPO)).replace("\\", "/")
+
+        def _restore():
+            try:
+                subprocess.run(["git", "-C", REPO, "update-index", "--no-assume-unchanged", "--", rel],
+                               capture_output=True, timeout=30)
+            except Exception:
+                pass
+            with open(TRACKED, "w", encoding="utf-8") as fh:
+                fh.write(original)
+        self.addCleanup(_restore)
+        r = subprocess.run(["git", "-C", REPO, "update-index", "--assume-unchanged", "--", rel],
+                           capture_output=True, timeout=30)
+        if r.returncode != 0:
+            self.skipTest("could not set assume-unchanged")
+        with open(TRACKED, "a", encoding="utf-8") as fh:
+            fh.write("\n# attacker content under assume-unchanged\n")
+        rec = guard.classify_source(TRACKED, REPO)
+        self.assertNotIn(rec["class"], guard._STANDARD_PROVENANCE)
+        self.assertEqual(rec.get("reason"), "source_uncommitted")
+
+
+class PerRoundRebuild(unittest.TestCase):
+    def test_lineage_records_are_content_free(self):
+        g, cand, binds = guard.build_candidate_graph([TRACKED], REPO,
+                                                     candidate_id="packet")
+        for rec in g.to_records():
+            prov = rec.get("provenance") or {}
+            self.assertNotIn("abspath", prov)
+            self.assertNotIn("repo", prov)  # no absolute path persisted
+
+    def test_set_lineage_rebinds_council(self):
+        import tempfile
+        import clearwright_review_council as cwrc
+        root = tempfile.mkdtemp(prefix="cw-relineage-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        # round-1 STANDARD lineage
+        g1, c1, b1 = guard.build_candidate_graph([TRACKED], REPO, candidate_id="packet")
+        council = cwrc.create_council(root, thread_id="t", data_sensitivity="standard",
+                                      lineage=g1.to_records(), lineage_candidate=c1,
+                                      source_bindings=b1)
+        # round-2 inline/sensitive content rebinds the council to SENSITIVE
+        g2 = guard.LineageGraph()
+        g2.add("inline", guard.CLASS_RAW,
+               provenance={"class": "sensitive_source", "reason": "inline_content"})
+        g2.add("packet", guard.CLASS_MACHINE, source_ids=["inline"])
+        council = cwrc.set_lineage(root, council, g2.to_records(), "packet", [])
+        rebuilt = guard.LineageGraph.from_records(council["lineage"])
+        self.assertEqual(rebuilt.resolve_sensitivity("packet"),
+                         guard.SENSITIVITY_SENSITIVE)
+
+
 class SanitizedDoesNotReclassifySource(unittest.TestCase):
     def test_source_stays_sensitive_after_sanitize(self):
         g = guard.LineageGraph()

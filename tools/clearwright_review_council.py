@@ -874,6 +874,14 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
         candidate_id=council.get("lineage_candidate"),
         source_bindings=council.get("source_bindings") or [],
         require_graph=True)
+    # The EFFECTIVE (lineage-derived) sensitivity — not the declared tier —
+    # decides digest hygiene below. Fail-closed to sensitive if the lineage
+    # cannot resolve (missing graph, sensitive ancestor, etc.).
+    try:
+        _resolved = egress_context.resolve()
+        effective_tier = _resolved.get("tier", "sensitive")
+    except _egress.EgressBlocked:
+        effective_tier = "sensitive"
 
     kw = dict(thread_id=council.get("thread_id"),
               work_item_id=council.get("work_item_id"),
@@ -908,9 +916,9 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     # is posted. SDEG: the digest is scanned by the egress guard BEFORE it is
     # written to the durable thread, so a mislabeled/raw packet can never echo
     # sensitive content into a persisted record (content-free on a hit).
-    if tier == "sensitive":
-        # On the sensitive tier the packet may derive from restricted content;
-        # never echo any of it into a durable record.
+    if effective_tier == "sensitive":
+        # Effective (lineage-derived) sensitivity, not the declared tier: a
+        # mis-declared-standard packet with sensitive lineage still withholds.
         digest = "[content digest withheld: sensitive-tier council]"
     else:
         digest = " ".join(context.split())[:400]
@@ -1152,6 +1160,19 @@ def set_approved_scope(root, council, scope):
         council["approved_scope"] = str(scope)
         council["approved_scope_sha256"] = _scope_hash(scope)
         _atomic_write_json(os.path.join(council_dir(root, council["council_id"]), "council.json"), council)
+    return council
+
+
+def set_lineage(root, council, lineage, candidate, bindings):
+    """Replace the council's live lineage with the CURRENT round's graph and
+    persist it. The lineage is a per-dispatch provenance proof, not a durable
+    identity, so a continuation round rebinds to the content it is actually
+    about (a stale round-1 graph must never gate round-2 bytes)."""
+    council["lineage"] = lineage
+    council["lineage_candidate"] = candidate
+    council["source_bindings"] = bindings
+    _atomic_write_json(os.path.join(council_dir(root, council["council_id"]),
+                                    "council.json"), council)
     return council
 
 

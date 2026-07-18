@@ -17,8 +17,22 @@ import clearwright_egress_guard as guard  # noqa: E402
 guard.register_adapter("clearwright_gpt_review")
 guard.register_adapter("clearwright_codex_review")
 
-# A real git-tracked file under an approved repo path.
-TRACKED = os.path.join(REPO, "tools", "clearwright_egress_guard.py")
+
+def _git_clean(path):
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", REPO, "diff", "--quiet", "HEAD", "--", path],
+                           capture_output=True, timeout=30)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+# A real git-tracked file under an approved repo path, COMMITTED and unmodified
+# in the worktree (so its content matches the HEAD blob). Files under active
+# edit would classify SENSITIVE (uncommitted) by design.
+TRACKED = os.path.join(REPO, "tools", "clearwright_identity.py")
+if not _git_clean(TRACKED):
+    TRACKED = os.path.join(REPO, "tools", "clearwright_message.py")
 
 
 def _gpt_body(user_text):
@@ -35,7 +49,8 @@ class DerivedStandard(unittest.TestCase):
         g, cand, binds = guard.build_candidate_graph([TRACKED], REPO)
         self.assertEqual(g.resolve_sensitivity(cand), guard.SENSITIVITY_STANDARD)
         self.assertEqual(g.decide_outcome(cand)["tier"], "standard")
-        self.assertTrue(binds and binds[0]["abspath"] == os.path.realpath(TRACKED))
+        self.assertTrue(binds and binds[0]["sha256"] and binds[0]["path_rel"]
+                        and "abspath" not in binds[0])
 
     def test_runtime_work_file_is_not_automatically_standard(self):
         # A file that ClearWright created outside the repo (e.g. under
@@ -189,6 +204,68 @@ class GptAndCodexParity(unittest.TestCase):
         with self.assertRaises(guard.EgressBlocked):
             guard.codex_launch(["codex"], "clean text", 5, context=ctx,
                                caller="clearwright_codex_review")
+
+
+class ContentBinding(unittest.TestCase):
+    def test_decoy_source_with_sensitive_content_blocks(self):
+        # THE round-3 finding: a clean git source cannot bless a packet that
+        # also carries a sensitive content source. Content sources ARE lineage.
+        fd, upload = tempfile.mkstemp(prefix="cw-upload-")
+        os.close(fd)
+        self.addCleanup(os.remove, upload)
+        g, cand, binds = guard.build_candidate_graph([TRACKED, upload], REPO,
+                                                     candidate_id="packet")
+        with self.assertRaises(guard.EgressBlocked):
+            g.decide_outcome(cand)
+
+    def test_inline_content_forces_sensitive(self):
+        # A packet with inline prompt text (no content file) has no provenance.
+        g, cand, _ = guard.build_candidate_graph([TRACKED], REPO,
+                                                 candidate_id="packet",
+                                                 inline_unverified=True)
+        with self.assertRaises(guard.EgressBlocked):
+            g.decide_outcome(cand)
+
+    def test_only_committed_git_content_resolves_standard(self):
+        g, cand, binds = guard.build_candidate_graph([TRACKED], REPO,
+                                                     candidate_id="packet")
+        self.assertEqual(g.decide_outcome(cand)["tier"], "standard")
+        # binding is content-free: repo + repo-relative path, no abspath
+        self.assertTrue(binds and "abspath" not in binds[0]
+                        and binds[0].get("path_rel"))
+
+
+class RepoIdentity(unittest.TestCase):
+    def test_repo_spoofing_is_rejected(self):
+        # A file under an attacker-controlled repo (not in approved_repo_roots)
+        # cannot mint approved_repo_file.
+        fake = tempfile.mkdtemp(prefix="cw-fake-repo-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(fake, ignore_errors=True))
+        os.makedirs(os.path.join(fake, "tools"))
+        fpath = os.path.join(fake, "tools", "x.py")
+        with open(fpath, "w", encoding="utf-8") as fh:
+            fh.write("print('x')\n")
+        rec = guard.classify_source(fpath, fake)
+        self.assertEqual(rec["class"], "sensitive_source")
+        self.assertEqual(rec.get("reason"), "repo_unresolvable")
+
+
+class Uncommitted(unittest.TestCase):
+    def test_locally_modified_tracked_file_is_sensitive(self):
+        # A tracked approved file whose working-tree content diverges from the
+        # committed blob is SENSITIVE (only committed content is provably std).
+        with open(TRACKED, "r", encoding="utf-8") as fh:
+            original = fh.read()
+
+        def _restore():
+            with open(TRACKED, "w", encoding="utf-8") as fh:
+                fh.write(original)
+        self.addCleanup(_restore)
+        with open(TRACKED, "a", encoding="utf-8") as fh:
+            fh.write("\n# local uncommitted modification\n")
+        rec = guard.classify_source(TRACKED, REPO)
+        self.assertNotIn(rec["class"], guard._STANDARD_PROVENANCE)
+        self.assertEqual(rec.get("reason"), "source_uncommitted")
 
 
 class SanitizedDoesNotReclassifySource(unittest.TestCase):

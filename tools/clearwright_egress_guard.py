@@ -152,7 +152,8 @@ def load_policy(path=POLICY_PATH, expected_sha=None):
     if version not in _KNOWN_POLICY_VERSIONS:
         raise EgressBlocked("policy_version_unknown", {"policy_version": version})
     for key in ("tripwires", "contextual_terms", "identity_signals",
-                "approved_repo_paths", "synthetic_fixture_paths",
+                "approved_repo_roots", "approved_repo_paths",
+                "synthetic_fixture_paths",
                 "controlled_vocabulary", "derivative_templates"):
         if key not in policy:
             raise EgressBlocked("policy_invalid", {"missing_key": key})
@@ -267,6 +268,20 @@ def _git_head(repo):
         return None
 
 
+def _git_unmodified(repo, rel_path):
+    """True only when the working-tree file is IDENTICAL to its committed
+    content at HEAD, using git's own (autocrlf/eol-aware) comparison. A locally
+    modified, staged-but-uncommitted, or otherwise-diverged tracked file returns
+    False (its content is not provably the committed STANDARD content). Any git
+    error is fail-closed (False)."""
+    try:
+        r = subprocess.run(["git", "-C", repo, "diff", "--quiet", "HEAD",
+                            "--", rel_path], capture_output=True, timeout=30)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -305,6 +320,18 @@ def classify_source(path, repo, loaded=None):
         repo_real = os.path.realpath(repo)
     except OSError:
         return {"class": "sensitive_source", "reason": "repo_unresolvable"}
+    # Repo IDENTITY binding: the repo must be one of the policy's approved
+    # absolute roots. A caller cannot point --repo at an attacker-controlled
+    # clone to mint approved_repo_file classifications. Empty allowlist => fail
+    # closed. Case-normalized on Windows.
+    roots = []
+    for r in (policy.get("approved_repo_roots") or []):
+        try:
+            roots.append(os.path.normcase(os.path.realpath(r)))
+        except OSError:
+            continue
+    if os.path.normcase(repo_real) not in roots:
+        return {"class": "sensitive_source", "reason": "repo_unresolvable"}
     lex = os.path.abspath(path)
     # A symlink source is never a tracked source (it is an alternate reference).
     if os.path.islink(path) or os.path.islink(lex):
@@ -332,38 +359,60 @@ def classify_source(path, repo, loaded=None):
         return {"class": "sensitive_source", "reason": "source_outside_repo",
                 "path_sha16": _sha256_bytes(rel.encode())[:16]}
     sha = _sha256_file(real)
+    # Content-free provenance: NO absolute path is persisted (only the public
+    # repo-relative path, the content hash, and the class/reason). The runtime
+    # abspath needed for TOCTOU re-reads is reconstructed from repo + path_rel.
     if in_fixtures and not in_approved:
-        return {"class": "synthetic_fixture", "path_rel": rel, "abspath": real,
+        return {"class": "synthetic_fixture", "path_rel": rel,
                 "sha256": sha, "repo": repo_real}
     # approved repo file must be git-tracked at the current commit
     if not _git_tracked(repo_real, rel):
         return {"class": "sensitive_source", "reason": "source_untracked",
                 "path_sha16": _sha256_bytes(rel.encode())[:16]}
-    return {"class": "approved_repo_file", "path_rel": rel, "abspath": real,
+    # ...and its working-tree content must be IDENTICAL to the committed content
+    # at HEAD. A locally-modified/uncommitted tracked file carries unverifiable
+    # content and is therefore SENSITIVE — only committed content is provably
+    # STANDARD. (git's own comparison so autocrlf/eol filters do not false-flag.)
+    if not _git_unmodified(repo_real, rel):
+        return {"class": "sensitive_source", "reason": "source_uncommitted",
+                "path_sha16": _sha256_bytes(rel.encode())[:16]}
+    return {"class": "approved_repo_file", "path_rel": rel,
             "sha256": sha, "repo": repo_real, "repo_commit": _git_head(repo_real)}
 
 
 def build_candidate_graph(source_paths, repo, *, candidate_id="cand",
-                          domain=None, loaded=None):
-    """Assemble the live lineage: one RAW node per declared source (classified
-    by classify_source) plus a machine_generated candidate over them. Returns
-    (graph, candidate_id, standard_bindings) where standard_bindings are the
-    {abspath, sha256} of the verified-STANDARD sources, for TOCTOU re-checks at
-    dispatch. Fail-closed: a candidate with no sources, or any sensitive/failed
-    source, resolves SENSITIVE via the graph."""
+                          domain=None, inline_unverified=False, loaded=None):
+    """Assemble the live lineage that BINDS the outbound packet to its content
+    sources: one RAW node per content-bearing source (the packet text file(s)
+    AND every inlined artifact — classified by classify_source), plus a
+    machine_generated candidate over them. ``inline_unverified`` adds an
+    un-provenanced RAW SENSITIVE node (used when the packet carries inline
+    prompt text or has no content file), so inline/pasted content forces
+    SENSITIVE. Returns (graph, candidate_id, standard_bindings) where each
+    binding is {repo, path_rel, sha256} of a verified-STANDARD source (the
+    abspath is reconstructed at the TOCTOU re-check, never persisted).
+    Fail-closed: no sources, any sensitive/failed source, or inline content =>
+    the candidate resolves SENSITIVE via the graph."""
     loaded = loaded or load_policy()
     g = LineageGraph()
     bindings = []
     src_ids = []
     for i, p in enumerate(source_paths or []):
         rec = classify_source(p, repo, loaded)
+        # persist only content-free provenance (no abspath)
+        prov = {k: v for k, v in rec.items() if k != "abspath"}
         nid = "src-{}-{}".format(i, (rec.get("path_rel") and
                                       _sha256_bytes(rec["path_rel"].encode())[:12])
                                  or rec.get("path_sha16") or _sha256_bytes(str(p).encode())[:12])
-        g.add(nid, CLASS_RAW, provenance=rec)
+        g.add(nid, CLASS_RAW, provenance=prov)
         src_ids.append(nid)
-        if rec.get("class") in _STANDARD_PROVENANCE and rec.get("abspath"):
-            bindings.append({"abspath": rec["abspath"], "sha256": rec["sha256"]})
+        if rec.get("class") in _STANDARD_PROVENANCE and rec.get("path_rel") and rec.get("repo"):
+            bindings.append({"repo": rec["repo"], "path_rel": rec["path_rel"],
+                             "sha256": rec["sha256"]})
+    if inline_unverified:
+        g.add("inline-unverified", CLASS_RAW,
+              provenance={"class": "sensitive_source", "reason": "inline_content"})
+        src_ids.append("inline-unverified")
     g.add(candidate_id, CLASS_MACHINE, source_ids=src_ids, domain=domain)
     return g, candidate_id, bindings
 
@@ -711,11 +760,16 @@ class EgressContext(object):
 
     def verify_source_bindings(self):
         """TOCTOU: re-hash every verified-STANDARD source and refuse dispatch on
-        any change or disappearance since verification. Content-free."""
+        any change or disappearance since verification. The abspath is
+        reconstructed from the content-free {repo, path_rel} binding (or a raw
+        abspath if one was supplied directly in a test)."""
         for b in self.source_bindings:
+            ap = b.get("abspath")
+            if not ap and b.get("repo") and b.get("path_rel"):
+                ap = os.path.join(b["repo"], b["path_rel"])
             try:
-                cur = _sha256_file(b["abspath"])
-            except OSError:
+                cur = _sha256_file(ap)
+            except (OSError, TypeError):
                 raise EgressBlocked("source_mutated_after_verification",
                                     {"detail": "missing"})
             if cur != b.get("sha256"):

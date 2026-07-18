@@ -28,6 +28,10 @@
     "\\bMRN\\b", "\\bSSN\\b",
     "\\bborn\\s+(?:on|in)\\b"
   ],
+  "approved_repo_roots": [
+    "D:/AI-Agents/ClearWright/ClearWright",
+    "D:/AI-Agents/ClearWright/worktrees/sdeg-pr1"
+  ],
   "approved_repo_paths": [
     "tools/", "apps/", "tests/", "docs/", ".github/", "*.md"
   ],

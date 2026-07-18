@@ -501,15 +501,27 @@ def _council_body(args, phase, root, stage):
             # Editorial work targets 2 rounds and defaults to a max of 3; an
             # operator raises it by passing an explicit --max-rounds below 5.
             eff_max = cwrc.EDITORIAL_DEFAULT_MAX_ROUNDS
-        # SDEG live lineage: build the immutable candidate graph from the
-        # DECLARED source files (never auto-blessed by location). Each source is
-        # classified by verified git/synthetic provenance; the packet candidate
-        # resolves STANDARD only if every source verifies STANDARD.
+        # SDEG live lineage BINDS the outbound packet to its content sources.
+        # The lineage sources are the actual content-bearing inputs — the packet
+        # text file(s) AND every inlined artifact — not a separate declaration.
+        # Each is classified by verified git/synthetic provenance; the packet
+        # candidate resolves STANDARD only if EVERY content source verifies
+        # STANDARD. Inline --prompt text (or a packet with no content file) has
+        # no provenance and forces SENSITIVE. This closes the decoy where a
+        # clean --source is named while sensitive content rides in the packet.
         import clearwright_egress_guard as _egress
+        _content_sources = []
+        for _p in (getattr(args, "plan_file", None), getattr(args, "context_file", None)):
+            if _p:
+                _content_sources.append(_p)
+        _content_sources += (getattr(args, "artifact", None) or [])
+        _content_sources += (getattr(args, "source", None) or [])
+        _inline = bool(getattr(args, "prompt", None)) or not (
+            getattr(args, "plan_file", None) or getattr(args, "context_file", None))
         try:
             _graph, _cand, _binds = _egress.build_candidate_graph(
-                getattr(args, "source", None) or [], getattr(args, "repo", None),
-                candidate_id="packet")
+                _content_sources, getattr(args, "repo", None),
+                candidate_id="packet", inline_unverified=_inline)
             lineage_records = _graph.to_records()
         except _egress.EgressBlocked as exc:
             return _emit({"ok": False, "command": "council",

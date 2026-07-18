@@ -568,22 +568,24 @@ def evaluate(council, rounds):
 # --------------------------------------------------------------------------- #
 
 def _default_gpt(root, context_text, *, thread_id, work_item_id, packet_id,
-                 council_id, round_no, phase, model, timeout):
+                 council_id, round_no, phase, model, timeout, egress_context=None):
     # Give the reviewer generous output headroom: a full structured verdict plus
     # a reasoning model's internal tokens truncates under a small cap, which
-    # would otherwise fail validation and read as reviewer_unavailable.
+    # would otherwise fail validation and read as reviewer_unavailable. The
+    # egress_context carries the live lineage enforcement to the guard.
     return gpt_adapter.review(
         root, context_text, thread_id=thread_id, work_item_id=work_item_id,
         packet_id=packet_id, council_id=council_id, round=round_no, phase=phase,
-        model=model, timeout=timeout, max_output_tokens=4000)
+        model=model, timeout=timeout, max_output_tokens=4000,
+        egress_context=egress_context)
 
 
 def _default_codex(root, context_text, *, thread_id, work_item_id, packet_id,
-                   council_id, round_no, phase, repo, timeout):
+                   council_id, round_no, phase, repo, timeout, egress_context=None):
     return codex_adapter.review_structured(
         root, thread_id=thread_id, work_item_id=work_item_id, packet_id=packet_id,
         council_id=council_id, round=round_no, phase=phase, context_text=context_text,
-        timeout=timeout, cwd=repo)
+        timeout=timeout, cwd=repo, egress_context=egress_context)
 
 
 def _augment_context(base_context, rounds):

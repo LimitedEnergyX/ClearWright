@@ -67,9 +67,13 @@ CLASS_MACHINE = "machine_generated"
 CLASS_SANITIZED_OK = "sanitized_ok"
 
 # Provenance classes that establish a RAW node as STANDARD. Anything else
-# (including None / unknown) is SENSITIVE (fail-closed).
-_STANDARD_PROVENANCE = ("approved_repo_file", "synthetic_fixture",
-                        "machine_generated_in_run")
+# (including None / unknown) is SENSITIVE (fail-closed). NOTE: there is NO
+# "machine_generated_in_run" or "created_by_clearwright" class here — a file is
+# never STANDARD merely because ClearWright/Claude produced it or because it
+# lives under runtime/work, the cwd, or a plan/generated path. A machine-
+# generated artifact earns STANDARD only through CLASS_MACHINE with a complete
+# STANDARD ancestry of git-verified sources.
+_STANDARD_PROVENANCE = ("approved_repo_file", "synthetic_fixture")
 
 # The ONE approved sanitizer + the ONE approved closed-schema domain. Non-
 # clinical sensitive content has no approved schema yet => NO_DISPATCH.
@@ -93,6 +97,10 @@ REASONS = (
     "sanitized_not_from_sanitizer", "sanitized_policy_stale",
     "sanitized_no_construction_proof", "sensitivity_downgrade_forbidden",
     "domain_unsupported", "provider_key_missing", "bytes_mutated_after_validation",
+    # live provenance / lineage enforcement
+    "lineage_missing", "candidate_missing", "source_symlink",
+    "source_traversal", "source_outside_repo", "source_not_a_file",
+    "source_mutated_after_verification", "repo_unresolvable",
 )
 
 
@@ -243,57 +251,121 @@ _QUOTED_RUN = re.compile(r'"[^"\n]{240,}"')
 def _git_tracked(repo, rel_path):
     try:
         proc = subprocess.run(
-            ["git", "-C", repo, "ls-files", "--error-unmatch", rel_path],
+            ["git", "-C", repo, "ls-files", "--error-unmatch", "--", rel_path],
             capture_output=True, text=True, timeout=30)
         return proc.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
 
-def verify_provenance(source_paths, repo, run_work_dirs, loaded=None):
-    """STANDARD-tier provenance validation. Every source path must be (a) a
-    git-tracked file under an approved repository path, (b) inside a declared
-    work directory of the CURRENT governed run (machine-generated analysis),
-    or (c) under a synthetic-fixture path. Anything else — or any error —
-    resolves to SENSITIVE (EgressBlocked "provenance_*"). Returns a
-    content-free provenance record."""
+def _git_head(repo):
+    try:
+        r = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=30)
+        return (r.stdout or "").strip() if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _under(root_real, target_real):
+    return target_real == root_real or target_real.startswith(root_real + os.sep)
+
+
+def classify_source(path, repo, loaded=None):
+    """Classify ONE declared source file's provenance for live lineage. Returns
+    a content-free provenance record whose ``class`` is a member of
+    _STANDARD_PROVENANCE (approved_repo_file / synthetic_fixture) ONLY when the
+    file is provably a clean, git-tracked (or approved synthetic) file under an
+    approved repository path, with its content hash captured. EVERYTHING else —
+    a symlink, a path that escapes the repo root by traversal or an alternate
+    reference, a file outside approved paths, an untracked/ignored file, a
+    missing file, or an unresolvable repo — yields a SENSITIVE class (so the
+    candidate resolves SENSITIVE and dispatch fails closed). Never returns a
+    raw path or content; approved repo-relative paths are public and are kept
+    for TOCTOU re-verification, all other identifiers are hashed.
+
+    Path-confinement is checked on the REAL (symlink-resolved) path so a symlink
+    or junction inside the repo cannot point outside the approved roots, and a
+    symlink is refused outright (it is not itself a tracked source)."""
     loaded = loaded or load_policy()
     policy = loaded["policy"]
     approved = [p.replace("\\", "/") for p in policy["approved_repo_paths"]]
     fixtures = [p.replace("\\", "/") for p in policy["synthetic_fixture_paths"]]
-    repo_abs = os.path.abspath(repo) if repo else None
-    run_dirs = [os.path.abspath(d) for d in (run_work_dirs or [])]
-    record = []
-    for path in (source_paths or []):
-        ap = os.path.abspath(path)
-        if not os.path.isfile(ap):
-            raise EgressBlocked("provenance_unverified",
-                                {"path_sha16": _sha256_bytes(ap.encode())[:16]})
-        if any(ap.startswith(d + os.sep) or ap == d for d in run_dirs):
-            record.append({"path_sha16": _sha256_bytes(ap.encode())[:16],
-                           "class": "machine_generated_in_run"})
-            continue
-        if repo_abs and (ap.startswith(repo_abs + os.sep)):
-            rel = os.path.relpath(ap, repo_abs).replace("\\", "/")
-            if any(rel.startswith(a) or (a.startswith("*.") and rel.endswith(a[1:]))
-                   for a in fixtures):
-                record.append({"path_sha16": _sha256_bytes(ap.encode())[:16],
-                               "class": "synthetic_fixture"})
-                continue
-            allowed = any(rel.startswith(a) or (a.startswith("*.") and rel.endswith(a[1:]))
-                          for a in approved)
-            if not allowed:
-                raise EgressBlocked("provenance_outside_allowlist",
-                                    {"path_sha16": _sha256_bytes(ap.encode())[:16]})
-            if not _git_tracked(repo_abs, rel):
-                raise EgressBlocked("provenance_untracked_file",
-                                    {"path_sha16": _sha256_bytes(ap.encode())[:16]})
-            record.append({"path_sha16": _sha256_bytes(ap.encode())[:16],
-                           "class": "approved_repo_file"})
-            continue
-        raise EgressBlocked("provenance_unverified",
-                            {"path_sha16": _sha256_bytes(ap.encode())[:16]})
-    return {"sources": record}
+    if not repo:
+        return {"class": "sensitive_source", "reason": "repo_unresolvable"}
+    try:
+        repo_real = os.path.realpath(repo)
+    except OSError:
+        return {"class": "sensitive_source", "reason": "repo_unresolvable"}
+    lex = os.path.abspath(path)
+    # A symlink source is never a tracked source (it is an alternate reference).
+    if os.path.islink(path) or os.path.islink(lex):
+        return {"class": "sensitive_source", "reason": "source_symlink",
+                "path_sha16": _sha256_bytes(lex.encode())[:16]}
+    try:
+        real = os.path.realpath(lex)
+    except OSError:
+        return {"class": "sensitive_source", "reason": "source_not_a_file"}
+    # Confinement is enforced on BOTH the lexical and the real path so neither a
+    # ".." traversal nor a symlink target can escape the repo root.
+    if not (_under(repo_real, real) and _under(repo_real, lex)):
+        return {"class": "sensitive_source", "reason": "source_outside_repo",
+                "path_sha16": _sha256_bytes(real.encode())[:16]}
+    if not os.path.isfile(real):
+        return {"class": "sensitive_source", "reason": "source_not_a_file"}
+    rel = os.path.relpath(real, repo_real).replace("\\", "/")
+    if ".." in rel.split("/"):
+        return {"class": "sensitive_source", "reason": "source_traversal"}
+    in_fixtures = any(rel.startswith(a) or (a.startswith("*.") and rel.endswith(a[1:]))
+                      for a in fixtures)
+    in_approved = any(rel.startswith(a) or (a.startswith("*.") and rel.endswith(a[1:]))
+                      for a in approved)
+    if not (in_fixtures or in_approved):
+        return {"class": "sensitive_source", "reason": "source_outside_repo",
+                "path_sha16": _sha256_bytes(rel.encode())[:16]}
+    sha = _sha256_file(real)
+    if in_fixtures and not in_approved:
+        return {"class": "synthetic_fixture", "path_rel": rel, "abspath": real,
+                "sha256": sha, "repo": repo_real}
+    # approved repo file must be git-tracked at the current commit
+    if not _git_tracked(repo_real, rel):
+        return {"class": "sensitive_source", "reason": "source_untracked",
+                "path_sha16": _sha256_bytes(rel.encode())[:16]}
+    return {"class": "approved_repo_file", "path_rel": rel, "abspath": real,
+            "sha256": sha, "repo": repo_real, "repo_commit": _git_head(repo_real)}
+
+
+def build_candidate_graph(source_paths, repo, *, candidate_id="cand",
+                          domain=None, loaded=None):
+    """Assemble the live lineage: one RAW node per declared source (classified
+    by classify_source) plus a machine_generated candidate over them. Returns
+    (graph, candidate_id, standard_bindings) where standard_bindings are the
+    {abspath, sha256} of the verified-STANDARD sources, for TOCTOU re-checks at
+    dispatch. Fail-closed: a candidate with no sources, or any sensitive/failed
+    source, resolves SENSITIVE via the graph."""
+    loaded = loaded or load_policy()
+    g = LineageGraph()
+    bindings = []
+    src_ids = []
+    for i, p in enumerate(source_paths or []):
+        rec = classify_source(p, repo, loaded)
+        nid = "src-{}-{}".format(i, (rec.get("path_rel") and
+                                      _sha256_bytes(rec["path_rel"].encode())[:12])
+                                 or rec.get("path_sha16") or _sha256_bytes(str(p).encode())[:12])
+        g.add(nid, CLASS_RAW, provenance=rec)
+        src_ids.append(nid)
+        if rec.get("class") in _STANDARD_PROVENANCE and rec.get("abspath"):
+            bindings.append({"abspath": rec["abspath"], "sha256": rec["sha256"]})
+    g.add(candidate_id, CLASS_MACHINE, source_ids=src_ids, domain=domain)
+    return g, candidate_id, bindings
 
 
 def paste_suspicion(text):
@@ -422,6 +494,21 @@ class LineageGraph(object):
 
     def get(self, node_id):
         return self._nodes.get(node_id)
+
+    def to_records(self):
+        """Content-free node list, durable and rebuildable. Provenance keeps
+        only classifications/hashes/commits/reason codes and (for public
+        approved repo files) the repo-relative path — never content."""
+        return [dict(n) for n in self._nodes.values()]
+
+    @classmethod
+    def from_records(cls, records):
+        g = cls()
+        for n in records or []:
+            g.add(n["id"], n["classification"], source_ids=n.get("source_ids"),
+                  provenance=n.get("provenance"), escalated=n.get("escalated", False),
+                  domain=n.get("domain"), sanitizer=n.get("sanitizer"))
+        return g
 
     def resolve_sensitivity(self, node_id, _stack=None):
         """Monotonic, fail-closed resolution. Returns SENSITIVITY_STANDARD or
@@ -580,7 +667,8 @@ class EgressContext(object):
     declared "standard" over sensitive lineage is refused."""
 
     def __init__(self, tier, provenance=None, work_item_id=None,
-                 graph=None, candidate_id=None, domain=None):
+                 graph=None, candidate_id=None, domain=None,
+                 source_bindings=None, require_graph=False):
         if tier not in ("standard", "sensitive"):
             raise EgressBlocked("context_missing", {"detail": "bad tier"})
         self.tier = tier
@@ -589,20 +677,49 @@ class EgressContext(object):
         self.graph = graph
         self.candidate_id = candidate_id
         self.domain = domain
+        # {abspath, sha256} of verified-STANDARD sources, for the TOCTOU re-check
+        # at dispatch (any source mutation after verification blocks the send).
+        self.source_bindings = list(source_bindings or [])
+        # The LIVE production path sets require_graph=True: a missing graph or
+        # candidate id is fail-closed, never a fallback to the declared tier.
+        self.require_graph = bool(require_graph)
 
     def resolve(self, loaded=None):
         """Return the enforced {outcome, tier} for this dispatch. With a lineage
-        graph, the graph decides and the declared tier may only ESCALATE it.
-        Without a graph, the declared tier stands (byte scan still applies)."""
+        graph, the graph DECIDES and the declared tier may only ESCALATE it.
+        On the live path (require_graph) a missing graph/candidate fails closed;
+        there is no fallback to a declared tier."""
         if self.graph is not None and self.candidate_id is not None:
             decision = self.graph.decide_outcome(self.candidate_id, loaded)
-            # Monotonic guard: a declared standard tier cannot override a
-            # resolved sensitive outcome (no downgrade).
+            # Escalation-only (rule 4): an explicit SENSITIVE declaration forces
+            # SENSITIVE even over standard-resolving lineage — the item may then
+            # dispatch only as a construction-proven derivative, never as a plain
+            # standard packet.
+            if self.tier == "sensitive" and decision["tier"] == "standard":
+                return {"outcome": OUTCOME_SANITIZED_OK, "tier": "sensitive",
+                        "escalated": True}
+            # A declared standard tier can NEVER override a resolved sensitive
+            # outcome (no downgrade).
             if decision["tier"] == "sensitive" and self.tier == "standard":
                 raise EgressBlocked("sensitivity_downgrade_forbidden")
             return decision
+        if self.require_graph:
+            raise EgressBlocked("lineage_missing" if self.graph is None
+                                else "candidate_missing")
         return {"outcome": ("sanitized_ok" if self.tier == "sensitive"
                             else "standard_ok"), "tier": self.tier}
+
+    def verify_source_bindings(self):
+        """TOCTOU: re-hash every verified-STANDARD source and refuse dispatch on
+        any change or disappearance since verification. Content-free."""
+        for b in self.source_bindings:
+            try:
+                cur = _sha256_file(b["abspath"])
+            except OSError:
+                raise EgressBlocked("source_mutated_after_verification",
+                                    {"detail": "missing"})
+            if cur != b.get("sha256"):
+                raise EgressBlocked("source_mutated_after_verification")
 
 
 _REGISTERED_CALLERS = set()
@@ -693,6 +810,9 @@ def _enforce(data_bytes, context, loaded, *, codex_prompt=None):
     if decision["outcome"] == OUTCOME_LOCAL_ONLY:
         raise EgressBlocked(decision.get("reason") or "domain_unsupported",
                             {"no_dispatch": True})
+    # TOCTOU: verified sources must be byte-identical to when they were
+    # classified; any post-verification mutation blocks the send.
+    context.verify_source_bindings()
     # Tripwire over the FULL outbound bytes — enforced for standard AND sensitive.
     scan = final_scan(data_bytes, loaded)
     if scan["verdict"] == "hit":

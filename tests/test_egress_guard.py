@@ -274,9 +274,8 @@ class CodexStdinOnly(unittest.TestCase):
 
 class ProvenanceVerifier(unittest.TestCase):
     def test_nonexistent_path_is_sensitive(self):
-        with self.assertRaises(guard.EgressBlocked) as cm:
-            guard.verify_provenance(["/no/such/file.py"], repo="/repo", run_work_dirs=[])
-        self.assertEqual(cm.exception.reason, "provenance_unverified")
+        rec = guard.classify_source("/no/such/file.py", repo="/repo")
+        self.assertNotIn(rec["class"], guard._STANDARD_PROVENANCE)
 
     def test_paste_suspicion_detects_long_quote(self):
         self.assertGreater(guard.paste_suspicion('"' + "x" * 300 + '"'), 0)

@@ -501,13 +501,29 @@ def _council_body(args, phase, root, stage):
             # Editorial work targets 2 rounds and defaults to a max of 3; an
             # operator raises it by passing an explicit --max-rounds below 5.
             eff_max = cwrc.EDITORIAL_DEFAULT_MAX_ROUNDS
+        # SDEG live lineage: build the immutable candidate graph from the
+        # DECLARED source files (never auto-blessed by location). Each source is
+        # classified by verified git/synthetic provenance; the packet candidate
+        # resolves STANDARD only if every source verifies STANDARD.
+        import clearwright_egress_guard as _egress
+        try:
+            _graph, _cand, _binds = _egress.build_candidate_graph(
+                getattr(args, "source", None) or [], getattr(args, "repo", None),
+                candidate_id="packet")
+            lineage_records = _graph.to_records()
+        except _egress.EgressBlocked as exc:
+            return _emit({"ok": False, "command": "council",
+                          "error": "lineage_assembly_failed",
+                          "reason": exc.reason}, EXIT_HARD_GATE, args.json)
         try:
             council = cwrc.create_council(
                 root, thread_id=args.thread_id, work_item_id=args.work_item_id,
                 packet_id=args.packet_id, phase=phase, model=args.model,
                 min_rounds=args.min_rounds, max_rounds=eff_max,
                 approved_scope=args.approved_scope, review_profile=profile,
-                data_sensitivity=_data_sensitivity(root, args.work_item_id))
+                data_sensitivity=_data_sensitivity(root, args.work_item_id),
+                lineage=lineage_records, lineage_candidate=_cand,
+                source_bindings=_binds)
         except ValueError as exc:
             return _emit({"ok": False, "error": str(exc)}, EXIT_USAGE, args.json)
     else:
@@ -1362,6 +1378,15 @@ def _add_council_args(p):
     p.add_argument("--grant-count", type=int, default=1, metavar="N",
                    help="Additional attempts granted (default 1; never affects "
                         "the substantive round ceiling).")
+    p.add_argument("--source", action="append", default=None, metavar="PATH",
+                   help="SDEG live lineage: a declared STANDARD source file (a "
+                        "git-tracked file under an approved repo path, or an "
+                        "approved synthetic fixture). Repeatable. The outbound "
+                        "packet is a machine-generated candidate over these "
+                        "sources; it resolves STANDARD only if EVERY declared "
+                        "source verifies STANDARD. Anything else (untracked, "
+                        "outside the repo, symlink, runtime/work, upload) makes "
+                        "the packet SENSITIVE and dispatch fails closed.")
     p.add_argument("--artifact", action="append", default=None, metavar="PATH",
                    help="Register and pin an artifact for this council (repeatable).")
     p.add_argument("--artifact-id", action="append", default=None, metavar="ID",

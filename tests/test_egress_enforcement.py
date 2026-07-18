@@ -116,5 +116,65 @@ class NoNetworkOnMockedDispatch(unittest.TestCase):
         self.assertEqual(seen["gpt_ctx"].tier, "standard")
 
 
+class LiveLineageWiring(unittest.TestCase):
+    def test_run_round_wires_require_graph_context_to_both_reviewers(self):
+        import tempfile
+        import clearwright_review_council as cwrc
+        import clearwright_egress_guard as guard
+
+        root = tempfile.mkdtemp(prefix="cw-lineage-wire-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+
+        # A council whose candidate derives from a SENSITIVE source (user upload).
+        g = guard.LineageGraph()
+        g.add("upload", guard.CLASS_RAW, provenance={"class": "user_upload"})
+        g.add("packet", guard.CLASS_MACHINE, source_ids=["upload"])
+        council = cwrc.create_council(
+            root, thread_id="t", data_sensitivity="standard",
+            lineage=g.to_records(), lineage_candidate="packet", source_bindings=[])
+
+        seen = {}
+
+        def _v(r):
+            return {"reviewer": r, "verdict": "approve", "confidence": 0.9,
+                    "risk_level": "low", "blocking_findings": [],
+                    "required_changes": [], "nonblocking_findings": [],
+                    "disagreements": [], "assumptions": [], "questions": [],
+                    "recommended_plan": [], "summary": "ok"}
+
+        def fake_gpt(root, packet, **kw):
+            seen["gpt"] = kw.get("egress_context")
+            return {"ok": True, "posted": True, "reviewer": "gpt",
+                    "validated": True, "verdict": _v("gpt"), "telemetry": {},
+                    "message_id": "m1"}
+
+        def fake_codex(root, packet, **kw):
+            seen["codex"] = kw.get("egress_context")
+            return {"ok": True, "posted": True, "reviewer": "codex",
+                    "validated": True, "verdict": _v("codex"), "telemetry": {},
+                    "message_id": "m2"}
+
+        cwrc.run_round(root, council, "packet text", gpt_fn=fake_gpt,
+                       codex_fn=fake_codex, sleep=lambda *_: None)
+
+        for who in ("gpt", "codex"):
+            ctx = seen[who]
+            self.assertIsInstance(ctx, guard.EgressContext)
+            self.assertTrue(ctx.require_graph, who)
+            self.assertIsNotNone(ctx.graph, who)
+            # The live context resolves the sensitive lineage and a plain
+            # standard packet would be blocked (declared-standard cannot
+            # override the derived-sensitive candidate).
+            with self.assertRaises(guard.EgressBlocked):
+                ctx.resolve()
+
+    def test_missing_lineage_context_fails_closed_on_resolve(self):
+        import clearwright_egress_guard as guard
+        ctx = guard.EgressContext("standard", require_graph=True)
+        with self.assertRaises(guard.EgressBlocked) as cm:
+            ctx.resolve()
+        self.assertEqual(cm.exception.reason, "lineage_missing")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -278,7 +278,8 @@ def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
                    phase="plan", min_rounds=DEFAULT_MIN_ROUNDS,
                    max_rounds=DEFAULT_MAX_ROUNDS, model=None, council_id=None,
                    approved_scope=None, review_profile="code",
-                   data_sensitivity=None):
+                   data_sensitivity=None, lineage=None, lineage_candidate=None,
+                   source_bindings=None):
     min_rounds, max_rounds = clamp_rounds(min_rounds, max_rounds)
     if review_profile not in REVIEW_PROFILES:
         review_profile = "code"
@@ -297,6 +298,12 @@ def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
         "phase": phase,
         "review_profile": review_profile,
         "data_sensitivity": data_sensitivity,
+        # Live lineage (content-free), recorded at assembly and rebuilt at each
+        # round: the immutable candidate graph, the outbound candidate id, and
+        # the verified-STANDARD source hash bindings for the TOCTOU re-check.
+        "lineage": lineage,
+        "lineage_candidate": lineage_candidate,
+        "source_bindings": source_bindings,
         "min_rounds": int(min_rounds),
         "max_rounds": int(max_rounds),
         "model": model,
@@ -853,7 +860,18 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     # construction-proven closed-schema derivative.
     import clearwright_egress_guard as _egress
     tier = "sensitive" if council.get("data_sensitivity") == "sensitive" else "standard"
-    egress_context = _egress.EgressContext(tier, work_item_id=council.get("work_item_id"))
+    # Live lineage: rebuild the immutable candidate graph recorded at packet
+    # assembly. require_graph=True means a missing graph/candidate fails closed
+    # on real dispatch — there is NO fallback to the declared tier. The guard
+    # resolves effective sensitivity from the graph and TOCTOU-re-verifies the
+    # bound source hashes at send.
+    _lineage = council.get("lineage")
+    egress_context = _egress.EgressContext(
+        tier, work_item_id=council.get("work_item_id"),
+        graph=(_egress.LineageGraph.from_records(_lineage) if _lineage else None),
+        candidate_id=council.get("lineage_candidate"),
+        source_bindings=council.get("source_bindings") or [],
+        require_graph=True)
 
     kw = dict(thread_id=council.get("thread_id"),
               work_item_id=council.get("work_item_id"),

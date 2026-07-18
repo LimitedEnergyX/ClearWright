@@ -273,6 +273,39 @@ class LiveLineageWiring(unittest.TestCase):
                            transport=lambda *a: (200, "{}"),
                            caller="clearwright_gpt_review")
 
+    def test_graph_present_without_stamp_fails_closed(self):
+        # Round-7 finding: a STANDARD graph persisted WITHOUT a content stamp
+        # (create_council path, engine CLI, early-return) must not dispatch as
+        # standard — absent stamp forces SENSITIVE.
+        import tempfile
+        import clearwright_review_council as cwrc
+        import clearwright_egress_guard as guard
+        root = tempfile.mkdtemp(prefix="cw-nostamp-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        g = guard.LineageGraph()
+        g.add("src", guard.CLASS_RAW,
+              provenance={"class": "approved_repo_file", "path_rel": "tools/x.py",
+                          "sha256": "0" * 64})
+        g.add("packet", guard.CLASS_MACHINE, source_ids=["src"])
+        council = cwrc.create_council(root, thread_id="t", data_sensitivity="standard",
+                                      lineage=g.to_records(), lineage_candidate="packet",
+                                      source_bindings=[])  # NO stamp
+        seen = {}
+
+        def fake(r, packet, **kw):
+            seen["ctx"] = kw.get("egress_context")
+            return {"ok": True, "posted": True, "reviewer": "gpt", "validated": True,
+                    "verdict": {"reviewer": "gpt", "verdict": "approve", "confidence": 0.9,
+                                "risk_level": "low", "blocking_findings": [],
+                                "required_changes": [], "nonblocking_findings": [],
+                                "disagreements": [], "assumptions": [], "questions": [],
+                                "recommended_plan": [], "summary": "ok"}, "telemetry": {},
+                    "message_id": "m"}
+
+        cwrc.run_round(root, council, "any content", gpt_fn=fake, codex_fn=fake,
+                       sleep=lambda *_: None)
+        self.assertEqual(seen["ctx"].tier, "sensitive")  # fail-closed on absent stamp
+
     def test_matching_stamp_permits_standard(self):
         import tempfile, hashlib as _h
         import clearwright_review_council as cwrc

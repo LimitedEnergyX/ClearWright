@@ -767,8 +767,9 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     phase = council.get("phase")
     prior_rounds = load_rounds(root, council_id)
     round_no = len(council.get("rounds", [])) + 1
+    _augmented = substantive_round_count(prior_rounds) > 0
     context = _augment_context(base_context, prior_rounds) \
-        if substantive_round_count(prior_rounds) > 0 else base_context
+        if _augmented else base_context
     # PROMPT-ONLY guidance (role lanes + scoped follow-up rounds). This changes
     # only the reviewer prompt string; evaluate(), the verdict schema, and the
     # reconciliation validation are untouched.
@@ -879,8 +880,12 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     # content. Fail-closed and caller-independent.
     _incoming_sha = hashlib.sha256((base_context or "").encode("utf-8")).hexdigest()
     _stamp = council.get("lineage_context_sha256")
-    _stale = bool(_stamp) and _stamp != _incoming_sha
-    if _stale:
+    # A lineage graph present WITHOUT a matching content stamp cannot be trusted
+    # to describe these bytes (create_council persists a graph but no stamp; an
+    # engine-CLI or early-return path may dispatch it). Absent OR mismatched
+    # stamp => fail closed to SENSITIVE. Only a stamp that matches the incoming
+    # content lets the graph's resolution stand.
+    if _graph_obj is not None and (not _stamp or _stamp != _incoming_sha):
         tier = "sensitive"
     # EVERY inlined artifact is content-bearing but carries NO git provenance
     # (register() pins any path). They reach the packet through the artifact_id /
@@ -890,17 +895,28 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     # Each is a SENSITIVE RAW node, so any artifact-bearing council resolves
     # SENSITIVE and a declared-standard dispatch fails closed; a genuinely
     # STANDARD file must be declared as --source (git-verified), not --artifact.
+    _extra_sources = []
     if all_artifact_ids and _graph_obj is not None and _cand is not None:
-        _cn = _graph_obj.get(_cand) or {}
-        _art_ids = []
         for _aid in all_artifact_ids:
             _nid = "art-" + hashlib.sha256(_aid.encode()).hexdigest()[:12]
             _graph_obj.add(_nid, _egress.CLASS_RAW,
                            provenance={"class": "sensitive_source",
                                        "reason": "inlined_artifact"})
-            _art_ids.append(_nid)
+            _extra_sources.append(_nid)
+    # Round >=2 packets carry machine-generated augmentation (prior reviewer
+    # findings + Claude's reconciliation free-text) that is NOT named by the
+    # lineage and NOT covered by the base-content stamp. It has no verified
+    # STANDARD ancestry, so fold it in as a SENSITIVE ancestor: a declared-
+    # standard multi-round council resolves SENSITIVE and fails closed.
+    if _augmented and _graph_obj is not None and _cand is not None:
+        _graph_obj.add("round-augmentation", _egress.CLASS_RAW,
+                       provenance={"class": "sensitive_source",
+                                   "reason": "round_augmentation"})
+        _extra_sources.append("round-augmentation")
+    if _extra_sources and _graph_obj is not None and _cand is not None:
+        _cn = _graph_obj.get(_cand) or {}
         _graph_obj.add(_cand, _egress.CLASS_MACHINE,
-                       source_ids=list(_cn.get("source_ids") or []) + _art_ids,
+                       source_ids=list(_cn.get("source_ids") or []) + _extra_sources,
                        domain=_cn.get("domain"))
     egress_context = _egress.EgressContext(
         tier, work_item_id=council.get("work_item_id"),

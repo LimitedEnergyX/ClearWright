@@ -166,15 +166,24 @@ def call_gpt(context_text, model, *, key_getter=None, timeout=DEFAULT_TIMEOUT,
     owns the transport. ``egress_context`` is REQUIRED; its absence is
     fail-closed. ``key_getter``/``transport`` are TEST-ONLY injections passed
     straight through to the guard."""
-    payload = {
-        "model": model,
-        "input": [
-            {"role": "developer", "content": INSTRUCTION},
-            {"role": "user", "content": context_text},
-        ],
-        "max_output_tokens": max_output_tokens,
-    }
-    body_bytes = json.dumps(payload).encode("utf-8")
+    # On the sensitive tier the guard owns the canonical request shape (a fixed
+    # scaffold + the construction-proven derivative as the only user content),
+    # and validates the outbound by byte-equality — so nothing can be wrapped
+    # around the derivative. On the standard tier the adapter builds the normal
+    # review payload; the guard validates the exact bytes with the tripwire.
+    if egress_context is not None and getattr(egress_context, "tier", None) == "sensitive":
+        body_bytes = _egress.build_sensitive_gpt_body(model, context_text,
+                                                      max_output_tokens)
+    else:
+        payload = {
+            "model": model,
+            "input": [
+                {"role": "developer", "content": INSTRUCTION},
+                {"role": "user", "content": context_text},
+            ],
+            "max_output_tokens": max_output_tokens,
+        }
+        body_bytes = json.dumps(payload).encode("utf-8")
     input_chars = len(context_text or "")
 
     start = time.monotonic()
@@ -349,8 +358,12 @@ def review(root, context_text, *, thread_id, work_item_id=None, packet_id=None,
                 "detail": str(exc), "telemetry": tel}
 
     tel = _telemetry(requested_model, call, council_id, round, phase)
+    # SDEG: scan the reviewer output before it is persisted; on a residual-
+    # sensitive-data hit the body is replaced by a content-free notice (the
+    # verdict fields the council needs are validated separately above).
+    _safe_body, _ = _egress.redact_for_persistence(_review_body(verdict, tel))
     msg = _post(root, "gpt", "reviewer", "inbound", "openai-api",
-                _review_body(verdict, tel), thread_id, work_item_id, packet_id)
+                _safe_body, thread_id, work_item_id, packet_id)
     # Provenance: this result came from a validated openai-api response. The
     # council evaluator re-validates the verdict, but recording provenance makes
     # a durable reviewer record self-describing.

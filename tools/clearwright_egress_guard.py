@@ -324,6 +324,12 @@ def construction_proof(payload_text, loaded=None):
     policy = loaded["policy"]
     vocab = set(policy["controlled_vocabulary"])
     templates = policy["derivative_templates"]
+    # The CLOSED set of permitted bucket labels comes from the policy; the regex
+    # shape is necessary but NOT sufficient (a regex-only bucket is a free-text
+    # covert channel). Every bucket value must be a member of this allowlist.
+    allowed_buckets = set()
+    for vals in (policy.get("buckets") or {}).values():
+        allowed_buckets.update(vals or [])
     try:
         doc = json.loads(payload_text)
     except ValueError:
@@ -338,7 +344,9 @@ def construction_proof(payload_text, loaded=None):
         raise EgressBlocked("construction_schema_violation",
                             {"field": "template_id"})
     fields = doc.get("fields")
-    if not isinstance(fields, list):
+    if not isinstance(fields, list) or not fields:
+        # An empty field list is not a valid clinical derivative (and an empty
+        # derivative wrapped in raw content is a known cover trick).
         raise EgressBlocked("construction_schema_violation", {"field": "fields"})
     for i, f in enumerate(fields):
         if not isinstance(f, dict):
@@ -356,7 +364,8 @@ def construction_proof(payload_text, loaded=None):
         if "offset" in f and not _OFFSET.match(str(f["offset"])):
             raise EgressBlocked("construction_value_not_permitted",
                                 {"index": i, "field": "offset"})
-        if "bucket" in f and not _BUCKET.match(str(f["bucket"])):
+        if "bucket" in f and (not _BUCKET.match(str(f["bucket"]))
+                              or str(f["bucket"]) not in allowed_buckets):
             raise EgressBlocked("construction_value_not_permitted",
                                 {"index": i, "field": "bucket"})
         if "flag" in f and not isinstance(f["flag"], bool):
@@ -429,6 +438,15 @@ class LineageGraph(object):
         if cls == CLASS_RAW:
             prov = node.get("provenance") or {}
             pclass = prov.get("class")
+            # Monotonic: a RAW node that declares standard provenance still
+            # inherits the MAX sensitivity of any declared sources. A raw leaf
+            # normally has none; a raw node carrying sources cannot launder a
+            # sensitive ancestor to standard by asserting a standard class.
+            if node["source_ids"]:
+                worst = self._max_sources(node_id, _stack)
+                if pclass in _STANDARD_PROVENANCE:
+                    return worst
+                return SENSITIVITY_SENSITIVE
             if pclass in _STANDARD_PROVENANCE:
                 return SENSITIVITY_STANDARD
             # missing / unknown / ambiguous provenance is SENSITIVE
@@ -462,7 +480,10 @@ class LineageGraph(object):
         if node is None:
             raise EgressBlocked("lineage_source_missing", {"node_sha16": _h(node_id)})
         claims_standard = (node.get("provenance") or {}).get("class") in _STANDARD_PROVENANCE
-        if node["classification"] == CLASS_MACHINE and node["source_ids"]:
+        # Any node with sources that resolves SENSITIVE but claims a standard
+        # provenance/sensitivity is a laundering attempt (covers both machine-
+        # generated derivations and raw nodes that carry sources).
+        if node["classification"] in (CLASS_MACHINE, CLASS_RAW) and node["source_ids"]:
             resolved = self._max_sources(node_id, (node_id,))
             asserted = (node.get("provenance") or {}).get("asserted_sensitivity")
             if resolved == SENSITIVITY_SENSITIVE and (claims_standard or asserted == SENSITIVITY_STANDARD):
@@ -625,39 +646,87 @@ def _real_transport(url, headers, body_bytes, timeout):
         return exc.code, body
 
 
+# The guard OWNS the fixed reviewer instruction for sensitive dispatch. Because
+# the sensitive outbound is validated by byte-equality against a guard-built
+# canonical form, this scaffolding text is fixed and cannot become a smuggling
+# channel.
+SENSITIVE_INSTRUCTION = (
+    "Independent clinical-evidence reviewer. The user message is a de-identified,"
+    " closed-schema derivative (category codes, neutral tokens, relative offsets,"
+    " bucket labels only). Review it and respond with the standard structured"
+    " verdict JSON. Do not infer or request identities; there are none.")
+
+
+def build_sensitive_gpt_body(model, derivative_text, max_output_tokens):
+    """The CANONICAL sensitive GPT request bytes: a fixed scaffold plus the
+    construction-proven derivative as the ONLY user content. The guard is the
+    sole author of this shape, so nothing can be wrapped around the derivative."""
+    body = {"model": model,
+            "input": [{"role": "developer", "content": SENSITIVE_INSTRUCTION},
+                      {"role": "user", "content": derivative_text}],
+            "max_output_tokens": max_output_tokens}
+    return json.dumps(body).encode("utf-8")
+
+
+def build_sensitive_codex_prompt(derivative_text):
+    """The CANONICAL sensitive Codex stdin: a fixed scaffold plus exactly one
+    construction-proven derivative block, and nothing else."""
+    return (SENSITIVE_INSTRUCTION + "\nBEGIN_DERIVATIVE\n" + derivative_text
+            + "\nEND_DERIVATIVE\n")
+
+
 def _enforce(data_bytes, context, loaded, *, codex_prompt=None):
     """Resolve the enforced outcome from the context (lineage-driven when a
     graph is present) and validate the EXACT outbound bytes for that outcome.
-    NO_DISPATCH/local_only never transmits. Fail-closed. Returns the decision."""
+    NO_DISPATCH/local_only never transmits. Fail-closed. Returns the decision.
+
+    The full-bytes tripwire scan gates BOTH tiers. On the sensitive tier the
+    guarantee is byte-equality against a guard-built canonical form, so no free
+    text (Codex stdin outside the block; GPT top-level fields, extra roles, or
+    list-form content) can accompany the construction-proven derivative."""
     if context is None or not isinstance(context, EgressContext):
         raise EgressBlocked("context_missing")
     decision = context.resolve(loaded)
     if decision["outcome"] == OUTCOME_LOCAL_ONLY:
         raise EgressBlocked(decision.get("reason") or "domain_unsupported",
                             {"no_dispatch": True})
+    # Tripwire over the FULL outbound bytes — enforced for standard AND sensitive.
     scan = final_scan(data_bytes, loaded)
+    if scan["verdict"] == "hit":
+        raise EgressBlocked("tripwire_hit", {"category_counts": scan["findings"]})
     if decision["tier"] == "sensitive":
-        # SANITIZED_OK: the provider-visible user content must BE the
-        # construction-proven derivative.
         if codex_prompt is not None:
-            m = re.search(r"BEGIN_DERIVATIVE\n(.*?)\nEND_DERIVATIVE",
-                          codex_prompt, re.DOTALL)
-            if not m:
-                raise EgressBlocked("sensitive_requires_derivative")
-            construction_proof(m.group(1), loaded)
+            blocks = re.findall(r"BEGIN_DERIVATIVE\n(.*?)\nEND_DERIVATIVE",
+                                codex_prompt, re.DOTALL)
+            if len(blocks) != 1:
+                raise EgressBlocked("sensitive_requires_derivative",
+                                    {"blocks": len(blocks)})
+            construction_proof(blocks[0], loaded)
+            # Byte-equality: the whole stdin must be the canonical scaffold+block,
+            # so nothing can be wrapped around the derivative.
+            if codex_prompt != build_sensitive_codex_prompt(blocks[0]):
+                raise EgressBlocked("sensitive_requires_derivative",
+                                    {"detail": "noncanonical_prompt"})
         else:
             try:
                 body = json.loads(bytes(data_bytes).decode("utf-8"))
             except Exception:  # noqa: BLE001
                 raise EgressBlocked("construction_parse_failed")
-            payloads = _extract_user_content(body)
-            if not payloads:
-                raise EgressBlocked("sensitive_requires_derivative")
-            for text in payloads:
-                construction_proof(text, loaded)
-        return decision
-    if scan["verdict"] == "hit":
-        raise EgressBlocked("tripwire_hit", {"category_counts": scan["findings"]})
+            users = [it.get("content") for it in (body.get("input") or [])
+                     if isinstance(it, dict) and it.get("role") == "user"
+                     and isinstance(it.get("content"), str)]
+            if len(users) != 1:
+                raise EgressBlocked("sensitive_requires_derivative",
+                                    {"user_items": len(users)})
+            construction_proof(users[0], loaded)
+            # Byte-equality against the guard's canonical body: any extra
+            # top-level field (e.g. "instructions"), extra input item, non-user
+            # role carrying content, or list-form content makes the bytes differ.
+            canonical = build_sensitive_gpt_body(
+                body.get("model"), users[0], body.get("max_output_tokens"))
+            if bytes(data_bytes) != canonical:
+                raise EgressBlocked("sensitive_requires_derivative",
+                                    {"detail": "noncanonical_body"})
     return decision
 
 

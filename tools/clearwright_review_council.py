@@ -885,8 +885,16 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     # complete exchange (operator request -> plan -> reviews -> reconciliation ->
     # outcome), so each round posts a bounded digest of what was dispatched. The
     # full packet stays in the council record, hash-bound; only a capped digest
-    # (never secrets — the packet already passed the secret scan) is posted.
+    # is posted. SDEG: the digest is scanned by the egress guard BEFORE it is
+    # written to the durable thread, so a mislabeled/raw packet can never echo
+    # sensitive content into a persisted record (content-free on a hit).
     digest = " ".join(context.split())[:400]
+    try:
+        import clearwright_egress_guard as _eg
+        _safe, _findings = _eg.redact_for_persistence(digest)
+        digest = _safe
+    except Exception:  # noqa: BLE001 - a scan failure fails closed to a placeholder
+        digest = "[digest withheld: pre-persistence scan unavailable]"
     try:
         note = ("Review Council round {} starting ({} phase, {}). GPT delivery: {}. "
                 "Artifacts: {}. Context digest: {}{} [full packet sha256 {} in the "

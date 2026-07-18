@@ -159,7 +159,8 @@ class SensitiveTierConstructionProof(unittest.TestCase):
         })
 
     def test_valid_derivative_dispatches(self):
-        body = _gpt_body(self._derivative())
+        # The canonical sensitive body is the ONLY dispatchable sensitive form.
+        body = guard.build_sensitive_gpt_body("gpt-x", self._derivative(), 100)
         status, _ = guard.gpt_send(body, 5, context=self.ctx, transport=self.fake,
                                    key_getter=lambda: "k",
                                    caller="clearwright_gpt_review")
@@ -173,8 +174,61 @@ class SensitiveTierConstructionProof(unittest.TestCase):
                            caller="clearwright_gpt_review")
         self.assertIn(cm.exception.reason,
                       ("construction_parse_failed", "construction_schema_violation",
-                       "tripwire_hit"))
+                       "sensitive_requires_derivative", "tripwire_hit"))
         self.assertEqual(len(self.sent), 0)
+
+    def test_phi_wrapped_around_valid_derivative_blocks_gpt(self):
+        # Adversarial (confirmed finding B): a VALID derivative in user content
+        # but PHI in a provider-honored top-level field must NOT egress.
+        import json as _j
+        body = _j.loads(guard.build_sensitive_gpt_body("gpt-x", self._derivative(), 100))
+        body["instructions"] = "Patient MRN: 5551234; SSN 123-45-6789"
+        raw = _j.dumps(body).encode("utf-8")
+        with self.assertRaises(guard.EgressBlocked):
+            guard.gpt_send(raw, 5, context=self.ctx, transport=self.fake,
+                           key_getter=lambda: "k", caller="clearwright_gpt_review")
+        self.assertEqual(len(self.sent), 0)
+
+    def test_phi_wrapped_around_derivative_blocks_codex(self):
+        # Adversarial (confirmed finding B/critical): free text around the
+        # BEGIN/END block on Codex stdin must NOT egress.
+        prompt = ("Patient John with SSN 123-45-6789.\n"
+                  + guard.build_sensitive_codex_prompt(self._derivative()))
+        with self.assertRaises(guard.EgressBlocked):
+            guard.codex_launch(["codex"], prompt, 5, context=self.ctx,
+                               caller="clearwright_codex_review")
+
+    def test_canonical_codex_derivative_is_accepted_shape(self):
+        # The canonical form itself passes _enforce (it may still fail to launch
+        # codex in CI, but it must not be egress-blocked).
+        prompt = guard.build_sensitive_codex_prompt(self._derivative())
+        try:
+            guard.codex_launch(["definitely-not-a-real-codex-bin"], prompt, 5,
+                               context=self.ctx, caller="clearwright_codex_review")
+        except guard.EgressBlocked:
+            self.fail("canonical sensitive codex prompt was egress-blocked")
+        except (FileNotFoundError, OSError):
+            pass  # launch failure is fine; the point is it was not egress-blocked
+
+    def test_bucket_covert_channel_blocked(self):
+        # Adversarial (confirmed finding C): a regex-shaped but non-allowlisted
+        # bucket value is a free-text channel and must be rejected.
+        doc = _json_load(self._derivative())
+        doc["fields"][0]["bucket"] = "notes:john_doe_has_a_rare_condition"
+        with self.assertRaises(guard.EgressBlocked) as cm:
+            guard.construction_proof(json.dumps(doc))
+        self.assertEqual(cm.exception.reason, "construction_value_not_permitted")
+
+    def test_empty_fields_derivative_blocked(self):
+        doc = _json_load(self._derivative())
+        doc["fields"] = []
+        with self.assertRaises(guard.EgressBlocked) as cm:
+            guard.construction_proof(json.dumps(doc))
+        self.assertEqual(cm.exception.reason, "construction_schema_violation")
+
+
+def _json_load(s):
+    return json.loads(s)
 
     def test_disallowed_vocabulary_blocks(self):
         doc = json.loads(self._derivative())
@@ -317,6 +371,22 @@ class SensitivityLineage(unittest.TestCase):
         with self.assertRaises(guard.EgressBlocked) as cm:
             g.resolve_sensitivity("orphan")
         self.assertEqual(cm.exception.reason, "lineage_ambiguous")
+
+    def test_raw_node_with_sensitive_sources_cannot_launder(self):
+        # Adversarial (confirmed finding A): a RAW node declaring a STANDARD
+        # provenance class but carrying a SENSITIVE source must NOT resolve to
+        # STANDARD.
+        g = guard.LineageGraph()
+        g.add("phi", guard.CLASS_RAW, provenance={"class": "user_upload"})
+        g.add("launder", guard.CLASS_RAW,
+              provenance={"class": "approved_repo_file"}, source_ids=["phi"])
+        self.assertEqual(g.resolve_sensitivity("launder"),
+                         guard.SENSITIVITY_SENSITIVE)
+        with self.assertRaises(guard.EgressBlocked):
+            g.decide_outcome("launder")
+        ctx = guard.EgressContext("standard", graph=g, candidate_id="launder")
+        with self.assertRaises(guard.EgressBlocked):
+            ctx.resolve()
 
     def test_operator_may_escalate_not_downgrade(self):
         g = guard.LineageGraph()

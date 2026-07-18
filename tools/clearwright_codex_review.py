@@ -315,7 +315,14 @@ def review_structured(root, *, thread_id=None, work_item_id=None, packet_id=None
         return note("Codex CLI unavailable; no Codex participation claimed.",
                     "unavailable", build_telemetry("", None, 0.0))
 
-    full_prompt = prompt or (STRUCTURED_PROMPT + "\n\n" + (context_text or ""))
+    # On the sensitive tier the guard owns the canonical stdin (a fixed scaffold
+    # plus exactly one construction-proven derivative block, nothing else) and
+    # validates it by byte-equality. On the standard tier the normal structured
+    # prompt is used and the guard validates the exact bytes with the tripwire.
+    if egress_context is not None and getattr(egress_context, "tier", None) == "sensitive":
+        full_prompt = _egress.build_sensitive_codex_prompt(context_text or "")
+    else:
+        full_prompt = prompt or (STRUCTURED_PROMPT + "\n\n" + (context_text or ""))
     try:
         output, telemetry = runner(full_prompt, timeout, cwd,
                                    egress_context=egress_context)
@@ -350,9 +357,11 @@ def review_structured(root, *, thread_id=None, work_item_id=None, packet_id=None
         return result
 
     tel = _structured_telemetry(telemetry, council_id, round, phase, "review")
+    # SDEG: scan reviewer output before persistence (content-free on a hit).
+    _safe_body, _ = _egress.redact_for_persistence(_structured_body(verdict, tel))
     msg = _note(root, {"thread_id": thread_id, "work_item_id": work_item_id,
                        "packet_id": packet_id}, "codex", "reviewer", "inbound",
-                "codex-cli", _structured_body(verdict, tel))
+                "codex-cli", _safe_body)
     # Provenance: a validated, substantive codex-cli run.
     return {"ok": True, "posted": True, "reviewer": "codex", "verdict": verdict,
             "validated": True, "source": "codex-cli", "telemetry": tel,

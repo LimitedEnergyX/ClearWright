@@ -168,6 +168,58 @@ class LiveLineageWiring(unittest.TestCase):
             with self.assertRaises(guard.EgressBlocked):
                 ctx.resolve()
 
+    def test_inlined_artifact_forces_sensitive_in_run_round(self):
+        # CRITICAL regression: an artifact inlined via the artifact_id / council-
+        # remembered channel must be a SENSITIVE ancestor of the candidate, so a
+        # declared-standard council with an artifact resolves SENSITIVE and the
+        # standard-tier dispatch fails closed. Exercises the run_round choke.
+        import tempfile
+        import clearwright_review_council as cwrc
+        import clearwright_egress_guard as guard
+        import clearwright_artifacts as cwa
+
+        root = tempfile.mkdtemp(prefix="cw-artifact-lineage-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+
+        # A STANDARD lineage (single clean machine candidate over a repo source).
+        g = guard.LineageGraph()
+        g.add("src", guard.CLASS_RAW,
+              provenance={"class": "approved_repo_file", "path_rel": "tools/x.py",
+                          "sha256": "0" * 64})
+        g.add("packet", guard.CLASS_MACHINE, source_ids=["src"])
+        council = cwrc.create_council(root, thread_id="t", data_sensitivity="standard",
+                                      lineage=g.to_records(), lineage_candidate="packet",
+                                      source_bindings=[])
+        # register a sensitive artifact
+        fd, up = tempfile.mkstemp(suffix=".txt", prefix="cw-upload-")
+        os.write(fd, b"confidential board memo, no PII regex here\n")
+        os.close(fd)
+        self.addCleanup(os.remove, up)
+        art = cwa.register(root, up)
+        aid = art["artifact_id"] if isinstance(art, dict) else art
+
+        seen = {}
+
+        def _v(r):
+            return {"reviewer": r, "verdict": "approve", "confidence": 0.9,
+                    "risk_level": "low", "blocking_findings": [], "required_changes": [],
+                    "nonblocking_findings": [], "disagreements": [], "assumptions": [],
+                    "questions": [], "recommended_plan": [], "summary": "ok"}
+
+        def fake(r, packet, **kw):
+            seen[kw.get("egress_context") and "ctx" or "x"] = kw.get("egress_context")
+            return {"ok": True, "posted": True, "reviewer": "gpt", "validated": True,
+                    "verdict": _v("gpt"), "telemetry": {}, "message_id": "m"}
+
+        cwrc.run_round(root, council, "packet text", artifact_ids=[aid],
+                       gpt_fn=fake, codex_fn=fake, sleep=lambda *_: None)
+        ctx = seen.get("ctx")
+        self.assertIsNotNone(ctx)
+        # With the artifact folded in as a SENSITIVE ancestor, a declared-standard
+        # context must now be refused (no downgrade).
+        with self.assertRaises(guard.EgressBlocked):
+            ctx.resolve()
+
     def test_missing_lineage_context_fails_closed_on_resolve(self):
         import clearwright_egress_guard as guard
         ctx = guard.EgressContext("standard", require_graph=True)

@@ -868,10 +868,31 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     # resolves effective sensitivity from the graph and TOCTOU-re-verifies the
     # bound source hashes at send.
     _lineage = council.get("lineage")
+    _cand = council.get("lineage_candidate")
+    _graph_obj = _egress.LineageGraph.from_records(_lineage) if _lineage else None
+    # EVERY inlined artifact is content-bearing but carries NO git provenance
+    # (register() pins any path). They reach the packet through the artifact_id /
+    # council-remembered channel, which bypasses --source, so they MUST be added
+    # to the candidate's ancestry here, at the choke point where all_artifact_ids
+    # is finalized (it includes ids remembered on the council across rounds).
+    # Each is a SENSITIVE RAW node, so any artifact-bearing council resolves
+    # SENSITIVE and a declared-standard dispatch fails closed; a genuinely
+    # STANDARD file must be declared as --source (git-verified), not --artifact.
+    if all_artifact_ids and _graph_obj is not None and _cand is not None:
+        _cn = _graph_obj.get(_cand) or {}
+        _art_ids = []
+        for _aid in all_artifact_ids:
+            _nid = "art-" + hashlib.sha256(_aid.encode()).hexdigest()[:12]
+            _graph_obj.add(_nid, _egress.CLASS_RAW,
+                           provenance={"class": "sensitive_source",
+                                       "reason": "inlined_artifact"})
+            _art_ids.append(_nid)
+        _graph_obj.add(_cand, _egress.CLASS_MACHINE,
+                       source_ids=list(_cn.get("source_ids") or []) + _art_ids,
+                       domain=_cn.get("domain"))
     egress_context = _egress.EgressContext(
         tier, work_item_id=council.get("work_item_id"),
-        graph=(_egress.LineageGraph.from_records(_lineage) if _lineage else None),
-        candidate_id=council.get("lineage_candidate"),
+        graph=_graph_obj, candidate_id=_cand,
         source_bindings=council.get("source_bindings") or [],
         require_graph=True)
     # The EFFECTIVE (lineage-derived) sensitivity — not the declared tier —

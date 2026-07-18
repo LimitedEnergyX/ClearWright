@@ -50,10 +50,32 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 POLICY_PATH = os.path.join(TOOLS_DIR, "egress_policy.json")
 
 OUTCOME_SANITIZED_OK = "sanitized_ok"
-OUTCOME_LOCAL_ONLY = "local_only"
+OUTCOME_LOCAL_ONLY = "local_only"   # == NO_DISPATCH: ClearWright transmits nothing
 OUTCOME_STOP = "stop"
 
 ERROR_CLASS = "egress_blocked"
+
+# --- Sensitivity lattice (monotonic): STANDARD < SENSITIVE. SANITIZED_OK is a
+# SEPARATE derivative classification, not a point on this axis. ---
+SENSITIVITY_STANDARD = "standard"
+SENSITIVITY_SENSITIVE = "sensitive"
+_SENS_ORDER = {SENSITIVITY_STANDARD: 0, SENSITIVITY_SENSITIVE: 1}
+
+# Lineage node classifications.
+CLASS_RAW = "raw"
+CLASS_MACHINE = "machine_generated"
+CLASS_SANITIZED_OK = "sanitized_ok"
+
+# Provenance classes that establish a RAW node as STANDARD. Anything else
+# (including None / unknown) is SENSITIVE (fail-closed).
+_STANDARD_PROVENANCE = ("approved_repo_file", "synthetic_fixture",
+                        "machine_generated_in_run")
+
+# The ONE approved sanitizer + the ONE approved closed-schema domain. Non-
+# clinical sensitive content has no approved schema yet => NO_DISPATCH.
+SANITIZER_ID = "clearwright_clinical_sanitizer/v1"
+CLINICAL_DOMAIN = "clinical"
+NON_CLINICAL_DOMAINS = ("legal", "financial", "employment", "personnel", "other")
 
 # Reason codes are the ONLY vocabulary refusals may use (content-safe).
 REASONS = (
@@ -65,6 +87,12 @@ REASONS = (
     "construction_parse_failed", "construction_schema_violation",
     "construction_value_not_permitted", "context_missing",
     "sensitive_requires_derivative", "caller_not_registered",
+    # lineage invariant
+    "lineage_source_missing", "lineage_cycle", "lineage_unverifiable",
+    "lineage_standard_over_sensitive", "lineage_ambiguous",
+    "sanitized_not_from_sanitizer", "sanitized_policy_stale",
+    "sanitized_no_construction_proof", "sensitivity_downgrade_forbidden",
+    "domain_unsupported", "provider_key_missing", "bytes_mutated_after_validation",
 )
 
 
@@ -345,20 +373,215 @@ def construction_proof(payload_text, loaded=None):
 
 
 # --------------------------------------------------------------------------- #
+# Sensitivity-lineage invariant (non-bypassable, monotonic, fail-closed).
+#
+# A lineage graph is {node_id -> node}. Each node is content-free:
+#   {"id", "classification" (raw|machine_generated|sanitized_ok),
+#    "source_ids" [..], "provenance" {"class": ...}|None,
+#    "escalated" bool (operator STANDARD->SENSITIVE only), "domain" str|None,
+#    "sanitizer" {"sanitizer_id","policy_version","policy_sha256",
+#                 "construction_proof": {...}}|None }
+#
+# Rules (operator-mandated):
+#  - Sensitivity is monotonic: STANDARD < SENSITIVE; a node is SENSITIVE if ANY
+#    ancestor is SENSITIVE, if operator-escalated, or if its own provenance is
+#    missing/unverified/ambiguous.
+#  - Machine-generated is STANDARD only when EVERY direct source resolves
+#    independently to STANDARD.
+#  - Missing source, unverifiable provenance, a cycle, or a STANDARD claim over
+#    a SENSITIVE ancestor is fail-closed.
+#  - The operator may escalate STANDARD->SENSITIVE, never the reverse.
+# --------------------------------------------------------------------------- #
+
+class LineageGraph(object):
+    """A content-free lineage graph. Add nodes, then resolve_sensitivity or
+    decide_outcome. All failures raise EgressBlocked (STOP)."""
+
+    def __init__(self):
+        self._nodes = {}
+
+    def add(self, node_id, classification, *, source_ids=None, provenance=None,
+            escalated=False, domain=None, sanitizer=None):
+        if classification not in (CLASS_RAW, CLASS_MACHINE, CLASS_SANITIZED_OK):
+            raise EgressBlocked("lineage_unverifiable",
+                                {"detail": "bad classification"})
+        self._nodes[node_id] = {
+            "id": node_id, "classification": classification,
+            "source_ids": list(source_ids or []), "provenance": provenance,
+            "escalated": bool(escalated), "domain": domain, "sanitizer": sanitizer}
+        return node_id
+
+    def get(self, node_id):
+        return self._nodes.get(node_id)
+
+    def resolve_sensitivity(self, node_id, _stack=None):
+        """Monotonic, fail-closed resolution. Returns SENSITIVITY_STANDARD or
+        SENSITIVITY_SENSITIVE; raises EgressBlocked on any lineage defect."""
+        _stack = _stack or ()
+        if node_id in _stack:
+            raise EgressBlocked("lineage_cycle", {"node_sha16": _h(node_id)})
+        node = self._nodes.get(node_id)
+        if node is None:
+            raise EgressBlocked("lineage_source_missing", {"node_sha16": _h(node_id)})
+        if node["escalated"]:
+            return SENSITIVITY_SENSITIVE
+        cls = node["classification"]
+        if cls == CLASS_RAW:
+            prov = node.get("provenance") or {}
+            pclass = prov.get("class")
+            if pclass in _STANDARD_PROVENANCE:
+                return SENSITIVITY_STANDARD
+            # missing / unknown / ambiguous provenance is SENSITIVE
+            return SENSITIVITY_SENSITIVE
+        if cls == CLASS_SANITIZED_OK:
+            # A sanitized_ok node's own sensitivity for lattice purposes is the
+            # max of its sources (its source stays SENSITIVE); dispatchability
+            # is decided separately in decide_outcome. Resolving it here still
+            # enforces source integrity.
+            return self._max_sources(node_id, _stack)
+        # machine_generated: STANDARD only if EVERY source is STANDARD.
+        if not node["source_ids"]:
+            # A generated artifact with no declared sources is ambiguous.
+            raise EgressBlocked("lineage_ambiguous", {"node_sha16": _h(node_id)})
+        return self._max_sources(node_id, _stack)
+
+    def _max_sources(self, node_id, _stack):
+        node = self._nodes[node_id]
+        worst = SENSITIVITY_STANDARD
+        for sid in node["source_ids"]:
+            s = self.resolve_sensitivity(sid, _stack + (node_id,))
+            if _SENS_ORDER[s] > _SENS_ORDER[worst]:
+                worst = s
+        return worst
+
+    def assert_no_standard_over_sensitive(self, node_id):
+        """Explicit fail-closed check: a node CLAIMING standard (via a standard
+        provenance class or an asserted standard sensitivity) while any ancestor
+        resolves SENSITIVE."""
+        node = self._nodes.get(node_id)
+        if node is None:
+            raise EgressBlocked("lineage_source_missing", {"node_sha16": _h(node_id)})
+        claims_standard = (node.get("provenance") or {}).get("class") in _STANDARD_PROVENANCE
+        if node["classification"] == CLASS_MACHINE and node["source_ids"]:
+            resolved = self._max_sources(node_id, (node_id,))
+            asserted = (node.get("provenance") or {}).get("asserted_sensitivity")
+            if resolved == SENSITIVITY_SENSITIVE and (claims_standard or asserted == SENSITIVITY_STANDARD):
+                raise EgressBlocked("lineage_standard_over_sensitive",
+                                    {"node_sha16": _h(node_id)})
+
+    def decide_outcome(self, node_id, loaded=None):
+        """The dispatch decision for an outbound candidate. Returns one of
+        OUTCOME_SANITIZED_OK / (a "standard" marker) / OUTCOME_LOCAL_ONLY, or
+        raises EgressBlocked. Fail-closed throughout."""
+        loaded = loaded or load_policy()
+        node = self._nodes.get(node_id)
+        if node is None:
+            raise EgressBlocked("lineage_source_missing", {"node_sha16": _h(node_id)})
+        self.assert_no_standard_over_sensitive(node_id)
+        if node["classification"] == CLASS_SANITIZED_OK:
+            san = node.get("sanitizer") or {}
+            if san.get("sanitizer_id") != SANITIZER_ID:
+                raise EgressBlocked("sanitized_not_from_sanitizer")
+            if san.get("policy_sha256") != loaded["policy_sha256"] or \
+                    san.get("policy_version") != loaded["policy_version"]:
+                raise EgressBlocked("sanitized_policy_stale")
+            if not san.get("construction_proof"):
+                raise EgressBlocked("sanitized_no_construction_proof")
+            if node.get("domain") != CLINICAL_DOMAIN:
+                raise EgressBlocked("domain_unsupported", {"domain": node.get("domain")})
+            # verify the source integrity still resolves (sources may be sensitive)
+            self._max_sources(node_id, (node_id,))
+            return {"outcome": OUTCOME_SANITIZED_OK, "tier": "sensitive"}
+        eff = self.resolve_sensitivity(node_id)
+        if eff == SENSITIVITY_STANDARD:
+            return {"outcome": "standard_ok", "tier": "standard"}
+        # SENSITIVE raw/machine content cannot dispatch directly.
+        domain = node.get("domain")
+        if domain in NON_CLINICAL_DOMAINS:
+            return {"outcome": OUTCOME_LOCAL_ONLY, "tier": "sensitive",
+                    "reason": "domain_unsupported"}
+        # clinical (or unknown) sensitive content must be sanitized first.
+        raise EgressBlocked("sensitive_requires_derivative", {"node_sha16": _h(node_id)})
+
+
+def _h(s):
+    return _sha256_bytes(str(s).encode("utf-8"))[:16]
+
+
+# --------------------------------------------------------------------------- #
+# Approved clinical sanitizer: the ONLY producer of SANITIZED_OK artifacts.
+# Input is an ALREADY-STRUCTURED clinical field set (built inside the trusted
+# local boundary from the raw source); the sanitizer validates it into the
+# closed schema, construction-proves it, and registers a content-free
+# sanitized_ok lineage node. It never sees or emits raw prose, filenames,
+# metadata, or reversible identity maps.
+# --------------------------------------------------------------------------- #
+
+def sanitize_clinical(structured_fields, *, template_id, source_node_id,
+                      graph, domain=CLINICAL_DOMAIN, loaded=None):
+    """Produce a SANITIZED_OK derivative + lineage node from a structured
+    clinical field set. Refuses any non-clinical domain (NO_DISPATCH belongs to
+    those). Returns (derivative_json_text, sanitized_node_id, proof). Does NOT
+    alter the source node's sensitivity."""
+    loaded = loaded or load_policy()
+    if domain != CLINICAL_DOMAIN:
+        raise EgressBlocked("domain_unsupported", {"domain": domain})
+    if graph.get(source_node_id) is None:
+        raise EgressBlocked("lineage_source_missing")
+    if template_id not in loaded["policy"]["derivative_templates"]:
+        raise EgressBlocked("construction_schema_violation", {"field": "template_id"})
+    doc = {"schema": "sanitized_derivative-v1",
+           "policy_version": loaded["policy_version"],
+           "template_id": template_id,
+           "fields": structured_fields}
+    payload = json.dumps(doc, separators=(",", ":"), sort_keys=True)
+    # Construction proof is REQUIRED for SANITIZED_OK.
+    proof = construction_proof(payload, loaded)
+    sanitizer = {"sanitizer_id": SANITIZER_ID,
+                 "policy_version": loaded["policy_version"],
+                 "policy_sha256": loaded["policy_sha256"],
+                 "construction_proof": proof}
+    node_id = "san-" + _sha256_bytes(payload.encode("utf-8"))[:16]
+    graph.add(node_id, CLASS_SANITIZED_OK, source_ids=[source_node_id],
+              domain=CLINICAL_DOMAIN, sanitizer=sanitizer)
+    return payload, node_id, proof
+
+
+# --------------------------------------------------------------------------- #
 # Egress context: dispatch metadata the transports REQUIRE (fail-closed).
 # --------------------------------------------------------------------------- #
 
 class EgressContext(object):
-    """Content-free dispatch context. tier is "standard" (provenance verified
-    by verify_provenance at packet assembly) or "sensitive" (construction
-    proof will be applied to the exact outbound payload)."""
+    """Content-free dispatch context. ``tier`` is "standard" or "sensitive".
+    When a lineage ``graph`` + ``candidate_id`` are supplied, the transport
+    derives the TRUE outcome from lineage (monotonic, fail-closed) and enforces
+    that a declared tier can never be LESS sensitive than the resolved one — a
+    declared "standard" over sensitive lineage is refused."""
 
-    def __init__(self, tier, provenance=None, work_item_id=None):
+    def __init__(self, tier, provenance=None, work_item_id=None,
+                 graph=None, candidate_id=None, domain=None):
         if tier not in ("standard", "sensitive"):
             raise EgressBlocked("context_missing", {"detail": "bad tier"})
         self.tier = tier
         self.provenance = provenance
         self.work_item_id = work_item_id
+        self.graph = graph
+        self.candidate_id = candidate_id
+        self.domain = domain
+
+    def resolve(self, loaded=None):
+        """Return the enforced {outcome, tier} for this dispatch. With a lineage
+        graph, the graph decides and the declared tier may only ESCALATE it.
+        Without a graph, the declared tier stands (byte scan still applies)."""
+        if self.graph is not None and self.candidate_id is not None:
+            decision = self.graph.decide_outcome(self.candidate_id, loaded)
+            # Monotonic guard: a declared standard tier cannot override a
+            # resolved sensitive outcome (no downgrade).
+            if decision["tier"] == "sensitive" and self.tier == "standard":
+                raise EgressBlocked("sensitivity_downgrade_forbidden")
+            return decision
+        return {"outcome": ("sanitized_ok" if self.tier == "sensitive"
+                            else "standard_ok"), "tier": self.tier}
 
 
 _REGISTERED_CALLERS = set()
@@ -377,33 +600,65 @@ def _require_registered(caller):
 
 
 # --------------------------------------------------------------------------- #
-# Guard-owned provider egress. THE ONLY sanctioned dispatch paths.
+# Guard-owned provider egress. THE ONLY sanctioned dispatch paths. The guard
+# owns the provider URL, the Authorization header, credential resolution, and
+# the wire transport. Adapters never see any of them (Decision 2A).
 # --------------------------------------------------------------------------- #
 
-def _validate_outbound(data_bytes, context, loaded):
-    """Tier-appropriate validation of the EXACT outbound bytes."""
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+
+
+def _real_transport(url, headers, body_bytes, timeout):
+    """The one wire transport. Lives ONLY in the guard; no adapter retains a
+    provider transport."""
+    import urllib.error
+    req = urllib.request.Request(url, data=bytes(body_bytes), headers=headers,
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.getcode(), resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            body = ""
+        return exc.code, body
+
+
+def _enforce(data_bytes, context, loaded, *, codex_prompt=None):
+    """Resolve the enforced outcome from the context (lineage-driven when a
+    graph is present) and validate the EXACT outbound bytes for that outcome.
+    NO_DISPATCH/local_only never transmits. Fail-closed. Returns the decision."""
     if context is None or not isinstance(context, EgressContext):
         raise EgressBlocked("context_missing")
-    if context.tier == "sensitive":
-        # The user-content portion must BE the derivative envelope. The
-        # caller passes the derivative payload separately verified; here the
-        # serialized bytes are re-checked for the envelope + a detector
-        # backstop over the full request.
-        scan = final_scan(data_bytes, loaded)
-        try:
-            body = json.loads(bytes(data_bytes).decode("utf-8"))
-        except Exception:
-            raise EgressBlocked("construction_parse_failed")
-        payloads = _extract_user_content(body)
-        if not payloads:
-            raise EgressBlocked("sensitive_requires_derivative")
-        for text in payloads:
-            construction_proof(text, loaded)
-        return scan
+    decision = context.resolve(loaded)
+    if decision["outcome"] == OUTCOME_LOCAL_ONLY:
+        raise EgressBlocked(decision.get("reason") or "domain_unsupported",
+                            {"no_dispatch": True})
     scan = final_scan(data_bytes, loaded)
+    if decision["tier"] == "sensitive":
+        # SANITIZED_OK: the provider-visible user content must BE the
+        # construction-proven derivative.
+        if codex_prompt is not None:
+            m = re.search(r"BEGIN_DERIVATIVE\n(.*?)\nEND_DERIVATIVE",
+                          codex_prompt, re.DOTALL)
+            if not m:
+                raise EgressBlocked("sensitive_requires_derivative")
+            construction_proof(m.group(1), loaded)
+        else:
+            try:
+                body = json.loads(bytes(data_bytes).decode("utf-8"))
+            except Exception:  # noqa: BLE001
+                raise EgressBlocked("construction_parse_failed")
+            payloads = _extract_user_content(body)
+            if not payloads:
+                raise EgressBlocked("sensitive_requires_derivative")
+            for text in payloads:
+                construction_proof(text, loaded)
+        return decision
     if scan["verdict"] == "hit":
         raise EgressBlocked("tripwire_hit", {"category_counts": scan["findings"]})
-    return scan
+    return decision
 
 
 def _extract_user_content(body):
@@ -419,50 +674,85 @@ def _extract_user_content(body):
     return out
 
 
-def gpt_transport(url, headers, body_bytes, timeout, *, context,
-                  real_transport, caller="clearwright_gpt_review"):
-    """Sole sanctioned GPT egress: validates the EXACT serialized request
-    bytes, then delegates to the adapter's private transport."""
+def provider_key_available(key_getter=None):
+    """True if a provider credential is resolvable. Used by the adapter for the
+    'no key -> no participation' hard gate WITHOUT the adapter ever seeing the
+    value (it gets only a bool)."""
+    try:
+        key = (key_getter or resolve_provider_key)()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(key and str(key).strip())
+
+
+def provider_key_status(env_get=os.environ.get, user_scope_get=None):
+    """Diagnostic status for preflight: (present_bool, source_or_None). Resolves
+    the credential INSIDE the guard and returns only whether one is present and
+    from where — never the value. Callers (e.g. the CLI preflight) get a bool +
+    source string, so credential resolution stays solely in the guard."""
+    key = env_get("OPENAI_API_KEY")
+    if key and str(key).strip():
+        return True, "process_env"
+    resolved = resolve_provider_key(env_get=env_get, user_scope_get=user_scope_get)
+    if resolved and str(resolved).strip():
+        return True, "windows_user_scope"
+    return False, None
+
+
+def gpt_send(body_bytes, timeout, *, context, key_getter=None, transport=None,
+             caller="clearwright_gpt_review"):
+    """Sole sanctioned GPT egress. The guard validates the EXACT body_bytes,
+    resolves the credential, builds the Authorization header, knows the URL,
+    owns the transport, and proves the bytes are not mutated between validation
+    and the wire. Returns (status, text). Adapters pass only body_bytes; they
+    never see the URL, header, key, or a transport. ``transport`` is a
+    TEST-ONLY injection of the wire call."""
     _require_registered(caller)
     loaded = load_policy()
-    _validate_outbound(body_bytes, context, loaded)
-    return real_transport(url, headers, body_bytes, timeout)
+    _enforce(body_bytes, context, loaded)
+    validated_sha = _sha256_bytes(bytes(body_bytes))
+    key = (key_getter or resolve_provider_key)()
+    if not key or not str(key).strip():
+        raise EgressBlocked("provider_key_missing")
+    headers = {"Authorization": "Bearer " + str(key).strip(),
+               "Content-Type": "application/json"}
+    send = transport or _real_transport
+
+    def _checked(url, hdrs, b, t):
+        # Byte-mutation proof: exactly what was validated is what is sent.
+        if _sha256_bytes(bytes(b)) != validated_sha:
+            raise EgressBlocked("bytes_mutated_after_validation")
+        return send(url, hdrs, b, t)
+
+    return _checked(OPENAI_RESPONSES_URL, headers, body_bytes, timeout)
 
 
 def codex_launch(cmd, prompt, timeout, *, context, cwd=None,
                  caller="clearwright_codex_review"):
-    """Sole sanctioned Codex egress: stdin-only. Validates the EXACT stdin
-    bytes; refuses any prompt that references CW trees by absolute path; runs
-    with an empty temp working directory (never a CW tree)."""
+    """Sole sanctioned Codex egress: stdin-only. Enforces the lineage-driven
+    outcome, validates the EXACT stdin bytes, refuses any prompt that references
+    CW trees by absolute path, and runs with an empty temp working directory
+    (never a CW tree). The prompt is encoded UTF-8 explicitly so the bytes on
+    the wire are exactly the bytes validated (no locale re-encoding)."""
     _require_registered(caller)
     loaded = load_policy()
     data = (prompt or "").encode("utf-8")
-    if context is not None and context.tier == "sensitive":
-        scan = final_scan(data, loaded)
-        # Sensitive codex prompts embed the derivative; locate the JSON
-        # envelope (fenced) and prove construction on it.
-        m = re.search(r"BEGIN_DERIVATIVE\n(.*?)\nEND_DERIVATIVE",
-                      prompt or "", re.DOTALL)
-        if not m:
-            raise EgressBlocked("sensitive_requires_derivative")
-        construction_proof(m.group(1), loaded)
-    else:
-        if context is None or not isinstance(context, EgressContext):
-            raise EgressBlocked("context_missing")
-        scan = final_scan(data, loaded)
-        if scan["verdict"] == "hit":
-            raise EgressBlocked("tripwire_hit",
-                                {"category_counts": scan["findings"]})
+    _enforce(data, context, loaded, codex_prompt=(prompt or ""))
+    validated_sha = _sha256_bytes(data)
     lowered = (prompt or "").lower()
     for marker in ("review_artifacts", "egress_local", "\\runtime\\", "/runtime/"):
         if marker in lowered:
             raise EgressBlocked("provenance_outside_allowlist",
                                 {"detail": "cw_path_in_prompt"})
+    # Byte-mutation proof: what we send is exactly what we validated.
+    if (prompt or "").encode("utf-8") != data or _sha256_bytes(data) != validated_sha:
+        raise EgressBlocked("bytes_mutated_after_validation")
     import tempfile
     run_cwd = cwd or tempfile.mkdtemp(prefix="cw-egress-")
     try:
         proc = subprocess.run(cmd, input=(prompt or ""), capture_output=True,
-                              text=True, timeout=timeout, cwd=run_cwd)
+                              text=True, timeout=timeout, cwd=run_cwd,
+                              encoding="utf-8", errors="replace")
         return proc
     finally:
         try:

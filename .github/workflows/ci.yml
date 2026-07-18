@@ -154,3 +154,31 @@ jobs:
             exit 1
           fi
           echo "Naming gate passed: no retired terms found."
+
+      - name: Egress gate (only the guard may reach a provider)
+        run: |
+          set -e
+          # SDEG (Decision 2A): provider transport, the provider URL, credential
+          # resolution, and Codex subprocess launch may appear ONLY in the guard
+          # module and in tests. Any other production module that references a
+          # network/transport/subprocess-launch primitive against a provider is a
+          # potential unguarded egress path and fails CI.
+          patterns='api\.openai\.com|urllib\.request|urlopen\(|http\.client|requests\.(get|post|Session)|httpx|aiohttp|socket\.(connect|create_connection)|subprocess\.Popen|os\.system\(|Start-Process|codex" *, *"exec|codex exec'
+          # Allowlist: the guard owns egress; tests exercise it; the codex adapter
+          # delegates to the guard (it names build_codex_cmd but launches via the
+          # guard); this workflow contains the patterns themselves.
+          # clearwright_proof.py is allowlisted: it is a localhost-only
+          # control-plane state prober (127.0.0.1/api/state), never a provider.
+          hits=$(grep -rInE "$patterns" tools/ apps/ \
+                   --include='*.py' \
+                   | grep -vE 'tools/clearwright_egress_guard\.py' \
+                   | grep -vE 'tools/clearwright_codex_review\.py' \
+                   | grep -vE 'tools/clearwright_proof\.py' \
+                   || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "Egress gate failed: a provider transport/URL/launch primitive"
+            echo "appears outside the egress guard. Route it through the guard."
+            exit 1
+          fi
+          echo "Egress gate passed: only the guard reaches a provider."

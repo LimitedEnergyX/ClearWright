@@ -3,33 +3,28 @@
 tools/clearwright_gpt_review.py: telemetry-backed GPT structured review via the
 OpenAI Responses API, for the ClearWright Review Council.
 
-This is the real GPT reviewer. It calls the OpenAI Responses API from the local
-process, using OPENAI_API_KEY read ONLY from the environment, and posts a GPT
+This is the real GPT reviewer. It builds the request payload and parses the
+response, but it does NOT reach the provider itself: the egress guard
+(clearwright_egress_guard) owns the provider URL, the auth header, credential
+resolution, and the wire transport (SDEG Decision 2A). The adapter posts a GPT
 reviewer message into a ClearWright thread ONLY after a real, successful
 response validates against the shared structured-verdict contract. GPT is never
-faked: a missing key, an API error, an empty response, or a malformed/invalid
-verdict posts NO gpt/reviewer message.
+faked: a missing credential, an API error, an empty response, an egress block,
+or a malformed/invalid verdict posts NO gpt/reviewer message.
 
-Secret handling (hard rules enforced here):
-  - OPENAI_API_KEY is read only from the process environment (injectable getter
-    for tests). It is never returned, printed, logged, persisted, or written
-    into any CW record or telemetry field.
-  - The Authorization header is built locally and never logged or returned.
+Egress boundary (hard rules):
+  - The credential is never resolved, seen, printed, logged, persisted, or
+    written into any CW record or telemetry field by this adapter. It asks the
+    guard for a bool (present or not) for the hard gate; the guard alone
+    resolves and uses the value.
+  - The exact serialized request bytes are validated by the guard before the
+    send, and proven unmutated between validation and the wire.
   - Only safe telemetry is captured (requested/actual model, response id,
-    elapsed, input/output character counts, API status, retry count, phase,
-    council id, round, error class).
-
-Network and robustness:
-  - Standard-library HTTP only (urllib); no SDK dependency is added.
-  - Bounded timeout; exactly ONE API call per invocation. The Review Council
-    engine is the sole retry owner, so total API spend per reviewer per round
-    is bounded by the council's attempt budget and can never be multiplied by
-    hidden adapter retries.
-  - OPENAI_API_KEY resolves from the process environment, then the Windows
-    User-scope registry (set-after-launch variables are not inherited by
-    spawned processes); the value is never printed, logged, or persisted.
-  - The transport is injectable, so unit tests validate parsing/validation/
-    posting without any real network call.
+    elapsed, input/output character counts, API status, phase, council id,
+    round, error class).
+  - Bounded timeout; exactly ONE call per invocation. The Review Council engine
+    is the sole retry owner, so total spend per reviewer per round is bounded
+    by the council's attempt budget and never multiplied by adapter retries.
 
 Exit codes: 0 completed (posted a real GPT review), 1 refused/invalid/no post,
 2 argument error, 5 hard gate (missing key or model unavailable).
@@ -39,8 +34,6 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 
 import clearwright_message as cwm
 import clearwright_verdict as cwv
@@ -52,7 +45,6 @@ import clearwright_egress_guard as _egress
 GUARDED = True
 _egress.register_adapter("clearwright_gpt_review")
 
-OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 DEFAULT_GPT_MODEL = "gpt-5.6-terra"
 CRITICAL_GPT_MODEL = "gpt-5.6-sol"
 DEFAULT_TIMEOUT = 60
@@ -93,22 +85,10 @@ def resolve_model(model=None, env_get=os.environ.get):
     return DEFAULT_GPT_MODEL
 
 
-def _real_transport(url, headers, body_bytes, timeout):
-    """Default transport: one HTTP POST via urllib. Returns (status, text).
-    Raises urllib.error.URLError / socket timeout on transport failure. The
-    Authorization header passes through here but is never logged or stored."""
-    req = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.getcode(), resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        # An HTTP error still has a body (the API error JSON); read it.
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", "replace")
-        except Exception:  # noqa: BLE001
-            body = ""
-        return exc.code, body
+# NOTE (SDEG Decision 2A): this adapter no longer contains a provider URL, an
+# Authorization header, credential resolution, or a wire transport. The egress
+# guard owns all four. The adapter builds the request payload and parses the
+# response; the guard validates the exact bytes and sends them.
 
 
 def extract_output_text(resp_json):
@@ -163,20 +143,14 @@ def _usage_tokens(resp_json):
     return _int(usage.get("input_tokens")), _int(usage.get("output_tokens"))
 
 
-def resolve_api_key(env_get=os.environ.get, user_scope_get=None):
-    """Resolve the provider key by DELEGATING to the egress guard's sole
-    credential resolver (SDEG Decision 2A: credential resolution is removed
-    from direct adapters and centralized in the guard). Returns (key_or_None,
-    source). The value is never logged or printed. The injectable getters are
-    retained for tests and forwarded to the guard resolver."""
-    key = _egress.resolve_provider_key(env_get=env_get, user_scope_get=user_scope_get)
-    if key and str(key).strip():
-        src = "process_env" if env_get("OPENAI_API_KEY") else "windows_user_scope"
-        return str(key).strip(), src
-    return None, None
+def provider_key_available(key_getter=None):
+    """Adapter-side hard-gate check ONLY: returns a bool via the guard, without
+    the adapter ever resolving or seeing the credential value (SDEG Decision
+    2A). Credential resolution lives solely in the guard."""
+    return _egress.provider_key_available(key_getter)
 
 
-def call_gpt(context_text, model, *, key, timeout=DEFAULT_TIMEOUT,
+def call_gpt(context_text, model, *, key_getter=None, timeout=DEFAULT_TIMEOUT,
              max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
              transport=None, egress_context=None):
     """Perform exactly ONE GPT call. The Review Council engine is the sole
@@ -184,18 +158,14 @@ def call_gpt(context_text, model, *, key, timeout=DEFAULT_TIMEOUT,
     spend per reviewer per round is bounded by the council's attempt budget,
     never multiplied by hidden adapter retries. Returns a dict with keys:
     ok, text, actual_model, response_id, api_status, error, detail,
-    input_chars, output_chars, actual token usage, elapsed_seconds. Never
-    includes the key/headers.
+    input_chars, output_chars, actual token usage, elapsed_seconds.
 
-    Egress boundary (SDEG, Decision 2A): the exact serialized request bytes
-    are validated by the egress guard before transmission. ``egress_context``
-    is REQUIRED (an EgressGuard EgressContext); its absence is fail-closed.
-    ``transport`` overrides the private wire transport for tests only; in
-    production the guard owns the send."""
-    headers = {
-        "Authorization": "Bearer " + key,
-        "Content-Type": "application/json",
-    }
+    Egress boundary (SDEG, Decision 2A): the adapter builds ONLY the request
+    payload. The guard validates the exact serialized bytes, resolves the
+    credential, builds the Authorization header, knows the provider URL, and
+    owns the transport. ``egress_context`` is REQUIRED; its absence is
+    fail-closed. ``key_getter``/``transport`` are TEST-ONLY injections passed
+    straight through to the guard."""
     payload = {
         "model": model,
         "input": [
@@ -207,18 +177,21 @@ def call_gpt(context_text, model, *, key, timeout=DEFAULT_TIMEOUT,
     body_bytes = json.dumps(payload).encode("utf-8")
     input_chars = len(context_text or "")
 
-    real = transport or _real_transport
     start = time.monotonic()
     try:
-        # The guard validates body_bytes (final serialized provider request)
-        # and only then delegates to the private wire transport. Fail-closed:
-        # a missing/invalid context or any guard refusal blocks the send.
-        status, text = _egress.gpt_transport(
-            OPENAI_RESPONSES_URL, dict(headers), body_bytes, timeout,
-            context=egress_context, real_transport=real)
+        # The guard validates body_bytes (the final serialized provider request),
+        # resolves the key, builds the header, knows the URL, and sends. A
+        # missing/invalid context or any guard refusal blocks the send.
+        status, text = _egress.gpt_send(
+            body_bytes, timeout, context=egress_context,
+            key_getter=key_getter, transport=transport)
     except _egress.EgressBlocked as exc:
+        # A missing credential is a hard gate, not a content block.
+        err = "missing_openai_api_key" if exc.reason == "provider_key_missing" \
+            else "egress_blocked"
         return {
-            "ok": False, "error": "egress_blocked", "detail": exc.reason,
+            "ok": False, "error": err, "detail": exc.reason,
+            "hard_gate": err in HARD_GATE_ERRORS,
             "api_status": None, "input_chars": input_chars, "output_chars": 0,
             "actual_input_tokens": None, "actual_output_tokens": None,
             "elapsed_seconds": round(time.monotonic() - start, 3),
@@ -307,20 +280,19 @@ def _post(root, actor, role, direction, source, message, thread_id,
 def review(root, context_text, *, thread_id, work_item_id=None, packet_id=None,
            council_id=None, round=None, phase="plan", model=None,
            timeout=DEFAULT_TIMEOUT, max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-           transport=_real_transport, key_getter=None, env_get=os.environ.get,
+           transport=None, key_getter=None, env_get=os.environ.get,
            note_on_failure=True, egress_context=None):
     """Run ONE real GPT structured review and post it into the thread, ONLY on
     a validated success. Exactly one API call per invocation; the Review
     Council engine owns all retry policy. Returns a compact machine-readable
     result. `transport`, `key_getter`, and `env_get` are injectable so tests
     never hit the network or touch the real environment."""
-    if key_getter is None:
-        key_getter = lambda: resolve_api_key(env_get=env_get)[0]  # noqa: E731
     requested_model = resolve_model(model, env_get=env_get)
 
-    key = key_getter()
-    if not key or not str(key).strip():
-        # Hard gate: no key. Post NO gpt/reviewer message.
+    # Hard gate: no credential. The adapter asks the guard for a BOOL only; it
+    # never resolves or sees the key value (SDEG Decision 2A). ``key_getter`` is
+    # a TEST-ONLY injection forwarded to the guard.
+    if not provider_key_available(key_getter):
         tel = _telemetry(requested_model, {}, council_id, round, phase,
                          error="missing_openai_api_key")
         if note_on_failure:
@@ -330,7 +302,7 @@ def review(root, context_text, *, thread_id, work_item_id=None, packet_id=None,
         return {"ok": False, "posted": False, "reviewer": "gpt",
                 "error": "missing_openai_api_key", "hard_gate": True, "telemetry": tel}
 
-    call = call_gpt(context_text, requested_model, key=str(key).strip(),
+    call = call_gpt(context_text, requested_model, key_getter=key_getter,
                     timeout=timeout, max_output_tokens=max_output_tokens,
                     transport=transport, egress_context=egress_context)
 

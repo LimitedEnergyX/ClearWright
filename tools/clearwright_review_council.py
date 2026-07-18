@@ -277,10 +277,17 @@ def _guidance_header(review_profile, round_no):
 def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
                    phase="plan", min_rounds=DEFAULT_MIN_ROUNDS,
                    max_rounds=DEFAULT_MAX_ROUNDS, model=None, council_id=None,
-                   approved_scope=None, review_profile="code"):
+                   approved_scope=None, review_profile="code",
+                   data_sensitivity=None):
     min_rounds, max_rounds = clamp_rounds(min_rounds, max_rounds)
     if review_profile not in REVIEW_PROFILES:
         review_profile = "code"
+    # SDEG: the tier carried into every dispatch. Fail-closed: anything other
+    # than an explicit "standard" is "sensitive", so the egress guard applies
+    # the strict construction-proof path unless the work item was declared
+    # non-sensitive technical work at start.
+    data_sensitivity = "standard" if str(data_sensitivity or "").strip().lower() \
+        == "standard" else "sensitive"
     council_id = council_id or new_council_id()
     council = {
         "council_id": council_id,
@@ -289,6 +296,7 @@ def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
         "packet_id": packet_id,
         "phase": phase,
         "review_profile": review_profile,
+        "data_sensitivity": data_sensitivity,
         "min_rounds": int(min_rounds),
         "max_rounds": int(max_rounds),
         "model": model,

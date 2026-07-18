@@ -40,12 +40,12 @@ def stub_preflight(tc):
     """start runs an implicit preflight (key present, codex on PATH). CI has
     neither, so tests exercising start stub the probes; preflight behavior
     itself is tested separately with explicit injections."""
-    import clearwright_gpt_review as gpt_mod
+    import clearwright_egress_guard as guard_mod
     import clearwright_codex_review as ccr_mod
-    orig_key, orig_exe = gpt_mod.resolve_api_key, ccr_mod.codex_executable
-    gpt_mod.resolve_api_key = lambda *a, **k: ("test-key-present", "process_env")
+    orig_key, orig_exe = guard_mod.provider_key_status, ccr_mod.codex_executable
+    guard_mod.provider_key_status = lambda *a, **k: (True, "process_env")
     ccr_mod.codex_executable = lambda: "codex-stub"
-    tc.addCleanup(setattr, gpt_mod, "resolve_api_key", orig_key)
+    tc.addCleanup(setattr, guard_mod, "provider_key_status", orig_key)
     tc.addCleanup(setattr, ccr_mod, "codex_executable", orig_exe)
 
 
@@ -190,10 +190,10 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("codex", pf["remediation"][1].lower())
 
     def test_start_runs_implicit_preflight_and_creates_nothing_on_failure(self):
-        import clearwright_gpt_review as gpt_adapter
-        orig = gpt_adapter.resolve_api_key
-        gpt_adapter.resolve_api_key = lambda *a, **k: (None, None)
-        self.addCleanup(setattr, gpt_adapter, "resolve_api_key", orig)
+        import clearwright_egress_guard as guard_mod
+        orig = guard_mod.provider_key_status
+        guard_mod.provider_key_status = lambda *a, **k: (False, None)
+        self.addCleanup(setattr, guard_mod, "provider_key_status", orig)
         res, code = run(ucw.cmd_start, **start_args(self.root, request="Do a thing."))
         self.assertEqual(code, ucw.EXIT_HARD_GATE)
         self.assertEqual(res["error"], "preflight_failed")

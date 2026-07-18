@@ -214,6 +214,22 @@ def _resolve_verification_required(env_or_none, kind):
     return value, source
 
 
+def _resolve_data_sensitivity(env_or_none):
+    """SDEG (Decision 1A): data_sensitivity is recorded at start. The
+    fail-closed default is SENSITIVE. The operator may DECLARE "standard" (a
+    non-sensitive technical work class); anything absent, ambiguous, or not
+    exactly "standard" resolves to SENSITIVE. There is no path that downgrades a
+    sensitive item to standard here — declaring standard is only honored when
+    explicit and exact."""
+    if env_or_none is not None:
+        declared = str(env_or_none.get("data_sensitivity") or "").strip().lower()
+        if declared == "standard":
+            return "standard", "declared"
+        if declared == "sensitive":
+            return "sensitive", "declared"
+    return "sensitive", "default_failclosed"
+
+
 def _persist_envelope(root, message_id, env, audit):
     directory = os.path.join(root, "task_envelopes")
     os.makedirs(directory, exist_ok=True)
@@ -265,6 +281,7 @@ def cmd_start(args):
         kind, method = args.kind, "explicit_kind"
 
     verification_required, vr_source = _resolve_verification_required(envelope, kind)
+    data_sensitivity, ds_source = _resolve_data_sensitivity(envelope)
     review_profile = "code"
     if envelope is not None:
         rp = str(envelope.get("review_profile") or "").strip().lower()
@@ -292,6 +309,8 @@ def cmd_start(args):
         "classification_conflict": conflict, "conflict_detail": conflict_detail,
         "verification_required": verification_required,
         "verification_required_source": vr_source,
+        "data_sensitivity": data_sensitivity,
+        "data_sensitivity_source": ds_source,
         "review_profile": review_profile,
         "envelope_sha256": envelope_sha, "received_at": cwm._now_iso(),
         "thread_id": thread_id, "message_id": message_id})
@@ -487,7 +506,8 @@ def _council_body(args, phase, root, stage):
                 root, thread_id=args.thread_id, work_item_id=args.work_item_id,
                 packet_id=args.packet_id, phase=phase, model=args.model,
                 min_rounds=args.min_rounds, max_rounds=eff_max,
-                approved_scope=args.approved_scope, review_profile=profile)
+                approved_scope=args.approved_scope, review_profile=profile,
+                data_sensitivity=_data_sensitivity(root, args.work_item_id))
         except ValueError as exc:
             return _emit({"ok": False, "error": str(exc)}, EXIT_USAGE, args.json)
     else:
@@ -662,6 +682,16 @@ def _review_profile(root, work_item_id):
     audit = _envelope_audit(root, work_item_id) or {}
     rp = str(audit.get("review_profile") or "").strip().lower()
     return rp if rp in cwrc.REVIEW_PROFILES else "code"
+
+
+def _data_sensitivity(root, work_item_id):
+    """SDEG: the data_sensitivity recorded on this work item's envelope. The
+    fail-closed default is 'sensitive' — an unbound council, a missing envelope,
+    or any value other than an explicit 'standard' resolves to sensitive so the
+    egress guard applies the strict (construction-proof) tier."""
+    audit = _envelope_audit(root, work_item_id) or {}
+    return "standard" if str(audit.get("data_sensitivity") or "").strip().lower() \
+        == "standard" else "sensitive"
 
 
 def _verify_councils(root, work_item_id):
@@ -1124,7 +1154,10 @@ def _preflight_checks(root, implicit=False, key_resolver=None, codex_which=None)
     reported as a boolean + source, never a value. Returns {checks, remediation}."""
     import clearwright_gpt_review as gpt_adapter
     import clearwright_codex_review as codex_adapter
-    key_resolver = key_resolver or gpt_adapter.resolve_api_key
+    import clearwright_egress_guard as egress_guard
+    # Credential resolution lives solely in the guard (SDEG Decision 2A); the
+    # preflight receives only (present_bool, source), never the value.
+    key_resolver = key_resolver or egress_guard.provider_key_status
     codex_which = codex_which or codex_adapter.codex_executable
     checks, remediation = {}, []
 

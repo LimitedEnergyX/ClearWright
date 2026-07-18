@@ -240,18 +240,21 @@ class GptAdapterTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_key_resolves_from_windows_user_scope_fallback(self):
-        # A User-scope variable set after the parent process launched is not
-        # inherited; the adapter falls back to the User scope, never printing it.
-        key, source = gpt.resolve_api_key(env_get=lambda *_: None,
-                                          user_scope_get=lambda: FAKE_KEY)
-        self.assertEqual(key, FAKE_KEY)
+        # Credential resolution lives in the guard now (SDEG Decision 2A). A
+        # User-scope variable set after the parent launched is not inherited;
+        # the guard falls back to the User scope. provider_key_status returns
+        # only (present, source) — never the value.
+        present, source = _egress.provider_key_status(
+            env_get=lambda *_: None, user_scope_get=lambda: FAKE_KEY)
+        self.assertTrue(present)
         self.assertEqual(source, "windows_user_scope")
-        key2, source2 = gpt.resolve_api_key(env_get=lambda *_: "sk-fromenv-000000000000000000",
-                                            user_scope_get=lambda: FAKE_KEY)
+        present2, source2 = _egress.provider_key_status(
+            env_get=lambda *_: "sk-fromenv-000000000000000000",
+            user_scope_get=lambda: FAKE_KEY)
         self.assertEqual(source2, "process_env")
-        key3, source3 = gpt.resolve_api_key(env_get=lambda *_: None,
-                                            user_scope_get=lambda: None)
-        self.assertIsNone(key3)
+        present3, source3 = _egress.provider_key_status(
+            env_get=lambda *_: None, user_scope_get=lambda: None)
+        self.assertFalse(present3)
         self.assertIsNone(source3)
 
     def test_transport_exception_is_bounded_and_safe(self):

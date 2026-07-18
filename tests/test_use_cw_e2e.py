@@ -59,11 +59,11 @@ class DesktopInvocationE2ETests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         self.root, *_ = server.resolve_queue(base)
         # start's implicit preflight: stub the environment probes (CI-safe).
-        import clearwright_gpt_review as gpt_mod
+        import clearwright_egress_guard as guard_mod
         import clearwright_codex_review as ccr_mod
-        self.addCleanup(setattr, gpt_mod, "resolve_api_key", gpt_mod.resolve_api_key)
+        self.addCleanup(setattr, guard_mod, "provider_key_status", guard_mod.provider_key_status)
         self.addCleanup(setattr, ccr_mod, "codex_executable", ccr_mod.codex_executable)
-        gpt_mod.resolve_api_key = lambda *a, **k: ("test-key-present", "process_env")
+        guard_mod.provider_key_status = lambda *a, **k: (True, "process_env")
         ccr_mod.codex_executable = lambda: "codex-stub"
         # The council engine dispatches through mocked reviewers.
         self._orig_run_round = cwrc.run_round

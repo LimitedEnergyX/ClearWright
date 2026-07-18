@@ -40,12 +40,13 @@ def stub_preflight(tc):
     """start runs an implicit preflight (key present, codex on PATH). CI has
     neither, so tests exercising start stub the probes; preflight behavior
     itself is tested separately with explicit injections."""
-    import clearwright_gpt_review as gpt_mod
+    import clearwright_egress_guard as guard_mod
     import clearwright_codex_review as ccr_mod
-    orig_key, orig_exe = gpt_mod.resolve_api_key, ccr_mod.codex_executable
-    gpt_mod.resolve_api_key = lambda *a, **k: ("test-key-present", "process_env")
+    # Credential resolution lives in the guard now; stub its status probe.
+    orig_key, orig_exe = guard_mod.provider_key_status, ccr_mod.codex_executable
+    guard_mod.provider_key_status = lambda *a, **k: (True, "process_env")
     ccr_mod.codex_executable = lambda: "codex-stub"
-    tc.addCleanup(setattr, gpt_mod, "resolve_api_key", orig_key)
+    tc.addCleanup(setattr, guard_mod, "provider_key_status", orig_key)
     tc.addCleanup(setattr, ccr_mod, "codex_executable", orig_exe)
 
 

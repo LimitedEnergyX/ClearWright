@@ -171,12 +171,55 @@ def load_policy(path=POLICY_PATH, expected_sha=None):
     if version not in _KNOWN_POLICY_VERSIONS:
         raise EgressBlocked("policy_version_unknown", {"policy_version": version})
     for key in ("tripwires", "contextual_terms", "identity_signals",
-                "approved_repo_roots", "approved_repo_paths",
+                "approved_repo_identity", "approved_repo_paths",
                 "synthetic_fixture_paths",
                 "controlled_vocabulary", "derivative_templates"):
         if key not in policy:
             raise EgressBlocked("policy_invalid", {"missing_key": key})
-    return {"policy": policy, "policy_sha256": sha, "policy_version": version}
+    # The committed policy carries a canonical, non-path repository IDENTITY only.
+    # The machine-local approved ABSOLUTE roots are resolved separately from an
+    # explicit uncommitted runtime config (identity-bound, fail-closed), so no
+    # operator machine path is ever committed and STANDARD stays portable.
+    loaded = {"policy": policy, "policy_sha256": sha, "policy_version": version}
+    loaded["approved_repo_roots"] = resolve_local_egress_config(policy)
+    loaded["approved_repo_identity"] = policy.get("approved_repo_identity")
+    return loaded
+
+
+def resolve_local_egress_config(policy, env_get=os.environ.get):
+    """Machine-local approved absolute repo roots, from an EXPLICIT uncommitted
+    runtime config -- never from cwd, any git repo, repo basename, a caller-
+    supplied remote URL, a CI env var's existence, GitHub Actions, or a generated
+    directory. Returns a list of realpath-normalized absolute roots ONLY when the
+    config file exists, is valid JSON, lists roots as absolute paths, AND declares
+    an approved_repo_identity equal to the policy's. Any missing / malformed /
+    unreadable / identity-mismatched / non-absolute config yields [] (fail closed
+    to SENSITIVE). Content-free: never returns or logs the paths on failure."""
+    path = env_get("CLEARWRIGHT_EGRESS_LOCAL_CONFIG")
+    if not path:
+        return []
+    try:
+        with open(path, "rb") as fh:
+            cfg = json.loads(fh.read().decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return []
+    if not isinstance(cfg, dict):
+        return []
+    want = policy.get("approved_repo_identity")
+    if not want or cfg.get("approved_repo_identity") != want:
+        return []   # missing / contradictory / ambiguous identity
+    raw = cfg.get("approved_repo_roots")
+    if not isinstance(raw, list) or not raw:
+        return []
+    out = []
+    for r in raw:
+        if not isinstance(r, str) or not os.path.isabs(r):
+            return []   # malformed / non-absolute -> fail closed
+        try:
+            out.append(os.path.normcase(os.path.realpath(r)))
+        except OSError:
+            return []
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -347,16 +390,15 @@ def classify_source(path, repo, loaded=None):
         repo_real = os.path.realpath(repo)
     except OSError:
         return {"class": "sensitive_source", "reason": "repo_unresolvable"}
-    # Repo IDENTITY binding: the repo must be one of the policy's approved
-    # absolute roots. A caller cannot point --repo at an attacker-controlled
-    # clone to mint approved_repo_file classifications. Empty allowlist => fail
-    # closed. Case-normalized on Windows.
-    roots = []
-    for r in (policy.get("approved_repo_roots") or []):
-        try:
-            roots.append(os.path.normcase(os.path.realpath(r)))
-        except OSError:
-            continue
+    # Repo IDENTITY binding: the repo must be one of the MACHINE-LOCAL approved
+    # absolute roots, resolved from the uncommitted runtime config and
+    # identity-bound to the policy's approved_repo_identity -- never a committed
+    # machine path. A caller cannot point --repo at an attacker-controlled clone
+    # to mint approved_repo_file classifications. Empty allowlist (missing /
+    # mismatched / malformed config) => fail closed. The resolved roots are
+    # already realpath+normcase, so the comparison stays case-normalized on
+    # Windows and consistent across machines.
+    roots = loaded.get("approved_repo_roots") or []
     if os.path.normcase(repo_real) not in roots:
         return {"class": "sensitive_source", "reason": "repo_unresolvable"}
     lex = os.path.abspath(path)

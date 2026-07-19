@@ -42,7 +42,44 @@ def _gpt_body(user_text):
     ).encode("utf-8")
 
 
-class DerivedStandard(unittest.TestCase):
+# The canonical repository IDENTITY the committed policy declares. Derived from
+# the policy itself (never hardcoded here) so the fixture cannot drift from it.
+CANONICAL_IDENTITY = guard.load_policy()["approved_repo_identity"]
+
+
+class _ApprovedRepoEnvCase(unittest.TestCase):
+    """Portable REPO approval. STANDARD provenance now requires a MACHINE-LOCAL
+    approved absolute root supplied by an uncommitted runtime config (identity-
+    bound to the policy). setUp writes a TEMP config approving REPO under the
+    canonical identity and points CLEARWRIGHT_EGRESS_LOCAL_CONFIG at it; tearDown
+    removes the temp file and restores the prior env value. This lets the real-
+    repo lineage tests bind REPO on ANY machine (Windows local, Linux CI) with NO
+    committed absolute path. REPO is derived as the module already does
+    (os.path.abspath(HERE/..))."""
+
+    def setUp(self):
+        super().setUp()
+        fd, self._local_cfg = tempfile.mkstemp(suffix=".json",
+                                               prefix="cw-egress-local-")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"approved_repo_identity": CANONICAL_IDENTITY,
+                       "approved_repo_roots": [REPO]}, fh)
+        self._prev_local_cfg = os.environ.get("CLEARWRIGHT_EGRESS_LOCAL_CONFIG")
+        os.environ["CLEARWRIGHT_EGRESS_LOCAL_CONFIG"] = self._local_cfg
+
+    def tearDown(self):
+        if self._prev_local_cfg is None:
+            os.environ.pop("CLEARWRIGHT_EGRESS_LOCAL_CONFIG", None)
+        else:
+            os.environ["CLEARWRIGHT_EGRESS_LOCAL_CONFIG"] = self._prev_local_cfg
+        try:
+            os.remove(self._local_cfg)
+        except OSError:
+            pass
+        super().tearDown()
+
+
+class DerivedStandard(_ApprovedRepoEnvCase):
     def test_approved_git_tracked_clean_source_resolves_standard(self):
         rec = guard.classify_source(TRACKED, REPO)
         self.assertEqual(rec["class"], "approved_repo_file")
@@ -86,7 +123,7 @@ class DerivedStandard(unittest.TestCase):
         self.assertNotIn(rec["class"], guard._STANDARD_PROVENANCE)
 
 
-class OperatorDeclarationCannotDowngrade(unittest.TestCase):
+class OperatorDeclarationCannotDowngrade(_ApprovedRepoEnvCase):
     def test_declared_standard_but_source_sensitive_blocks(self):
         # runtime/work source => sensitive candidate; a declared STANDARD tier
         # must NOT override it.
@@ -144,7 +181,7 @@ class FailClosed(unittest.TestCase):
         self.assertEqual(cm.exception.reason, "lineage_cycle")
 
 
-class PathConfusion(unittest.TestCase):
+class PathConfusion(_ApprovedRepoEnvCase):
     def test_traversal_cannot_escape_repo(self):
         # A path that lexically sits in the repo but resolves outside via "..".
         escaping = os.path.join(REPO, "tools", "..", "..", "..", "outside.py")
@@ -206,7 +243,7 @@ class GptAndCodexParity(unittest.TestCase):
                                caller="clearwright_codex_review")
 
 
-class ContentBinding(unittest.TestCase):
+class ContentBinding(_ApprovedRepoEnvCase):
     def test_decoy_source_with_sensitive_content_blocks(self):
         # THE round-3 finding: a clean git source cannot bless a packet that
         # also carries a sensitive content source. Content sources ARE lineage.
@@ -250,7 +287,7 @@ class RepoIdentity(unittest.TestCase):
         self.assertEqual(rec.get("reason"), "repo_unresolvable")
 
 
-class Uncommitted(unittest.TestCase):
+class Uncommitted(_ApprovedRepoEnvCase):
     def test_locally_modified_tracked_file_is_sensitive(self):
         # A tracked approved file whose working-tree content diverges from the
         # committed blob is SENSITIVE (only committed content is provably std).
@@ -268,7 +305,7 @@ class Uncommitted(unittest.TestCase):
         self.assertEqual(rec.get("reason"), "source_uncommitted")
 
 
-class GitIndexBitBypass(unittest.TestCase):
+class GitIndexBitBypass(_ApprovedRepoEnvCase):
     def test_assume_unchanged_modified_file_is_sensitive(self):
         # A tracked approved file marked assume-unchanged then modified must NOT
         # classify STANDARD (git diff --quiet lies; blob-id comparison catches).
@@ -297,7 +334,7 @@ class GitIndexBitBypass(unittest.TestCase):
         self.assertEqual(rec.get("reason"), "source_uncommitted")
 
 
-class PerRoundRebuild(unittest.TestCase):
+class PerRoundRebuild(_ApprovedRepoEnvCase):
     def test_lineage_records_are_content_free(self):
         g, cand, binds = guard.build_candidate_graph([TRACKED], REPO,
                                                      candidate_id="packet")

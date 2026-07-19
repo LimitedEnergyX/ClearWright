@@ -1,6 +1,6 @@
 {
   "policy_version": "1.0.0",
-  "description": "Egress-guard policy: detector patterns, provenance allowlists, and the closed vocabulary for sanitized_derivative-v1. Versioned and hash-bound: every validation record cites policy_version + the file sha256. Synthetic fixtures only in tests.",
+  "description": "Egress-guard policy: detector patterns, provenance allowlists, and the closed vocabulary for sanitized_derivative-v1. Versioned and hash-bound: every validation record cites policy_version + the file sha256. Synthetic fixtures only in tests. Machine-local approved ABSOLUTE repo roots are NOT stored here (this file is committed and public); they come from an uncommitted runtime config selected by the CLEARWRIGHT_EGRESS_LOCAL_CONFIG env var and are accepted only when that config declares this approved_repo_identity. Absent/mismatched config => empty root list => fail closed to SENSITIVE.",
   "covered_languages": ["en"],
   "tripwires": {
     "ssn_like": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
@@ -28,10 +28,7 @@
     "\\bMRN\\b", "\\bSSN\\b",
     "\\bborn\\s+(?:on|in)\\b"
   ],
-  "approved_repo_roots": [
-    "D:/AI-Agents/ClearWright/ClearWright",
-    "D:/AI-Agents/ClearWright/worktrees/sdeg-pr1"
-  ],
+  "approved_repo_identity": "LimitedEnergyX/ClearWright",
   "approved_repo_paths": [
     "tools/", "apps/", "tests/", "docs/", ".github/", "*.md"
   ],

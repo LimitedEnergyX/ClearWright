@@ -761,16 +761,21 @@ def _envelope_record(root, work_item_id):
     """The FULL persisted envelope record (top-level envelope fields + _audit),
     or None. Top-level task_kind/data_sensitivity are the PRESERVED REQUESTED
     values (never mutated); _audit holds the RESOLVED-at-start values. Used to
-    re-derive classification dynamically without reading or mutating _audit."""
+    re-derive classification dynamically without reading or mutating _audit.
+    Fails closed (returns None) for a missing/unreadable file AND for
+    syntactically-valid-but-structurally-invalid JSON (a list/string/number/etc.):
+    only a dict record can be re-resolved, so any non-dict decoded value returns
+    None and the read path resolves 'sensitive' rather than raising."""
     if not work_item_id or ":" not in work_item_id:
         return None
     mid = work_item_id.split(":", 1)[1]
     path = os.path.join(root, "task_envelopes", mid + ".json")
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh) or None
+            rec = json.load(fh)
     except (OSError, ValueError):
         return None
+    return rec if isinstance(rec, dict) else None
 
 
 def _review_profile(root, work_item_id):

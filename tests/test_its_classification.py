@@ -143,6 +143,22 @@ class DataSensitivityReadPath(unittest.TestCase):
         self.assertEqual(ucw._data_sensitivity(self.root, "not-a-ref"), "sensitive")
         self.assertEqual(ucw._data_sensitivity(self.root, ""), "sensitive")
 
+    def test_non_dict_json_envelope_fails_closed(self):
+        # A syntactically-valid but structurally-invalid envelope (list/string/
+        # number/null) must fail closed to 'sensitive' via _envelope_record -> None,
+        # never raise (regression for the review-identified robustness gap).
+        d = os.path.join(self.root, "task_envelopes")
+        os.makedirs(d, exist_ok=True)
+        for mid, blob in (("msg-list", "[1, 2, 3]"),
+                          ("msg-str", '"just a string"'),
+                          ("msg-num", "42"),
+                          ("msg-null", "null")):
+            with open(os.path.join(d, mid + ".json"), "w", encoding="utf-8") as fh:
+                fh.write(blob)
+            self.assertIsNone(ucw._envelope_record(self.root, "message:" + mid))
+            self.assertEqual(ucw._data_sensitivity(self.root, "message:" + mid),
+                             "sensitive")
+
 
 class GovernedInternalTechnicalStart(unittest.TestCase):
     """End-to-end forward-fix through cmd_start: a NEW governed + internal_technical
@@ -185,7 +201,9 @@ class GovernedInternalTechnicalStart(unittest.TestCase):
         return json.load(open(os.path.join(d, files[0]), encoding="utf-8"))
 
     def test_new_governed_it_requires_clearance_and_persists_internal_technical(self):
-        res, _ = self._start(_env("governed", "internal_technical"))
+        res, code = self._start(_env("governed", "internal_technical"))
+        self.assertEqual(code, ucw.EXIT_OK)
+        self.assertTrue(res["ok"])
         self.assertEqual(res["kind"], "governed")
         self.assertTrue(res["requires_clearance"])
         rec = self._only_envelope()
@@ -194,7 +212,9 @@ class GovernedInternalTechnicalStart(unittest.TestCase):
         self.assertEqual(rec["_audit"]["data_sensitivity_source"], "declared")
 
     def test_new_governed_unspecified_still_sensitive_and_requires_clearance(self):
-        res, _ = self._start(_env("governed"))
+        res, code = self._start(_env("governed"))
+        self.assertEqual(code, ucw.EXIT_OK)
+        self.assertTrue(res["ok"])
         self.assertEqual(res["kind"], "governed")
         self.assertTrue(res["requires_clearance"])
         rec = self._only_envelope()

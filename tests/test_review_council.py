@@ -1006,6 +1006,34 @@ class NonItsResiduePrePersistenceGate(unittest.TestCase):
         self.assertTrue(report["committed"], report)
         self.assertTrue(report["substantive"], report)
 
+    def _reviewer_dict_residue(self, reviewer, source):
+        # Verdict whose SUMMARY is clean but whose structured array carries an
+        # OBJECT entry with residual sensitive text — the exact case a string-only
+        # scan misses. run_round scans result["verdict"] before persistence.
+        def fn(root, context, **kw):
+            v = make_verdict(reviewer, summary="Clean summary; details below.")
+            v["blocking_findings"] = [{"finding": "Residual identifier {} inside a "
+                                       "structured object field.".format(self._SSN)}]
+            return {"ok": True, "posted": True, "reviewer": reviewer, "verdict": v,
+                    "validated": True, "source": source,
+                    "telemetry": {"reviewer": reviewer}, "message_id": reviewer[:1]}
+        return fn
+
+    def test_reviewer_verdict_ssn_in_object_field_is_residue_blocked(self):
+        # V2 completeness: residue inside a dict entry of a structured array (not a
+        # raw string) must still be caught before persistence. Fails pre-fix
+        # (string-only scan) and passes after (full canonical-JSON verdict scan).
+        c = self._new()
+        report = council.run_round(
+            self.root, c, "clean technical review context", sleep=lambda *_: None,
+            gpt_fn=self._reviewer_dict_residue("gpt", "openai-api"),
+            codex_fn=self._reviewer("codex", "codex-cli", "Clean review; no issues."))
+        self.assertFalse(report["committed"], report)
+        self.assertEqual(report["statuses"].get("gpt"), "residue_blocked")
+        self.assertEqual(council.substantive_round_count(
+            council.load_rounds(self.root, c["council_id"])), 0)
+        self._assert_ssn_absent()
+
     def test_reconciliation_ssn_raises_and_round_file_not_updated(self):
         c = self._new()
         # Commit a clean round first.

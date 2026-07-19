@@ -775,24 +775,18 @@ def _granted_extra(state):
 
 def _verdict_residue_hit(verdict):
     """Universal pre-persistence residue gate for a reviewer verdict on the
-    NON-ITS path (V2). Renders the verdict's free-text (summary plus the string
-    items of the structured arrays) and returns True on a HARD residue hit
-    (reusing the guard's redact_for_persistence; hard = any category except
-    unicode_confusable, and a scanner exception fails closed to a hit). Clean
-    verdicts return False, so the normal path is unchanged."""
-    v = verdict or {}
-    parts = [v.get("summary") or ""]
-    for field in ("blocking_findings", "required_changes", "nonblocking_findings",
-                  "disagreements", "assumptions", "questions", "recommended_plan"):
-        for item in (v.get(field) or []):
-            if isinstance(item, str):
-                parts.append(item)
-    # Fail closed on ANY scanner error (defense in depth): redact_for_persistence
-    # already fails closed internally to a scanner_exception finding, but an
-    # unexpected exception at the call site is also treated as a hard residue hit.
+    NON-ITS path (V2). Scans the COMPLETE validated verdict — every field, string,
+    list item, and nested mapping value (findings are stored as objects like
+    {"finding": "..."} / {"change": "..."}, so a string-only scan would miss their
+    free text) — by rendering the whole verdict to a canonical JSON string and
+    scanning that. Returns True on a HARD residue hit (any category except
+    unicode_confusable). Fails closed to a hit on any rendering or scanner error.
+    Clean verdicts return False, so the normal path is unchanged."""
     try:
-        _safe, findings = guard.redact_for_persistence("\n".join(parts))
-    except Exception:  # noqa: BLE001 - scanner failure must not open the gate
+        text = json.dumps(verdict or {}, ensure_ascii=False, sort_keys=True,
+                          default=str)
+        _safe, findings = guard.redact_for_persistence(text)
+    except Exception:  # noqa: BLE001 - render/scan failure must not open the gate
         return True
     return any(k != "unicode_confusable" for k in (findings or {}))
 

@@ -321,6 +321,11 @@ def review_structured(root, *, thread_id=None, work_item_id=None, packet_id=None
     # prompt is used and the guard validates the exact bytes with the tripwire.
     if egress_context is not None and getattr(egress_context, "tier", None) == "sensitive":
         full_prompt = _egress.build_sensitive_codex_prompt(context_text or "")
+    elif getattr(egress_context, "tier", None) == "internal_technical":
+        # On the ITS tier the guard owns the canonical stdin (the guard-owned
+        # instruction + "\n\n" + the composed packet); context_text IS the
+        # composed ITS packet built by the engine.
+        full_prompt = _egress.build_its_codex_prompt(context_text or "")
     else:
         full_prompt = prompt or (STRUCTURED_PROMPT + "\n\n" + (context_text or ""))
     try:

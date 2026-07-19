@@ -225,6 +225,16 @@ def _resolve_data_sensitivity(env_or_none):
         declared = str(env_or_none.get("data_sensitivity") or "").strip().lower()
         if declared == "standard":
             return "standard", "declared"
+        if declared == "internal_technical":
+            # The INTERNAL_TECHNICAL_STANDARD lane is CW-technical-self-review
+            # ONLY. Eligibility is enforced HERE at declaration (an analysis or
+            # actionable task_kind) AND independently by ancestry at dispatch: a
+            # declared-eligible item whose content is not fully git-verified
+            # STANDARD still blocks (fail-closed either way).
+            task_kind = str(env_or_none.get("task_kind") or "").strip().lower()
+            if task_kind in ("analysis", "actionable"):
+                return "internal_technical", "declared"
+            return "sensitive", "ineligible_failclosed"
         if declared == "sensitive":
             return "sensitive", "declared"
     return "sensitive", "default_failclosed"
@@ -741,11 +751,18 @@ def _assemble_lineage(args):
 def _data_sensitivity(root, work_item_id):
     """SDEG: the data_sensitivity recorded on this work item's envelope. The
     fail-closed default is 'sensitive' — an unbound council, a missing envelope,
-    or any value other than an explicit 'standard' resolves to sensitive so the
-    egress guard applies the strict (construction-proof) tier."""
+    or any value other than an explicit 'standard' / 'internal_technical'
+    resolves to sensitive so the egress guard applies the strict (construction-
+    proof) tier. 'internal_technical' selects the CW-technical-self-review lane;
+    eligibility was already gated at declaration and is re-enforced by ancestry
+    at dispatch."""
     audit = _envelope_audit(root, work_item_id) or {}
-    return "standard" if str(audit.get("data_sensitivity") or "").strip().lower() \
-        == "standard" else "sensitive"
+    declared = str(audit.get("data_sensitivity") or "").strip().lower()
+    if declared == "internal_technical":
+        return "internal_technical"
+    if declared == "standard":
+        return "standard"
+    return "sensitive"
 
 
 def _verify_councils(root, work_item_id):

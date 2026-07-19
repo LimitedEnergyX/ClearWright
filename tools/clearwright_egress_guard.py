@@ -810,9 +810,10 @@ class EgressContext(object):
             if self.tier == "sensitive" and decision["tier"] in ("standard", "internal_technical"):
                 return {"outcome": OUTCOME_SANITIZED_OK, "tier": "sensitive",
                         "escalated": True}
-            # A declared standard tier can NEVER override a resolved sensitive
-            # outcome (no downgrade).
-            if decision["tier"] == "sensitive" and self.tier == "standard":
+            # A declared standard OR internal_technical tier can NEVER override a
+            # resolved sensitive outcome (no downgrade): a sensitive ancestry is
+            # never dispatchable as ITS any more than as standard.
+            if decision["tier"] == "sensitive" and self.tier in ("standard", "internal_technical"):
                 raise EgressBlocked("sensitivity_downgrade_forbidden")
             # INTERNAL_TECHNICAL_STANDARD is dispatchable ONLY in the internal-
             # technical lane. ITS content in a user work item is refused (rule 8).
@@ -914,6 +915,62 @@ def build_sensitive_codex_prompt(derivative_text):
     construction-proven derivative block, and nothing else."""
     return (SENSITIVE_INSTRUCTION + "\nBEGIN_DERIVATIVE\n" + derivative_text
             + "\nEND_DERIVATIVE\n")
+
+
+# The guard OWNS the fixed reviewer instruction for INTERNAL_TECHNICAL_STANDARD
+# dispatch too, so the provider-visible instruction cannot drift or become a
+# smuggling channel: the ITS outbound is validated by byte-equality against a
+# guard-built canonical body/prompt that BEGINS with exactly this text. These are
+# the EXACT current strings the adapters use for the standard tier (copied
+# verbatim: clearwright_gpt_review.INSTRUCTION and
+# clearwright_codex_review.STRUCTURED_PROMPT). The adapters keep their own copies
+# for the standard tier; the ITS tier is bound to these guard-owned constants.
+ITS_GPT_INSTRUCTION = (
+    "You are an independent code/plan reviewer for the ClearWright control "
+    "plane. Review the provided context critically and honestly. Respond with "
+    "ONLY a single JSON object, no prose and no code fences, with EXACTLY these "
+    "keys: reviewer (must be the string \"gpt\"), verdict (one of "
+    "\"approve\", \"approve_with_changes\", \"revise\", \"block\"), confidence "
+    "(a number from 0.0 to 1.0), risk_level (one of \"low\", \"medium\", "
+    "\"high\", \"critical\"), blocking_findings (array), required_changes "
+    "(array), nonblocking_findings (array), disagreements (array), assumptions "
+    "(array), questions (array), recommended_plan (array), and summary (a "
+    "substantive string). Do not claim participation you did not perform; base "
+    "the verdict only on the provided context."
+)
+
+ITS_CODEX_INSTRUCTION = (
+    "Read-only review. Do NOT edit any files. Review the provided ClearWright "
+    "context critically and honestly. Respond with ONLY a single JSON object "
+    "(no prose, no code fences) with EXACTLY these keys: reviewer (the string "
+    "\"codex\"), verdict (one of \"approve\", \"approve_with_changes\", "
+    "\"revise\", \"block\"), confidence (a number 0.0-1.0), risk_level (one of "
+    "\"low\", \"medium\", \"high\", \"critical\"), blocking_findings (array), "
+    "required_changes (array), nonblocking_findings (array), disagreements "
+    "(array), assumptions (array), questions (array), recommended_plan (array), "
+    "and summary (a substantive string)."
+)
+
+
+def build_its_gpt_body(model, packet_text, max_output_tokens):
+    """The CANONICAL ITS GPT request bytes: the guard-owned fixed instruction as
+    the developer message plus the composed ITS packet as the ONLY user content.
+    The guard is the sole author of this shape (mirroring the sensitive-tier
+    builder), so no dynamic provider metadata can drift from the declared
+    composition — _enforce validates the outbound by byte-equality against it."""
+    body = {"model": model,
+            "input": [{"role": "developer", "content": ITS_GPT_INSTRUCTION},
+                      {"role": "user", "content": packet_text}],
+            "max_output_tokens": max_output_tokens}
+    # ensure_ascii=False so the wire bytes carry the REAL characters the final_scan
+    # (incl. the Unicode-confusable detector) will see, not \\uXXXX escapes.
+    return json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+
+def build_its_codex_prompt(packet_text):
+    """The CANONICAL ITS Codex stdin: the guard-owned fixed instruction, a blank
+    line, then the composed ITS packet, and nothing else."""
+    return ITS_CODEX_INSTRUCTION + "\n\n" + packet_text
 
 
 # --------------------------------------------------------------------------- #
@@ -1083,10 +1140,26 @@ def _enforce(data_bytes, context, loaded, *, codex_prompt=None):
         # composition manifest, fail closed — ITS never falls back to tripwire-
         # only.
         comp = getattr(context, "its_composition", None)
+        # Composition-missing is checked FIRST (ITS never falls back to tripwire-
+        # only), so a body/prompt with no bound composition fails closed here.
         if not comp:
             raise EgressBlocked("its_composition_unbound")
         if codex_prompt is not None:
-            packet_text = codex_prompt
+            # The canonical ITS stdin is the guard-owned instruction + "\n\n" +
+            # the composed packet. Strip that exact prefix; the remainder is the
+            # packet the composition manifest must decompose. A prompt that does
+            # not begin with the canonical instruction is noncanonical.
+            prefix = ITS_CODEX_INSTRUCTION + "\n\n"
+            if not codex_prompt.startswith(prefix):
+                raise EgressBlocked("its_composition_unbound",
+                                    {"detail": "noncanonical_prompt"})
+            packet_text = codex_prompt[len(prefix):]
+            verify_its_composition(packet_text, comp, loaded)
+            # Defense in depth: the whole stdin must be byte-equal to the canonical
+            # instruction + packet, so nothing can be wrapped around the packet.
+            if codex_prompt != build_its_codex_prompt(packet_text):
+                raise EgressBlocked("its_composition_unbound",
+                                    {"detail": "noncanonical_prompt"})
         else:
             try:
                 body = json.loads(bytes(data_bytes).decode("utf-8"))
@@ -1099,7 +1172,18 @@ def _enforce(data_bytes, context, loaded, *, codex_prompt=None):
                 raise EgressBlocked("its_composition_unbound",
                                     {"user_items": len(users)})
             packet_text = users[0]
-        verify_its_composition(packet_text, comp, loaded)
+            verify_its_composition(packet_text, comp, loaded)
+            # Bind ALL dynamic provider-visible metadata (instruction, model,
+            # token cap, body shape) to the declared composition: the exact
+            # outbound bytes must equal the guard's canonical ITS body built from
+            # the composition's provider_binding and the verified packet. Any
+            # extra top-level field, extra input item, swapped model/cap, or
+            # non-canonical shape makes the bytes differ.
+            pb = comp.get("provider_binding") or {}
+            if bytes(data_bytes) != build_its_gpt_body(
+                    pb.get("gpt_model"), packet_text, pb.get("max_output_tokens")):
+                raise EgressBlocked("its_composition_unbound",
+                                    {"detail": "noncanonical_body"})
     return decision
 
 

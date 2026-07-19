@@ -174,6 +174,12 @@ def call_gpt(context_text, model, *, key_getter=None, timeout=DEFAULT_TIMEOUT,
     if egress_context is not None and getattr(egress_context, "tier", None) == "sensitive":
         body_bytes = _egress.build_sensitive_gpt_body(model, context_text,
                                                       max_output_tokens)
+    elif getattr(egress_context, "tier", None) == "internal_technical":
+        # On the ITS tier the guard owns the canonical body (the guard-owned
+        # instruction + the composed packet as the only user content); the
+        # context_text IS the composed ITS packet built by the engine.
+        body_bytes = _egress.build_its_gpt_body(model, context_text,
+                                                max_output_tokens)
     else:
         payload = {
             "model": model,

@@ -445,6 +445,57 @@ class Scenario13BudgetFailFast(_ItsBase):
         self.assertGreater(report["estimated_input_tokens"], report["budget"])
 
 
+class Scenario14CachedReviewerRetainsFindingId(_ItsBase):
+    """Regression (adversarial review ITS-LANE-01 / ITS-CACHEHIT-FINDINGIDS): a
+    partially-failed ITS round that is re-run must still record EVERY finding-
+    artifact id. Before the fix, a reviewer served from the cross-invocation
+    result cache skipped finding-id capture, committing the round with a null
+    its.artifact_ids pointer — corrupting the audit record and fail-closed
+    bricking every later round."""
+
+    def test_retried_round_records_both_finding_ids_via_cache_hit(self):
+        council = self._its_council()
+        cid = council["council_id"]
+        # Run 1: GPT validates (finding registered + cached); Codex output carries
+        # a synthetic residual identifier, so Codex is residue-blocked and the
+        # round does NOT commit. GPT's validated result stays in the pending cache.
+        poisoned = "Residual identifier {} observed.".format(_SSN)
+        report1 = self._run(council, gpt_fn=_gpt_reviewer(),
+                            codex_fn=_codex_reviewer(summary=poisoned))
+        self.assertFalse(report1["committed"], report1)
+        self.assertEqual(report1["statuses"].get("gpt"), "review")
+        self.assertEqual(report1["statuses"].get("codex"), "residue_blocked")
+
+        # Reload from disk (the documented cross-invocation reuse mechanism) and
+        # re-run the SAME round with a clean Codex. GPT is now served from the
+        # pending cache — its reviewer fn must NOT be re-invoked.
+        council = cwrc.load_council(self.root, cid)
+        invoked2 = {"gpt": False, "codex": False}
+        report2 = self._run(council, gpt_fn=_gpt_reviewer(invoked=invoked2),
+                            codex_fn=_codex_reviewer(invoked=invoked2))
+        self.assertTrue(report2["committed"], report2)
+        self.assertFalse(invoked2["gpt"], "GPT should have been a cache hit")
+        self.assertTrue(invoked2["codex"])
+
+        # The committed round records BOTH finding ids (the GPT id was recovered
+        # on the cache-hit path, not dropped to None).
+        r1 = cwrc.load_rounds(self.root, cid)[-1]
+        ids = r1["its"]["artifact_ids"]
+        self.assertIsNotNone(ids["gpt"], "cached GPT finding id was dropped")
+        self.assertIsNotNone(ids["codex"])
+        # Both ids reference real, clean, reusable derived artifacts.
+        self.assertIsNotNone(cwia.verify_for_reuse(self.root, cid, ids["gpt"]))
+        self.assertIsNotNone(cwia.verify_for_reuse(self.root, cid, ids["codex"]))
+        self._assert_absent(_SSN)
+
+        # And the council is NOT bricked: a follow-up round assembles the round-1
+        # findings as verified components and commits on the follow-up scaffold.
+        report3 = self._commit_clean_round(council)
+        self.assertEqual(report3["round"], 2)
+        r2 = cwrc.load_rounds(self.root, cid)[-1]
+        self.assertEqual(r2["its"]["scaffold_version"], cwrc.ITS_SCAFFOLD_FOLLOWUP)
+
+
 class HappyPathMultiRound(_ItsBase):
     def test_two_rounds_commit_with_verified_summary_and_three_axes(self):
         council = self._its_council()

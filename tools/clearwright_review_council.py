@@ -1001,6 +1001,23 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
         packet_bytes = len(codex_prompt.encode("utf-8"))
         its_finding_sources = [_scaffold_node_id] + summary_ids + _existing_src_ids
         its_finding_ids = {}
+
+        def _its_register_finding(_reviewer, _result):
+            """Scan + register one reviewer verdict as a hash-bound derived
+            finding (requirement 7). Returns the record on a clean scan, or None
+            on residue. Deterministic and idempotent (id = kind+round+content
+            sha), so re-invoking for a reviewer whose result is served from the
+            cross-invocation pending cache recovers the SAME artifact id rather
+            than dropping it — a partially-failed round that is re-run must still
+            record every finding pointer and must not brick later rounds."""
+            _kind = "gpt_finding" if _reviewer == "gpt" else "codex_finding"
+            _frec = cwia.register(
+                root, council_id, kind=_kind, producer=_reviewer,
+                round_no=round_no, phase=phase,
+                content=cwia.render_verdict(_result["verdict"]),
+                scaffold_version=its_scaffold_version,
+                source_ids=its_finding_sources)
+            return _frec if (_frec.get("scan") or {}).get("passed") is True else None
         # 10. Egress context carries the lane and the composition manifest.
         egress_context = _egress.EgressContext(
             "internal_technical", work_item_id=council.get("work_item_id"),
@@ -1264,6 +1281,20 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
 
         cached = pending.get(key)
         if cached and cached.get("fingerprint") == fp and _validated(cached.get("result")):
+            if its_lane:
+                # A cached ITS result was scan-registered on the earlier
+                # invocation; recover its finding-artifact id (idempotent
+                # re-register) so a re-run of a partially-failed round still
+                # records this reviewer's finding pointer. A residue result is
+                # never cached, so the re-scan passes; the defensive None branch
+                # cannot leave a null id in a committed round.
+                _rec = _its_register_finding(reviewer, cached["result"])
+                if _rec is None:
+                    statuses[reviewer] = "residue_blocked"
+                    results[reviewer] = None
+                    attempts_used[reviewer] = 0
+                    continue
+                its_finding_ids[reviewer] = _rec["artifact_id"]
             results[reviewer] = cached["result"]
             statuses[reviewer] = "review"
             attempts_used[reviewer] = 0  # reused, no new call
@@ -1301,14 +1332,8 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
                     # BEFORE it is cached or counted. Residue -> the content-free
                     # record is the durable audit trail; the result is NOT cached,
                     # NOT counted as a review, so the round cannot commit.
-                    _kind = "gpt_finding" if reviewer == "gpt" else "codex_finding"
-                    _frec = cwia.register(
-                        root, council_id, kind=_kind, producer=reviewer,
-                        round_no=round_no, phase=phase,
-                        content=cwia.render_verdict(result["verdict"]),
-                        scaffold_version=its_scaffold_version,
-                        source_ids=its_finding_sources)
-                    if (_frec.get("scan") or {}).get("passed") is not True:
+                    _frec = _its_register_finding(reviewer, result)
+                    if _frec is None:
                         statuses[reviewer] = "residue_blocked"
                         result = None
                         break

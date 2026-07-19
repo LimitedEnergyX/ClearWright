@@ -248,9 +248,10 @@ Keep the numeric ordering precise. `authority_level` sorts ascending:
 - `9999` is lowest
 
 Do not apply this inversion to `clearance_level` or `priority_level`.
-`clearance_level` may increase with consequence (a higher number can mean a more
-consequential action). `priority_level` is policy-defined; each deployment
-documents whether higher or lower means more urgent.
+`clearance_level` increases with consequence: a higher number means greater
+consequence. `priority_level` runs the other way from authority — `0000` is the
+highest urgency and `9999` the lowest, so a lower number means greater urgency.
+Today `priority_level` is unenforced scheduling metadata: no scheduler acts on it.
 
 ---
 

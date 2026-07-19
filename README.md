@@ -215,6 +215,13 @@ The product and platform is ClearWright. The specification is the ClearWright
 Protocol. The record artifact is a clearance packet. See
 [docs/NAMING.md](docs/NAMING.md) for the full naming rules.
 
+## Key Terminology
+
+The core protocol acronyms are CW (ClearWright), RTA (Request to Act), CTA (Clear to
+Act), DTA (Denied to Act), and RFI (Request for Information). By convention, acronyms
+are expanded on first meaningful use in substantial documents. See
+[docs/GLOSSARY.md](docs/GLOSSARY.md) for the full glossary and acronym list.
+
 ## Peer review welcome
 
 ClearWright is public as an early alpha so the protocol, queue lifecycle,

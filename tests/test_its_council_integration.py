@@ -562,5 +562,42 @@ class Scenario15ForgedCtxComponent(_ItsBase):
         self.assertNotEqual(report["statuses"].get("codex"), "review")
 
 
+class Scenario16DefaultGptProviderBindingContract(_ItsBase):
+    """Regression lock for the DISPROVED GPT provider-binding root cause
+    (runtime/work/REPAIR-GPT-RCA-DISPROOF.md): the production gpt_fn used by the
+    real council (cwrc._default_gpt) forwards max_output_tokens=4000 and the
+    plan-supplied model to gpt_adapter.review(), which is the sole place
+    resolve_model() runs. So the ITS body is built from the canonical (resolved
+    model, 4000) values and NEVER falls back to the 3000 default. Scenario12
+    proves the resulting wire bytes are canonical via _gpt_reviewer (a faithful
+    stand-in); this test pins _default_gpt ITSELF, so a future regression that
+    omitted the token cap or passed a divergent/unresolved model is caught here
+    rather than only at a live dispatch."""
+
+    def test_default_gpt_forwards_canonical_tokens_and_plan_model_to_review(self):
+        captured = {}
+        orig = gpt_adapter.review
+
+        def fake_review(root, text, **kw):
+            captured.update(kw)
+            captured["text"] = text
+            return {"ok": True, "posted": True, "reviewer": "gpt"}
+
+        gpt_adapter.review = fake_review
+        try:
+            cwrc._default_gpt(
+                self.root, "COMPOSED ITS PACKET", thread_id="t", work_item_id="wi",
+                packet_id=None, council_id="c", round_no=1, phase="plan",
+                model="gpt-plan-model", timeout=5, egress_context=None)
+        finally:
+            gpt_adapter.review = orig
+        # The canonical token cap is forwarded (never the 3000 default) ...
+        self.assertEqual(captured.get("max_output_tokens"), 4000)
+        # ... and the plan-supplied model reaches review() unchanged (review is
+        # the sole resolve_model() site, guaranteeing adapter/guard model parity).
+        self.assertEqual(captured.get("model"), "gpt-plan-model")
+        self.assertEqual(captured.get("text"), "COMPOSED ITS PACKET")
+
+
 if __name__ == "__main__":
     unittest.main()

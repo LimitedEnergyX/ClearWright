@@ -31,6 +31,7 @@ import clearwright_message as cwm  # noqa: E402
 import clearwright_work as cww  # noqa: E402
 import clearwright_verdict as cwv  # noqa: E402
 import clearwright_gpt_review as gpt  # noqa: E402
+import clearwright_egress_guard as _egress  # noqa: E402
 import clearwright_codex_review as ccr  # noqa: E402
 import clearwright_review_council as council  # noqa: E402
 
@@ -156,8 +157,13 @@ class GptAdapterTests(unittest.TestCase):
         self.thread = res["thread_id"]
 
     def _gpt(self, **kw):
+        # Production always dispatches through the egress guard with a tier
+        # context; these adapter tests use clean synthetic technical text, so a
+        # standard-tier context is the faithful equivalent. The guard scans the
+        # exact serialized request bytes and passes clean content through.
         base = dict(thread_id=self.thread, key_getter=lambda: FAKE_KEY,
-                    note_on_failure=False, model="gpt-5.6-terra")
+                    note_on_failure=False, model="gpt-5.6-terra",
+                    egress_context=_egress.EgressContext("standard"))
         base.update(kw)
         return gpt.review(self.root, base.pop("context", "please review"), **base)
 
@@ -234,18 +240,21 @@ class GptAdapterTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_key_resolves_from_windows_user_scope_fallback(self):
-        # A User-scope variable set after the parent process launched is not
-        # inherited; the adapter falls back to the User scope, never printing it.
-        key, source = gpt.resolve_api_key(env_get=lambda *_: None,
-                                          user_scope_get=lambda: FAKE_KEY)
-        self.assertEqual(key, FAKE_KEY)
+        # Credential resolution lives in the guard now (SDEG Decision 2A). A
+        # User-scope variable set after the parent launched is not inherited;
+        # the guard falls back to the User scope. provider_key_status returns
+        # only (present, source) — never the value.
+        present, source = _egress.provider_key_status(
+            env_get=lambda *_: None, user_scope_get=lambda: FAKE_KEY)
+        self.assertTrue(present)
         self.assertEqual(source, "windows_user_scope")
-        key2, source2 = gpt.resolve_api_key(env_get=lambda *_: "sk-fromenv-000000000000000000",
-                                            user_scope_get=lambda: FAKE_KEY)
+        present2, source2 = _egress.provider_key_status(
+            env_get=lambda *_: "sk-fromenv-000000000000000000",
+            user_scope_get=lambda: FAKE_KEY)
         self.assertEqual(source2, "process_env")
-        key3, source3 = gpt.resolve_api_key(env_get=lambda *_: None,
-                                            user_scope_get=lambda: None)
-        self.assertIsNone(key3)
+        present3, source3 = _egress.provider_key_status(
+            env_get=lambda *_: None, user_scope_get=lambda: None)
+        self.assertFalse(present3)
         self.assertIsNone(source3)
 
     def test_transport_exception_is_bounded_and_safe(self):
@@ -932,6 +941,218 @@ class NamingAndPrivacyTests(unittest.TestCase):
                 text = read(path)
                 self.assertIsNone(retired.search(text))
                 self.assertIsNone(private.search(text))
+
+
+class NonItsResiduePrePersistenceGate(unittest.TestCase):
+    """SDEG V2: a universal fail-closed pre-persistence residue gate on the
+    NON-ITS (standard/sensitive) path. A reviewer verdict or a reconciliation
+    whose free-text carries residual sensitive data (a synthetic SSN) must never
+    reach a durable round/pending file; the clean path is unchanged. All
+    fixtures are SYNTHETIC."""
+
+    _SSN = "123-45-6789"
+
+    def setUp(self):
+        self.root = queue("cw_v2_residue_", self)
+        res = server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+                                            "message": "Plan to review", "intent": "request"})
+        self.thread = res["thread_id"]
+        self.wid = cww.derive_work_items(self.root)[0]["work_item_id"]
+
+    def _new(self):
+        return council.create_council(self.root, thread_id=self.thread,
+                                      work_item_id=self.wid, phase="plan",
+                                      data_sensitivity="standard",
+                                      approved_scope="operator-approved test scope")
+
+    def _reviewer(self, reviewer, source, summary):
+        def fn(root, context, **kw):
+            return {"ok": True, "posted": True, "reviewer": reviewer,
+                    "verdict": make_verdict(reviewer, summary=summary),
+                    "validated": True, "source": source,
+                    "telemetry": {"reviewer": reviewer}, "message_id": reviewer[:1]}
+        return fn
+
+    def _assert_ssn_absent(self):
+        needle = self._SSN.encode("utf-8")
+        for dirpath, _dirs, files in os.walk(self.root):
+            for name in files:
+                with open(os.path.join(dirpath, name), "rb") as fh:
+                    self.assertNotIn(needle, fh.read(),
+                                     "synthetic SSN leaked into {}".format(name))
+
+    def test_reviewer_verdict_ssn_is_residue_blocked_and_not_persisted(self):
+        c = self._new()
+        poisoned = ("Reviewed; a residual identifier {} appears in the diff "
+                    "notes.".format(self._SSN))
+        report = council.run_round(
+            self.root, c, "clean technical review context", sleep=lambda *_: None,
+            gpt_fn=self._reviewer("gpt", "openai-api", poisoned),
+            codex_fn=self._reviewer("codex", "codex-cli", "Clean review; no issues found."))
+        self.assertFalse(report["committed"], report)
+        self.assertEqual(report["statuses"].get("gpt"), "residue_blocked")
+        # No committed substantive round; the SSN is in NO round/pending file.
+        rounds = council.load_rounds(self.root, c["council_id"])
+        self.assertEqual(council.substantive_round_count(rounds), 0)
+        self._assert_ssn_absent()
+
+    def test_clean_verdicts_still_commit(self):
+        # Regression guard: the residue gate must not disturb the clean path.
+        c = self._new()
+        report = council.run_round(
+            self.root, c, "clean technical review context", sleep=lambda *_: None,
+            gpt_fn=self._reviewer("gpt", "openai-api", "A clean, substantive review."),
+            codex_fn=self._reviewer("codex", "codex-cli", "Another clean review."))
+        self.assertTrue(report["committed"], report)
+        self.assertTrue(report["substantive"], report)
+
+    def _reviewer_dict_residue(self, reviewer, source):
+        # Verdict whose SUMMARY is clean but whose structured array carries an
+        # OBJECT entry with residual sensitive text — the exact case a string-only
+        # scan misses. run_round scans result["verdict"] before persistence.
+        def fn(root, context, **kw):
+            v = make_verdict(reviewer, summary="Clean summary; details below.")
+            v["blocking_findings"] = [{"finding": "Residual identifier {} inside a "
+                                       "structured object field.".format(self._SSN)}]
+            return {"ok": True, "posted": True, "reviewer": reviewer, "verdict": v,
+                    "validated": True, "source": source,
+                    "telemetry": {"reviewer": reviewer}, "message_id": reviewer[:1]}
+        return fn
+
+    def test_reviewer_verdict_ssn_in_object_field_is_residue_blocked(self):
+        # V2 completeness: residue inside a dict entry of a structured array (not a
+        # raw string) must still be caught before persistence. Fails pre-fix
+        # (string-only scan) and passes after (full canonical-JSON verdict scan).
+        c = self._new()
+        report = council.run_round(
+            self.root, c, "clean technical review context", sleep=lambda *_: None,
+            gpt_fn=self._reviewer_dict_residue("gpt", "openai-api"),
+            codex_fn=self._reviewer("codex", "codex-cli", "Clean review; no issues."))
+        self.assertFalse(report["committed"], report)
+        self.assertEqual(report["statuses"].get("gpt"), "residue_blocked")
+        self.assertEqual(council.substantive_round_count(
+            council.load_rounds(self.root, c["council_id"])), 0)
+        self._assert_ssn_absent()
+
+    def test_reconciliation_ssn_raises_and_round_file_not_updated(self):
+        c = self._new()
+        # Commit a clean round first.
+        council.run_round(self.root, c, "clean technical review context",
+                          sleep=lambda *_: None,
+                          gpt_fn=self._reviewer("gpt", "openai-api", "Clean review one."),
+                          codex_fn=self._reviewer("codex", "codex-cli", "Clean review two."))
+        c = council.load_council(self.root, c["council_id"])
+        poisoned_recon = {
+            "accepted_findings": [], "rejected_findings": [],
+            "required_plan_changes": [], "revised_plan": [], "unresolved_blockers": [],
+            "ready_to_proceed": False,
+            "summary": ("Reconciled the reviews; a residual identifier {} slipped "
+                        "into the notes.".format(self._SSN))}
+        with self.assertRaises(cwv.VerdictError):
+            council.attach_reconciliation(self.root, c, poisoned_recon)
+        # The round file was NOT updated: its reconciliation stays None and the
+        # SSN is absent everywhere under the queue root.
+        rounds = council.load_rounds(self.root, c["council_id"])
+        self.assertIsNone(rounds[-1].get("reconciliation"))
+        self._assert_ssn_absent()
+
+    # --- Complete-canonical reconciliation scan (operator authority
+    # msg-20260719T035209304158): the WHOLE normalized reconciliation object is
+    # scanned before persistence, not a selected field list. -------------------
+    def _committed(self):
+        c = self._new()
+        council.run_round(
+            self.root, c, "clean technical review context", sleep=lambda *_: None,
+            gpt_fn=self._reviewer("gpt", "openai-api", "Clean review one."),
+            codex_fn=self._reviewer("codex", "codex-cli", "Clean review two."))
+        return council.load_council(self.root, c["council_id"])
+
+    def _base_recon(self, **over):
+        r = {"ready_to_proceed": False, "summary": "Reconciled the reviews; all clean.",
+             "accepted_findings": [], "rejected_findings": [], "required_plan_changes": [],
+             "revised_plan": [], "unresolved_blockers": [], "resolutions": []}
+        r.update(over)
+        return r
+
+    def _assert_recon_blocked_no_residue(self, c, recon):
+        with self.assertRaises(cwv.VerdictError):
+            council.attach_reconciliation(self.root, c, recon)
+        rounds = council.load_rounds(self.root, c["council_id"])
+        self.assertIsNone(rounds[-1].get("reconciliation"))
+        self._assert_ssn_absent()
+
+    def test_recon_residue_in_accepted_findings_blocks(self):
+        # Fail-before (pre-fix field-selective scan omits accepted_findings) /
+        # pass-after: residue here is caught by the complete canonical scan.
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            accepted_findings=["Accepted a point noting {}".format(self._SSN)]))
+
+    def test_recon_residue_in_required_plan_changes_blocks(self):
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            required_plan_changes=["Change the plan regarding {}".format(self._SSN)]))
+
+    def test_recon_residue_in_resolution_note_nested_dict_blocks(self):
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            resolutions=[{"ref": "gpt.required_changes[0]", "disposition": "planned",
+                          "note": "resolution note carrying {}".format(self._SSN)}]))
+
+    def test_recon_residue_in_rejected_finding_reason_blocks(self):
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            rejected_findings=[{"finding": "f", "reason": "reason with {}".format(self._SSN),
+                                "evidence": ["clean evidence"]}]))
+
+    def test_recon_residue_in_rejected_finding_evidence_nested_list_blocks(self):
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            rejected_findings=[{"finding": "f", "reason": "a clean reason",
+                                "evidence": ["evidence value with {}".format(self._SSN)]}]))
+
+    def test_recon_clean_persists_and_stored_matches_scanned_canonical(self):
+        c = self._committed()
+        clean = self._base_recon(summary="A clean reconciliation, nothing sensitive here.",
+                                 accepted_findings=["accepted ok"], revised_plan=["do x"],
+                                 resolutions=[{"ref": "gpt.required_changes[0]",
+                                               "disposition": "planned", "note": "fine"}])
+        normalized = cwv.validate_reconciliation(clean)
+        council.attach_reconciliation(self.root, c, clean)
+        stored = council.load_rounds(self.root, c["council_id"])[-1].get("reconciliation")
+        self.assertIsNotNone(stored)
+        # The stored object is exactly the object that was scanned.
+        self.assertEqual(council._canonical_reconciliation_text(stored),
+                         council._canonical_reconciliation_text(normalized))
+
+    def test_recon_scanner_exception_fails_closed(self):
+        c = self._committed()
+        orig = council.guard.redact_for_persistence
+        council.guard.redact_for_persistence = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("scanner boom"))
+        try:
+            with self.assertRaises(cwv.VerdictError):
+                council.attach_reconciliation(self.root, c, self._base_recon())
+            self.assertIsNone(
+                council.load_rounds(self.root, c["council_id"])[-1].get("reconciliation"))
+        finally:
+            council.guard.redact_for_persistence = orig
+
+    def test_recon_serialization_exception_fails_closed(self):
+        c = self._committed()
+        orig = council.cwv.validate_reconciliation
+        # A normalized object with a non-JSON-serializable value: canonical
+        # serialization raises TypeError, so the gate fails closed.
+        council.cwv.validate_reconciliation = lambda r: {
+            "ready_to_proceed": False, "summary": "x" * 12, "rejected_findings": [],
+            "unresolved_blockers": [], "unserializable": {1, 2, 3}}
+        try:
+            with self.assertRaises(cwv.VerdictError):
+                council.attach_reconciliation(self.root, c, self._base_recon())
+            self.assertIsNone(
+                council.load_rounds(self.root, c["council_id"])[-1].get("reconciliation"))
+        finally:
+            council.cwv.validate_reconciliation = orig
 
 
 if __name__ == "__main__":

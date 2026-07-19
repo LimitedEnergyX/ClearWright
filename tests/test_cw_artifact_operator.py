@@ -38,12 +38,12 @@ def queue(prefix, tc):
 
 
 def stub_preflight(tc):
-    import clearwright_gpt_review as gpt_mod
+    import clearwright_egress_guard as guard_mod
     import clearwright_codex_review as ccr_mod
-    orig_key, orig_exe = gpt_mod.resolve_api_key, ccr_mod.codex_executable
-    gpt_mod.resolve_api_key = lambda *a, **k: ("test-key-present", "process_env")
+    orig_key, orig_exe = guard_mod.provider_key_status, ccr_mod.codex_executable
+    guard_mod.provider_key_status = lambda *a, **k: (True, "process_env")
     ccr_mod.codex_executable = lambda: "codex-stub"
-    tc.addCleanup(setattr, gpt_mod, "resolve_api_key", orig_key)
+    tc.addCleanup(setattr, guard_mod, "provider_key_status", orig_key)
     tc.addCleanup(setattr, ccr_mod, "codex_executable", orig_exe)
 
 

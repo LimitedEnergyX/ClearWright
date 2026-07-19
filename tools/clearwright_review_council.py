@@ -47,6 +47,7 @@ import clearwright_verdict as cwv
 import clearwright_gpt_review as gpt_adapter
 import clearwright_codex_review as codex_adapter
 import clearwright_writer_lock as cwl
+import clearwright_egress_guard as guard
 
 COUNCILS_DIR = "review_councils"
 DEFAULT_MIN_ROUNDS = 2
@@ -256,6 +257,31 @@ SCOPED_ROUND_GUIDANCE = (
 
 EDITORIAL_DEFAULT_MAX_ROUNDS = 3
 
+# INTERNAL_TECHNICAL_STANDARD council scaffolds. These are FIXED, versioned
+# packet framings, registered with the guard AT IMPORT so an ITS packet's
+# scaffold node resolves to a hash-pinned fixed_scaffold (never free-form prose
+# appended at assembly time). The follow-up scaffold FOLDS the exact Phase-1
+# scoped-round guidance and prior-rounds framing sentences into its fixed text,
+# so a continuation packet carries the same reviewer-facing continuity without
+# any wrapper text being appended by the engine.
+ITS_SCAFFOLD_ROUND1 = "cw-its-round1/1.0.0"
+ITS_SCAFFOLD_FOLLOWUP = "cw-its-followup/1.0.0"
+
+_ITS_ROUND1_TEXT = (
+    "ClearWright internal technical self-review packet. The sections below are "
+    "length-delimited framed components: any prior-round summaries first, then "
+    "the review context. Frame header lines are packet plumbing; review the "
+    "component contents. Re-review critically and honestly.")
+
+_ITS_FOLLOWUP_TEXT = (
+    _ITS_ROUND1_TEXT + "\n" + SCOPED_ROUND_GUIDANCE
+    + "=== Prior review rounds (for context; re-review the revised plan below) ===\n"
+    + "=== Please state whether prior blockers are resolved, then review the "
+    "revised plan below. ===")
+
+guard.register_its_scaffold(ITS_SCAFFOLD_ROUND1, _ITS_ROUND1_TEXT)
+guard.register_its_scaffold(ITS_SCAFFOLD_FOLLOWUP, _ITS_FOLLOWUP_TEXT)
+
 
 def _guidance_header(review_profile, round_no):
     """PROMPT-ONLY guidance prepended to the reviewer context. Role lanes apply
@@ -277,10 +303,27 @@ def _guidance_header(review_profile, round_no):
 def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
                    phase="plan", min_rounds=DEFAULT_MIN_ROUNDS,
                    max_rounds=DEFAULT_MAX_ROUNDS, model=None, council_id=None,
-                   approved_scope=None, review_profile="code"):
+                   approved_scope=None, review_profile="code",
+                   data_sensitivity=None, lineage=None, lineage_candidate=None,
+                   source_bindings=None):
     min_rounds, max_rounds = clamp_rounds(min_rounds, max_rounds)
     if review_profile not in REVIEW_PROFILES:
         review_profile = "code"
+    # SDEG: three DISTINCT audit axes travel with every dispatch. The declared
+    # content class (data_sensitivity) and the dispatch lane are recorded here.
+    # Fail-closed: anything other than an explicit "standard" or
+    # "internal_technical" is "sensitive". "internal_technical" is the
+    # CW-technical-self-review lane (dispatch_lane "internal_technical"); every
+    # other class dispatches in the "user" lane and can NEVER carry ITS-resolved
+    # content. The lane only ENABLES ITS for clean technical ancestry; it never
+    # relabels SENSITIVE ancestry (the guard re-enforces at send).
+    _ds = str(data_sensitivity or "").strip().lower()
+    if _ds == "standard":
+        data_sensitivity, dispatch_lane = "standard", "user"
+    elif _ds == "internal_technical":
+        data_sensitivity, dispatch_lane = "internal_technical", "internal_technical"
+    else:
+        data_sensitivity, dispatch_lane = "sensitive", "user"
     council_id = council_id or new_council_id()
     council = {
         "council_id": council_id,
@@ -289,6 +332,14 @@ def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
         "packet_id": packet_id,
         "phase": phase,
         "review_profile": review_profile,
+        "data_sensitivity": data_sensitivity,
+        "dispatch_lane": dispatch_lane,
+        # Live lineage (content-free), recorded at assembly and rebuilt at each
+        # round: the immutable candidate graph, the outbound candidate id, and
+        # the verified-STANDARD source hash bindings for the TOCTOU re-check.
+        "lineage": lineage,
+        "lineage_candidate": lineage_candidate,
+        "source_bindings": source_bindings,
         "min_rounds": int(min_rounds),
         "max_rounds": int(max_rounds),
         "model": model,
@@ -553,22 +604,24 @@ def evaluate(council, rounds):
 # --------------------------------------------------------------------------- #
 
 def _default_gpt(root, context_text, *, thread_id, work_item_id, packet_id,
-                 council_id, round_no, phase, model, timeout):
+                 council_id, round_no, phase, model, timeout, egress_context=None):
     # Give the reviewer generous output headroom: a full structured verdict plus
     # a reasoning model's internal tokens truncates under a small cap, which
-    # would otherwise fail validation and read as reviewer_unavailable.
+    # would otherwise fail validation and read as reviewer_unavailable. The
+    # egress_context carries the live lineage enforcement to the guard.
     return gpt_adapter.review(
         root, context_text, thread_id=thread_id, work_item_id=work_item_id,
         packet_id=packet_id, council_id=council_id, round=round_no, phase=phase,
-        model=model, timeout=timeout, max_output_tokens=4000)
+        model=model, timeout=timeout, max_output_tokens=4000,
+        egress_context=egress_context)
 
 
 def _default_codex(root, context_text, *, thread_id, work_item_id, packet_id,
-                   council_id, round_no, phase, repo, timeout):
+                   council_id, round_no, phase, repo, timeout, egress_context=None):
     return codex_adapter.review_structured(
         root, thread_id=thread_id, work_item_id=work_item_id, packet_id=packet_id,
         council_id=council_id, round=round_no, phase=phase, context_text=context_text,
-        timeout=timeout, cwd=repo)
+        timeout=timeout, cwd=repo, egress_context=egress_context)
 
 
 def _augment_context(base_context, rounds):
@@ -720,6 +773,51 @@ def _granted_extra(state):
     return sum(int(g.get("extra_attempts", 0)) for g in (state or {}).get("grants", []))
 
 
+def _verdict_residue_hit(verdict):
+    """Universal pre-persistence residue gate for a reviewer verdict on the
+    NON-ITS path (V2). Scans the COMPLETE validated verdict — every field, string,
+    list item, and nested mapping value (findings are stored as objects like
+    {"finding": "..."} / {"change": "..."}, so a string-only scan would miss their
+    free text) — by rendering the whole verdict to a canonical JSON string and
+    scanning that. Returns True on a HARD residue hit (any category except
+    unicode_confusable). Fails closed to a hit on any rendering or scanner error.
+    Clean verdicts return False, so the normal path is unchanged."""
+    try:
+        text = json.dumps(verdict or {}, ensure_ascii=False, sort_keys=True,
+                          default=str)
+        _safe, findings = guard.redact_for_persistence(text)
+    except Exception:  # noqa: BLE001 - render/scan failure must not open the gate
+        return True
+    return any(k != "unicode_confusable" for k in (findings or {}))
+
+
+def _canonical_reconciliation_text(normalized):
+    """Deterministic canonical serialization of the COMPLETE normalized
+    reconciliation object — the exact object attach_reconciliation persists
+    (latest["reconciliation"] = normalized). No manual field list: canonical JSON
+    inherently covers every current and future nested field (summary,
+    revised_plan, accepted_findings, rejected_findings and their finding/reason/
+    evidence, required_plan_changes, resolutions and their notes, unresolved_
+    blockers, nested dicts, nested lists). Raises on any serialization failure
+    (unsupported value / non-serializable structure) so the caller fails closed;
+    NO default= coercion, so an unsupported value blocks persistence rather than
+    being silently stringified."""
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
+
+def _reconciliation_residue_hit(normalized):
+    """Pre-persistence residue gate for a NON-ITS reconciliation (V2). Scans the
+    COMPLETE canonical normalized reconciliation before it is stored or reused.
+    Fails closed (returns True) on any serialization or scanner error, so a
+    blocked or unscannable reconciliation is never persisted."""
+    try:
+        text = _canonical_reconciliation_text(normalized)
+        _safe, findings = guard.redact_for_persistence(text)
+    except Exception:  # noqa: BLE001 - serialization/scan failure must not open the gate
+        return True
+    return any(k != "unicode_confusable" for k in (findings or {}))
+
+
 def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
               artifact_ids=(), gpt_fn=None, codex_fn=None, sleep=time.sleep):
     """Dispatch one review round under the persistent attempt budget and return
@@ -750,13 +848,22 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     phase = council.get("phase")
     prior_rounds = load_rounds(root, council_id)
     round_no = len(council.get("rounds", [])) + 1
-    context = _augment_context(base_context, prior_rounds) \
-        if substantive_round_count(prior_rounds) > 0 else base_context
-    # PROMPT-ONLY guidance (role lanes + scoped follow-up rounds). This changes
-    # only the reviewer prompt string; evaluate(), the verdict schema, and the
-    # reconciliation validation are untouched.
-    context = _guidance_header(council.get("review_profile", "code"),
-                               round_no) + context
+    # The dispatch lane authorizes INTERNAL_TECHNICAL_STANDARD. On the ITS lane
+    # the packet is assembled ONLY from a fixed versioned scaffold plus hash-
+    # bound components (below): NO _augment_context / _guidance_header prose is
+    # appended, so neither helper is ever called on this path.
+    its_lane = (council.get("dispatch_lane") == "internal_technical")
+    if its_lane:
+        context = base_context
+    else:
+        _augmented = substantive_round_count(prior_rounds) > 0
+        context = _augment_context(base_context, prior_rounds) \
+            if _augmented else base_context
+        # PROMPT-ONLY guidance (role lanes + scoped follow-up rounds). This
+        # changes only the reviewer prompt string; evaluate(), the verdict
+        # schema, and the reconciliation validation are untouched.
+        context = _guidance_header(council.get("review_profile", "code"),
+                                   round_no) + context
 
     hits = secret_scan(context)
     if hits:
@@ -769,103 +876,435 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
                 "hard_gate": True, "statuses": {}, "attempts": {},
                 "reason": round_data["hard_gate_reason"]}
 
-    # Artifacts: remembered on the council across rounds; every pinned copy is
-    # re-verified against its FULL sha256 immediately before dispatch.
-    import clearwright_artifacts as cwa
-    all_artifact_ids = sorted(set(list(council.get("artifact_ids") or []) +
+    if its_lane:
+        # INTERNAL_TECHNICAL_STANDARD lane: the packet is assembled ONLY from a
+        # fixed versioned scaffold plus hash-bound, pre-scanned derived
+        # components (prior-round summaries) and the git-verified review context.
+        # No artifacts, no capability statement, no free-form prose. The guard
+        # independently re-enforces every rule below at send.
+        import clearwright_egress_guard as _egress
+        import clearwright_its_artifacts as cwia
+        # 1. Artifacts and non-code profiles are refused: an ITS packet has no
+        #    cwa capability statement and no codex_reference_block; a genuinely
+        #    STANDARD file must be declared with --source (git-verified).
+        _its_all_ids = sorted(set(list(council.get("artifact_ids") or []) +
                                   [a for a in (artifact_ids or []) if a]))
-    if all_artifact_ids != list(council.get("artifact_ids") or []):
-        council["artifact_ids"] = all_artifact_ids
-        _persist_council(root, council)
-    artifact_hashes = []
-    try:
-        for aid in all_artifact_ids:
-            artifact_hashes.append(cwa.verify(root, aid)["sha256"])
-    except cwa.ArtifactError as exc:
-        return {"committed": False, "substantive": False, "round": round_no,
-                "hard_gate": True, "artifact_error": str(exc),
-                "statuses": {}, "attempts": {},
-                "reason": "artifact verification failed before dispatch: {}".format(exc)}
+        if _its_all_ids:
+            return {"committed": False, "substantive": False, "round": round_no,
+                    "its_blocked": True, "statuses": {}, "attempts": {},
+                    "reason": "artifacts are not permitted in the internal_technical "
+                              "lane; declare git-verified files with --source"}
+        if council.get("review_profile", "code") != "code":
+            return {"committed": False, "substantive": False, "round": round_no,
+                    "its_blocked": True, "statuses": {}, "attempts": {},
+                    "reason": "only the code profile is supported in the "
+                              "internal_technical lane"}
+        # 2. Stamp check FIRST (content-free): the live lineage was built for a
+        #    specific packet content and stamped with its sha256. A missing or
+        #    stale stamp means the graph does not describe these bytes.
+        _its_stamp = council.get("lineage_context_sha256")
+        _its_incoming = hashlib.sha256((base_context or "").encode("utf-8")).hexdigest()
+        if not _its_stamp or _its_stamp != _its_incoming:
+            return {"committed": False, "substantive": False, "round": round_no,
+                    "its_blocked": True, "statuses": {}, "attempts": {},
+                    "reason": "lineage stamp missing or stale for the "
+                              "internal_technical lane; rebuild via the use-cw "
+                              "council command"}
+        # 3. Rebuild the immutable candidate graph; require the candidate. Engine
+        #    pre-check (UX only; the guard independently re-enforces): every RAW
+        #    node must declare a STANDARD provenance class — any sensitive_source
+        #    / inline-unverified node blocks in the internal_technical lane.
+        _its_lineage = council.get("lineage")
+        cand = council.get("lineage_candidate")
+        graph_obj = _egress.LineageGraph.from_records(_its_lineage) if _its_lineage else None
+        if graph_obj is None or cand is None:
+            return {"committed": False, "substantive": False, "round": round_no,
+                    "its_blocked": True, "statuses": {}, "attempts": {},
+                    "reason": "lineage graph or candidate missing for the "
+                              "internal_technical lane; rebuild via the use-cw "
+                              "council command"}
+        for _rec in (_its_lineage or []):
+            if _rec.get("classification") != _egress.CLASS_RAW:
+                continue
+            if (_rec.get("provenance") or {}).get("class") not in _egress._STANDARD_PROVENANCE:
+                return {"committed": False, "substantive": False, "round": round_no,
+                        "its_blocked": True, "statuses": {}, "attempts": {},
+                        "reason": "unverified or user-supplied content source in "
+                                  "the internal_technical lane"}
+        _cand_node = graph_obj.get(cand) or {}
+        _existing_src_ids = list(_cand_node.get("source_ids") or [])
 
-    # Capability-aware packaging. GPT (text-only) always receives its capability
-    # statement; the full line-numbered artifact is inlined only when the FINAL
-    # assembled packet fits the phase budget, otherwise a bounded excerpt pack
-    # with a plain manifest. Codex (file-capable) receives a concise prompt with
-    # absolute pinned paths + expected hashes to read from disk.
-    budget = phase_input_budget(phase)
-    divisor_chars = budget * 3  # chars corresponding to the token budget (est.)
-    gpt_delivery = "none"
-    gpt_body = context
-    codex_prompt = context
-    if all_artifact_ids:
-        gpt_base = cwa.GPT_CAPABILITY_STATEMENT + "\n\n" + context + "\n\n"
-        inline_parts, inline_ok = [], True
-        for aid in all_artifact_ids:
-            text, _rec = cwa.inline_rendering(root, aid)
-            inline_parts.append(text)
-        candidate = gpt_base + "\n\n".join(inline_parts)
-        if estimate_tokens(len(gpt_adapter.INSTRUCTION) + len(candidate)) <= budget:
-            gpt_body, gpt_delivery = candidate, "inline_full"
-        else:
-            remaining = max(4000, divisor_chars - len(gpt_adapter.INSTRUCTION)
-                            - len(gpt_base) - 2000)
-            per = max(2000, remaining // max(1, len(all_artifact_ids)))
-            # Target the excerpts at the exact lines the review context cites:
-            # the reviewer's own citations ARE the evidence it needs to check.
-            focus = cwa.cited_line_numbers(context)
-            packs = [cwa.excerpt_pack(root, aid, per, focus_lines=focus)[0]
-                     for aid in all_artifact_ids]
-            gpt_body, gpt_delivery = gpt_base + "\n\n".join(packs), "excerpt_pack"
-        codex_prompt = context + "\n\n" + cwa.codex_reference_block(root, all_artifact_ids)
+        def _its_scaffold_node(ver):
+            _nid = "scaffold-" + str(ver)
+            if graph_obj.get(_nid) is None:
+                graph_obj.add(_nid, _egress.CLASS_RAW,
+                              provenance={"class": "fixed_scaffold",
+                                          "version": str(ver),
+                                          "sha256": _egress.its_scaffold_sha(ver)})
+            return _nid
+
+        def _its_derived_node(rec, rd_round):
+            graph_obj.add(rec["artifact_id"], _egress.CLASS_MACHINE,
+                          source_ids=list(rec.get("source_ids") or []),
+                          derived={"content_hash": rec["content_sha256"],
+                                   "scan_passed": True,
+                                   "producer": rec.get("producer"),
+                                   "council_id": council_id, "round": rd_round,
+                                   "policy_version": rec.get("policy_version"),
+                                   "scaffold_version": rec.get("scaffold_version")})
+
+        # 4. Assemble prior-round components, ascending over prior SUBSTANTIVE
+        #    rounds. Each finding/reconciliation is verified for reuse (hash +
+        #    re-scan) and folded into a registered round-summary artifact.
+        components = []
+        summary_ids = []
+        _prior_substantive = [rd for rd in prior_rounds if rd.get("substantive", True)]
+        for rd in _prior_substantive:
+            _rd_no = rd.get("round")
+            _meta = rd.get("its") or {}
+            _fids = _meta.get("artifact_ids") or {}
+            _gid, _cid = _fids.get("gpt"), _fids.get("codex")
+            if not _gid or not _cid:
+                return {"committed": False, "substantive": False, "round": round_no,
+                        "its_blocked": True, "statuses": {}, "attempts": {},
+                        "reason": "prior round has no registered finding artifacts; "
+                                  "unregistered augmentation is not dispatchable"}
+            _rid = None
+            try:
+                _grec = cwia.verify_for_reuse(root, council_id, _gid)
+                _crec = cwia.verify_for_reuse(root, council_id, _cid)
+                _recon_rec = None
+                if rd.get("reconciliation") is not None:
+                    _rid = _fids.get("reconciliation")
+                    if not _rid:
+                        return {"committed": False, "substantive": False,
+                                "round": round_no, "its_blocked": True,
+                                "statuses": {}, "attempts": {},
+                                "reason": "prior round reconciliation is not a "
+                                          "registered artifact; unregistered "
+                                          "augmentation is not dispatchable"}
+                    _recon_rec = cwia.verify_for_reuse(root, council_id, _rid)
+            except _egress.EgressBlocked as exc:
+                return {"committed": False, "substantive": False, "round": round_no,
+                        "its_blocked": True, "statuses": {}, "attempts": {},
+                        "reason": exc.reason}
+            _gv = json.loads(_grec["content"])
+            _cv = json.loads(_crec["content"])
+            _rv = json.loads(_recon_rec["content"]) if _recon_rec else None
+            _summary_text = cwia.render_round_summary(_rd_no, _gv, _cv, _rv)
+            _summary_sources = [_gid, _cid] + ([_rid] if _recon_rec else [])
+            _srec = cwia.register(root, council_id, kind="round_summary",
+                                  producer="engine", round_no=_rd_no, phase=phase,
+                                  content=_summary_text,
+                                  scaffold_version=_meta.get("scaffold_version"),
+                                  source_ids=_summary_sources)
+            if (_srec.get("scan") or {}).get("passed") is not True:
+                return {"committed": False, "substantive": False, "round": round_no,
+                        "its_blocked": True, "statuses": {}, "attempts": {},
+                        "reason": "its_generated_scan_failed"}
+            components.append({"id": _srec["artifact_id"], "text": _summary_text})
+            summary_ids.append(_srec["artifact_id"])
+            _its_scaffold_node(_meta.get("scaffold_version"))
+            _its_derived_node(_grec, _rd_no)
+            _its_derived_node(_crec, _rd_no)
+            if _recon_rec:
+                _its_derived_node(_recon_rec, _rd_no)
+            _its_derived_node(_srec, _rd_no)
+        # 5. The review context is the LAST component, and is represented in the
+        #    lineage as a hash-bound ASSEMBLY node over the verified src nodes so
+        #    the guard's composition-to-lineage binding resolves it (V1). The node
+        #    id is the SAME id used for the ctx component; its content_hash is
+        #    sha256(base_context). It carries NO `derived`, so it resolves STANDARD
+        #    when the srcs are STANDARD and never forces sensitivity by itself.
+        ctx_sha = hashlib.sha256(base_context.encode("utf-8")).hexdigest()
+        ctx_id = "ctx-" + ctx_sha[:12]
+        components.append({"id": ctx_id, "text": base_context})
+        graph_obj.add(ctx_id, _egress.CLASS_MACHINE,
+                      source_ids=list(_existing_src_ids), content_hash=ctx_sha)
+        # 6. Fixed scaffold for this round: round-1 preamble, or the follow-up
+        #    scaffold (which folds the scoped-round guidance + prior-rounds
+        #    framing) once at least one prior substantive round exists.
+        its_scaffold_version = (ITS_SCAFFOLD_ROUND1 if not _prior_substantive
+                                else ITS_SCAFFOLD_FOLLOWUP)
+        _scaffold_node_id = _its_scaffold_node(its_scaffold_version)
+        # 7. Rebind the candidate over the src nodes + this round's scaffold +
+        #    the prior-round summary artifacts + the ctx node (no inline node
+        #    exists — step 3 refused any). Every composition["components"] entry
+        #    (each summary + the ctx) is now a lineage node reachable from the
+        #    candidate whose content hash equals its component frame sha.
+        graph_obj.add(cand, _egress.CLASS_MACHINE,
+                      source_ids=(_existing_src_ids + [_scaffold_node_id]
+                                  + summary_ids + [ctx_id]),
+                      domain=_cand_node.get("domain"))
+        # 8. Build the canonical ITS packet + composition; bind the dynamic
+        #    provider metadata (model + token cap) into the composition so the
+        #    guard can prove the outbound body by byte-equality.
+        requested_model = model or council.get("model")
+        packet_text, composition = _egress.build_its_packet(its_scaffold_version,
+                                                            components)
+        composition["provider_binding"] = {
+            "gpt_model": gpt_adapter.resolve_model(requested_model),
+            "max_output_tokens": 4000}
+        # 9. Both reviewers receive the composed packet; the guard owns the
+        #    canonical body/prompt. No capability statement / codex_reference_block
+        #    / _guidance_header / _augment_context on this path.
+        gpt_body = packet_text
+        codex_prompt = packet_text
+        gpt_delivery = "its_composition"
+        all_artifact_ids = []
+        artifact_hashes = []
+        ctx_sha = hashlib.sha256(context.encode("utf-8")).hexdigest()
+        packet_bytes = len(codex_prompt.encode("utf-8"))
+        its_finding_sources = [_scaffold_node_id] + summary_ids + _existing_src_ids
+        its_finding_ids = {}
+
+        def _its_register_finding(_reviewer, _result):
+            """Scan + register one reviewer verdict as a hash-bound derived
+            finding (requirement 7). Returns the record on a clean scan, or None
+            on residue. Deterministic and idempotent (id = kind+round+content
+            sha), so re-invoking for a reviewer whose result is served from the
+            cross-invocation pending cache recovers the SAME artifact id rather
+            than dropping it — a partially-failed round that is re-run must still
+            record every finding pointer and must not brick later rounds."""
+            _kind = "gpt_finding" if _reviewer == "gpt" else "codex_finding"
+            _frec = cwia.register(
+                root, council_id, kind=_kind, producer=_reviewer,
+                round_no=round_no, phase=phase,
+                content=cwia.render_verdict(_result["verdict"]),
+                scaffold_version=its_scaffold_version,
+                source_ids=its_finding_sources)
+            return _frec if (_frec.get("scan") or {}).get("passed") is True else None
+        # 10. Egress context carries the lane and the composition manifest.
+        egress_context = _egress.EgressContext(
+            "internal_technical", work_item_id=council.get("work_item_id"),
+            graph=graph_obj, candidate_id=cand,
+            source_bindings=council.get("source_bindings") or [],
+            require_graph=True, lane="internal_technical",
+            its_composition=composition)
+        try:
+            effective_tier = egress_context.resolve().get("tier", "sensitive")
+        except _egress.EgressBlocked:
+            effective_tier = "sensitive"
+        kw = dict(thread_id=council.get("thread_id"),
+                  work_item_id=council.get("work_item_id"),
+                  packet_id=council.get("packet_id"),
+                  council_id=council_id, round_no=round_no, phase=phase,
+                  egress_context=egress_context)
+        # 11. Budget estimate uses the guard-owned ITS instruction (replaces the
+        #     standard adapter INSTRUCTION on this path).
+        est_tokens = estimate_tokens(len(_egress.ITS_GPT_INSTRUCTION) + len(packet_text))
+        # Budget fail-fast on the FINAL assembled ITS packet, before any attempt.
+        budget = phase_input_budget(phase)
+        if est_tokens > budget:
+            return {"committed": False, "substantive": False, "round": round_no,
+                    "packet_undeliverable": True, "statuses": {}, "attempts": {},
+                    "estimated_input_tokens": est_tokens, "budget": budget,
+                    "reason": ("assembled packet (~{} estimated input tokens) exceeds the "
+                               "{} phase budget of {}; no reviewer attempt was spent. "
+                               "Shrink the packet or raise CLEARWRIGHT_GPT_{}_INPUT_BUDGET."
+                               ).format(est_tokens, phase, budget, str(phase or "plan").upper())}
+        codex_cwd = repo
+        codex_timeout = max(int(timeout or 0),
+                            codex_adapter.effective_timeout(packet_bytes, base=timeout))
+        plan = [
+            ("gpt", gpt_fn, gpt_adapter.ADAPTER_VERSION,
+             dict(model=requested_model, timeout=timeout), gpt_body),
+            ("codex", codex_fn, codex_adapter.ADAPTER_VERSION,
+             dict(repo=codex_cwd, timeout=codex_timeout), codex_prompt),
+        ]
     else:
-        gpt_body = cwa.GPT_CAPABILITY_STATEMENT + "\n\n" + context
+        # Artifacts: remembered on the council across rounds; every pinned copy is
+        # re-verified against its FULL sha256 immediately before dispatch.
+        import clearwright_artifacts as cwa
+        all_artifact_ids = sorted(set(list(council.get("artifact_ids") or []) +
+                                      [a for a in (artifact_ids or []) if a]))
+        if all_artifact_ids != list(council.get("artifact_ids") or []):
+            council["artifact_ids"] = all_artifact_ids
+            _persist_council(root, council)
+        artifact_hashes = []
+        try:
+            for aid in all_artifact_ids:
+                artifact_hashes.append(cwa.verify(root, aid)["sha256"])
+        except cwa.ArtifactError as exc:
+            return {"committed": False, "substantive": False, "round": round_no,
+                    "hard_gate": True, "artifact_error": str(exc),
+                    "statuses": {}, "attempts": {},
+                    "reason": "artifact verification failed before dispatch: {}".format(exc)}
 
-    # Budget fail-fast on the FINAL assembled GPT packet, before any attempt.
-    packet_chars = len(gpt_adapter.INSTRUCTION) + len(gpt_body)
-    est_tokens = estimate_tokens(packet_chars)
-    if est_tokens > budget:
-        return {"committed": False, "substantive": False, "round": round_no,
-                "packet_undeliverable": True, "statuses": {}, "attempts": {},
-                "estimated_input_tokens": est_tokens, "budget": budget,
-                "reason": ("assembled packet (~{} estimated input tokens) exceeds the "
-                           "{} phase budget of {}; no reviewer attempt was spent. "
-                           "Shrink the packet or raise CLEARWRIGHT_GPT_{}_INPUT_BUDGET."
-                           ).format(est_tokens, phase, budget, str(phase or "plan").upper())}
+        # Capability-aware packaging. GPT (text-only) always receives its capability
+        # statement; the full line-numbered artifact is inlined only when the FINAL
+        # assembled packet fits the phase budget, otherwise a bounded excerpt pack
+        # with a plain manifest. Codex (file-capable) receives a concise prompt with
+        # absolute pinned paths + expected hashes to read from disk.
+        budget = phase_input_budget(phase)
+        divisor_chars = budget * 3  # chars corresponding to the token budget (est.)
+        gpt_delivery = "none"
+        gpt_body = context
+        codex_prompt = context
+        if all_artifact_ids:
+            gpt_base = cwa.GPT_CAPABILITY_STATEMENT + "\n\n" + context + "\n\n"
+            inline_parts, inline_ok = [], True
+            for aid in all_artifact_ids:
+                text, _rec = cwa.inline_rendering(root, aid)
+                inline_parts.append(text)
+            candidate = gpt_base + "\n\n".join(inline_parts)
+            if estimate_tokens(len(gpt_adapter.INSTRUCTION) + len(candidate)) <= budget:
+                gpt_body, gpt_delivery = candidate, "inline_full"
+            else:
+                remaining = max(4000, divisor_chars - len(gpt_adapter.INSTRUCTION)
+                                - len(gpt_base) - 2000)
+                per = max(2000, remaining // max(1, len(all_artifact_ids)))
+                # Target the excerpts at the exact lines the review context cites:
+                # the reviewer's own citations ARE the evidence it needs to check.
+                focus = cwa.cited_line_numbers(context)
+                packs = [cwa.excerpt_pack(root, aid, per, focus_lines=focus)[0]
+                         for aid in all_artifact_ids]
+                gpt_body, gpt_delivery = gpt_base + "\n\n".join(packs), "excerpt_pack"
+            codex_prompt = context + "\n\n" + cwa.codex_reference_block(root, all_artifact_ids)
+        else:
+            gpt_body = cwa.GPT_CAPABILITY_STATEMENT + "\n\n" + context
 
-    ctx_sha = hashlib.sha256(context.encode("utf-8")).hexdigest()
-    packet_bytes = len(codex_prompt.encode("utf-8"))
-    requested_model = model or council.get("model")
-    kw = dict(thread_id=council.get("thread_id"),
-              work_item_id=council.get("work_item_id"),
-              packet_id=council.get("packet_id"),
-              council_id=council_id, round_no=round_no, phase=phase)
+        # Budget fail-fast on the FINAL assembled GPT packet, before any attempt.
+        packet_chars = len(gpt_adapter.INSTRUCTION) + len(gpt_body)
+        est_tokens = estimate_tokens(packet_chars)
+        if est_tokens > budget:
+            return {"committed": False, "substantive": False, "round": round_no,
+                    "packet_undeliverable": True, "statuses": {}, "attempts": {},
+                    "estimated_input_tokens": est_tokens, "budget": budget,
+                    "reason": ("assembled packet (~{} estimated input tokens) exceeds the "
+                               "{} phase budget of {}; no reviewer attempt was spent. "
+                               "Shrink the packet or raise CLEARWRIGHT_GPT_{}_INPUT_BUDGET."
+                               ).format(est_tokens, phase, budget, str(phase or "plan").upper())}
 
-    # Codex readable-workspace contract (verified in the acceptance regression:
-    # the read-only sandbox reads within its workspace ROOT, not arbitrary
-    # absolute paths). When artifacts are in play, Codex runs with the artifact
-    # registry as its working directory so the pinned absolute paths fall inside
-    # the readable root — narrowly scoped, no broad permission granted. Without
-    # artifacts the caller's --repo remains the working directory.
-    codex_cwd = os.path.join(root, "review_artifacts") if all_artifact_ids else repo
-    codex_timeout = max(int(timeout or 0),
-                        codex_adapter.effective_timeout(
-                            packet_bytes + sum(
-                                cwa.get(root, a).get("bytes", 0)
-                                for a in all_artifact_ids if cwa.get(root, a)),
-                            base=timeout))
-    plan = [
-        ("gpt", gpt_fn, gpt_adapter.ADAPTER_VERSION,
-         dict(model=requested_model, timeout=timeout), gpt_body),
-        ("codex", codex_fn, codex_adapter.ADAPTER_VERSION,
-         dict(repo=codex_cwd, timeout=codex_timeout), codex_prompt),
-    ]
+        ctx_sha = hashlib.sha256(context.encode("utf-8")).hexdigest()
+        packet_bytes = len(codex_prompt.encode("utf-8"))
+        requested_model = model or council.get("model")
+
+        # SDEG egress boundary (Decision 1A/2A): the tier travels with the council
+        # (set from the work item's declared data_sensitivity at creation). The
+        # guard validates the EXACT outbound bytes at each adapter; an un-annotated
+        # council defaults to the standard tier, where every byte is still scanned
+        # by the guard's tripwires and the final-serialized-request check. Operator-
+        # declared SENSITIVE work items carry "sensitive" and may dispatch only a
+        # construction-proven closed-schema derivative.
+        import clearwright_egress_guard as _egress
+        tier = "sensitive" if council.get("data_sensitivity") == "sensitive" else "standard"
+        # Live lineage: rebuild the immutable candidate graph recorded at packet
+        # assembly. require_graph=True means a missing graph/candidate fails closed
+        # on real dispatch — there is NO fallback to the declared tier. The guard
+        # resolves effective sensitivity from the graph and TOCTOU-re-verifies the
+        # bound source hashes at send.
+        _lineage = council.get("lineage")
+        _cand = council.get("lineage_candidate")
+        _graph_obj = _egress.LineageGraph.from_records(_lineage) if _lineage else None
+        # CONTENT-TO-LINEAGE BINDING (engine choke point, covers EVERY caller):
+        # the persisted lineage was built for a specific packet content, stamped
+        # with its sha256. If the content dispatched THIS round differs from the
+        # stamp (a continuation that did not rebuild the lineage — e.g. the lower-
+        # level engine CLI, or any future caller), the graph does not describe these
+        # bytes: force SENSITIVE so a stale STANDARD graph cannot launder fresh
+        # content. Fail-closed and caller-independent.
+        _incoming_sha = hashlib.sha256((base_context or "").encode("utf-8")).hexdigest()
+        _stamp = council.get("lineage_context_sha256")
+        # A lineage graph present WITHOUT a matching content stamp cannot be trusted
+        # to describe these bytes (create_council persists a graph but no stamp; an
+        # engine-CLI or early-return path may dispatch it). Absent OR mismatched
+        # stamp => fail closed to SENSITIVE. Only a stamp that matches the incoming
+        # content lets the graph's resolution stand.
+        if _graph_obj is not None and (not _stamp or _stamp != _incoming_sha):
+            tier = "sensitive"
+        # EVERY inlined artifact is content-bearing but carries NO git provenance
+        # (register() pins any path). They reach the packet through the artifact_id /
+        # council-remembered channel, which bypasses --source, so they MUST be added
+        # to the candidate's ancestry here, at the choke point where all_artifact_ids
+        # is finalized (it includes ids remembered on the council across rounds).
+        # Each is a SENSITIVE RAW node, so any artifact-bearing council resolves
+        # SENSITIVE and a declared-standard dispatch fails closed; a genuinely
+        # STANDARD file must be declared as --source (git-verified), not --artifact.
+        _extra_sources = []
+        if all_artifact_ids and _graph_obj is not None and _cand is not None:
+            for _aid in all_artifact_ids:
+                _nid = "art-" + hashlib.sha256(_aid.encode()).hexdigest()[:12]
+                _graph_obj.add(_nid, _egress.CLASS_RAW,
+                               provenance={"class": "sensitive_source",
+                                           "reason": "inlined_artifact"})
+                _extra_sources.append(_nid)
+        # Round >=2 packets carry machine-generated augmentation (prior reviewer
+        # findings + Claude's reconciliation free-text) that is NOT named by the
+        # lineage and NOT covered by the base-content stamp. It has no verified
+        # STANDARD ancestry, so fold it in as a SENSITIVE ancestor: a declared-
+        # standard multi-round council resolves SENSITIVE and fails closed.
+        if _augmented and _graph_obj is not None and _cand is not None:
+            _graph_obj.add("round-augmentation", _egress.CLASS_RAW,
+                           provenance={"class": "sensitive_source",
+                                       "reason": "round_augmentation"})
+            _extra_sources.append("round-augmentation")
+        if _extra_sources and _graph_obj is not None and _cand is not None:
+            _cn = _graph_obj.get(_cand) or {}
+            _graph_obj.add(_cand, _egress.CLASS_MACHINE,
+                           source_ids=list(_cn.get("source_ids") or []) + _extra_sources,
+                           domain=_cn.get("domain"))
+        egress_context = _egress.EgressContext(
+            tier, work_item_id=council.get("work_item_id"),
+            graph=_graph_obj, candidate_id=_cand,
+            source_bindings=council.get("source_bindings") or [],
+            require_graph=True)
+        # The EFFECTIVE (lineage-derived) sensitivity — not the declared tier —
+        # decides digest hygiene below. Fail-closed to sensitive if the lineage
+        # cannot resolve (missing graph, sensitive ancestor, etc.).
+        try:
+            _resolved = egress_context.resolve()
+            effective_tier = _resolved.get("tier", "sensitive")
+        except _egress.EgressBlocked:
+            effective_tier = "sensitive"
+
+        kw = dict(thread_id=council.get("thread_id"),
+                  work_item_id=council.get("work_item_id"),
+                  packet_id=council.get("packet_id"),
+                  council_id=council_id, round_no=round_no, phase=phase,
+                  egress_context=egress_context)
+
+        # Codex readable-workspace contract (verified in the acceptance regression:
+        # the read-only sandbox reads within its workspace ROOT, not arbitrary
+        # absolute paths). When artifacts are in play, Codex runs with the artifact
+        # registry as its working directory so the pinned absolute paths fall inside
+        # the readable root — narrowly scoped, no broad permission granted. Without
+        # artifacts the caller's --repo remains the working directory.
+        codex_cwd = os.path.join(root, "review_artifacts") if all_artifact_ids else repo
+        codex_timeout = max(int(timeout or 0),
+                            codex_adapter.effective_timeout(
+                                packet_bytes + sum(
+                                    cwa.get(root, a).get("bytes", 0)
+                                    for a in all_artifact_ids if cwa.get(root, a)),
+                                base=timeout))
+        plan = [
+            ("gpt", gpt_fn, gpt_adapter.ADAPTER_VERSION,
+             dict(model=requested_model, timeout=timeout), gpt_body),
+            ("codex", codex_fn, codex_adapter.ADAPTER_VERSION,
+             dict(repo=codex_cwd, timeout=codex_timeout), codex_prompt),
+        ]
 
     # Make the plan visible in the conversation: the timeline should read as the
     # complete exchange (operator request -> plan -> reviews -> reconciliation ->
     # outcome), so each round posts a bounded digest of what was dispatched. The
     # full packet stays in the council record, hash-bound; only a capped digest
-    # (never secrets — the packet already passed the secret scan) is posted.
-    digest = " ".join(context.split())[:400]
+    # is posted. SDEG: the digest is scanned by the egress guard BEFORE it is
+    # written to the durable thread, so a mislabeled/raw packet can never echo
+    # sensitive content into a persisted record (content-free on a hit).
+    if effective_tier != "standard":
+        # Effective (lineage-derived) sensitivity, not the declared tier: a
+        # mis-declared-standard packet with sensitive lineage still withholds,
+        # and an internal_technical packet is withheld the same way (content-free
+        # digest). Only a resolved-STANDARD packet posts a redacted digest.
+        digest = "[content digest withheld: {}-tier council]".format(effective_tier)
+    else:
+        digest = " ".join(context.split())[:400]
+        try:
+            import clearwright_egress_guard as _eg
+            _safe, _findings = _eg.redact_for_persistence(digest)
+            digest = _safe
+        except Exception:  # noqa: BLE001 - a scan failure fails closed
+            digest = "[digest withheld: pre-persistence scan unavailable]"
     try:
         note = ("Review Council round {} starting ({} phase, {}). GPT delivery: {}. "
                 "Artifacts: {}. Context digest: {}{} [full packet sha256 {} in the "
@@ -898,6 +1337,28 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
 
         cached = pending.get(key)
         if cached and cached.get("fingerprint") == fp and _validated(cached.get("result")):
+            if its_lane:
+                # A cached ITS result was scan-registered on the earlier
+                # invocation; recover its finding-artifact id (idempotent
+                # re-register) so a re-run of a partially-failed round still
+                # records this reviewer's finding pointer. A residue result is
+                # never cached, so the re-scan passes; the defensive None branch
+                # cannot leave a null id in a committed round.
+                _rec = _its_register_finding(reviewer, cached["result"])
+                if _rec is None:
+                    statuses[reviewer] = "residue_blocked"
+                    results[reviewer] = None
+                    attempts_used[reviewer] = 0
+                    continue
+                its_finding_ids[reviewer] = _rec["artifact_id"]
+            elif _verdict_residue_hit(cached["result"].get("verdict")):
+                # V2: re-scan the cached NON-ITS verdict before reuse; a hard
+                # residue hit blocks reuse and the round does not commit
+                # (mirrors the ITS residue gate above).
+                statuses[reviewer] = "residue_blocked"
+                results[reviewer] = None
+                attempts_used[reviewer] = 0
+                continue
             results[reviewer] = cached["result"]
             statuses[reviewer] = "review"
             attempts_used[reviewer] = 0  # reused, no new call
@@ -929,12 +1390,34 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
             if (result or {}).get("hard_gate"):
                 break
             if _validated(result):
+                if its_lane:
+                    # ITS reviewer-output residue gate (requirement 7): the
+                    # verdict is scanned and registered as a derived finding
+                    # BEFORE it is cached or counted. Residue -> the content-free
+                    # record is the durable audit trail; the result is NOT cached,
+                    # NOT counted as a review, so the round cannot commit.
+                    _frec = _its_register_finding(reviewer, result)
+                    if _frec is None:
+                        statuses[reviewer] = "residue_blocked"
+                        result = None
+                        break
+                    its_finding_ids[reviewer] = _frec["artifact_id"]
+                elif _verdict_residue_hit(result.get("verdict")):
+                    # V2: universal pre-persistence residue gate on the NON-ITS
+                    # path. A hard residue hit in the reviewer's own verdict text
+                    # discards the result: it is NOT cached and the round cannot
+                    # commit (mirrors the ITS reviewer-output residue gate).
+                    statuses[reviewer] = "residue_blocked"
+                    result = None
+                    break
                 pending[key] = {"fingerprint": fp, "result": result, "at": cwm._now_iso()}
                 _persist_council(root, council)
                 break
         results[reviewer] = result
         attempts_used[reviewer] = attempt_state.get(key, {}).get("calls", 0)
-        if result is None:
+        if statuses.get(reviewer) == "residue_blocked":
+            pass  # residue (ITS or non-ITS): not a counted review; not persisted
+        elif result is None:
             statuses[reviewer] = "attempts_exhausted"
         elif result.get("hard_gate"):
             statuses[reviewer] = "hard_gate"
@@ -963,11 +1446,24 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
                       "fingerprints": fingerprints, "attempts": attempts_used,
                       "artifact_ids": all_artifact_ids,
                       "artifact_hashes": artifact_hashes,
-                      "delivery": {"gpt": gpt_delivery if all_artifact_ids else "text_only",
+                      "delivery": {"gpt": gpt_delivery if (all_artifact_ids or its_lane)
+                                          else "text_only",
                                    "codex": ("stdin_prompt+pinned_path"
                                              if all_artifact_ids else "stdin_prompt")},
                       "gpt": results["gpt"], "codex": results["codex"],
                       "reconciliation": None}
+        if its_lane:
+            # Three DISTINCT audit axes: content sensitivity stays
+            # council["data_sensitivity"]; provenance class is the lineage
+            # resolution; lane is dispatch_lane. The registered finding artifact
+            # ids let a later round fold this round forward as verified components.
+            round_data["its"] = {
+                "lane": "internal_technical",
+                "effective_sensitivity": "internal_technical_standard",
+                "scaffold_version": its_scaffold_version,
+                "composition": composition,
+                "artifact_ids": {"gpt": its_finding_ids.get("gpt"),
+                                 "codex": its_finding_ids.get("codex")}}
         save_round(root, council, round_data)
         for rev, _f, _v, _e, _p in plan:
             pending.pop(_attempt_key(round_no, rev), None)
@@ -975,7 +1471,8 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
         _persist_council(root, council)
         return {"committed": True, "substantive": True, "round": round_no,
                 "hard_gate": False, "statuses": statuses, "attempts": attempts_used,
-                "gpt_delivery": gpt_delivery if all_artifact_ids else "text_only",
+                "gpt_delivery": gpt_delivery if (all_artifact_ids or its_lane)
+                                else "text_only",
                 "estimated_input_tokens": est_tokens,
                 "reason": "round committed"}
 
@@ -1000,6 +1497,38 @@ def attach_reconciliation(root, council, reconciliation):
     normalized = cwv.validate_reconciliation(reconciliation)
     latest = rounds[-1]
     latest["reconciliation"] = normalized
+    if council.get("dispatch_lane") == "internal_technical":
+        # ITS lane: the reconciliation is a derived artifact too. Scan and
+        # register it BEFORE save_round; a residue hit fails closed and the round
+        # file is NOT updated. On success record the artifact id so a later round
+        # can fold this reconciliation forward as a verified component.
+        import clearwright_its_artifacts as cwia
+        _its = latest.get("its") or {}
+        _fids = _its.get("artifact_ids") or {}
+        rec = cwia.register(
+            root, council["council_id"], kind="reconciliation", producer="claude",
+            round_no=latest["round"], phase=council.get("phase"),
+            content=cwia.render_reconciliation(normalized),
+            scaffold_version=_its.get("scaffold_version"),
+            source_ids=[_fids.get("gpt"), _fids.get("codex")])
+        if (rec.get("scan") or {}).get("passed") is not True:
+            raise cwv.VerdictError("reconciliation failed the ITS pre-persistence "
+                                   "residue scan; nothing was attached")
+        _fids["reconciliation"] = rec["artifact_id"]
+        _its["artifact_ids"] = _fids
+        latest["its"] = _its
+    else:
+        # V2: universal pre-persistence residue gate on the NON-ITS path. The
+        # COMPLETE canonical normalized reconciliation object (the exact object
+        # save_round persists) is residue-scanned before it is durably attached —
+        # not a manually selected field list, so every nested dict/list, finding,
+        # reason, evidence value, plan change, resolution note, blocker, summary,
+        # and any future normalized field is covered. A hard hit, or any
+        # serialization/scanner failure, fails closed: VerdictError is raised,
+        # save_round is never reached, and the round file is NOT updated.
+        if _reconciliation_residue_hit(normalized):
+            raise cwv.VerdictError("reconciliation failed the pre-persistence "
+                                   "residue scan; nothing was attached")
     save_round(root, council, latest)
 
     # Post the reconciliation durably so dissent stays visible in the thread.
@@ -1098,6 +1627,30 @@ def set_approved_scope(root, council, scope):
         council["approved_scope"] = str(scope)
         council["approved_scope_sha256"] = _scope_hash(scope)
         _atomic_write_json(os.path.join(council_dir(root, council["council_id"]), "council.json"), council)
+    return council
+
+
+def stamp_context(root, council, context_sha256):
+    """Bind the council's live lineage to the EXACT packet content it was built
+    for by recording that content's sha256. run_round refuses to dispatch under
+    a lineage whose stamp does not match the current packet, so a stale graph
+    cannot launder fresh content (caller-independent)."""
+    council["lineage_context_sha256"] = context_sha256
+    _atomic_write_json(os.path.join(council_dir(root, council["council_id"]),
+                                    "council.json"), council)
+    return council
+
+
+def set_lineage(root, council, lineage, candidate, bindings):
+    """Replace the council's live lineage with the CURRENT round's graph and
+    persist it. The lineage is a per-dispatch provenance proof, not a durable
+    identity, so a continuation round rebinds to the content it is actually
+    about (a stale round-1 graph must never gate round-2 bytes)."""
+    council["lineage"] = lineage
+    council["lineage_candidate"] = candidate
+    council["source_bindings"] = bindings
+    _atomic_write_json(os.path.join(council_dir(root, council["council_id"]),
+                                    "council.json"), council)
     return council
 
 

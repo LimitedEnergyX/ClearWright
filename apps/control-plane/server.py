@@ -1413,9 +1413,15 @@ def _codex_cli_on_path():
 
 
 def _openai_key_present():
-    """Cheap capability probe only: is OPENAI_API_KEY present in the process
-    environment? Returns a boolean and NEVER the value."""
-    return bool(os.environ.get("OPENAI_API_KEY"))
+    """Cheap capability probe only: is a provider credential resolvable?
+    Delegates to the egress guard (SDEG Decision 2A: credential resolution lives
+    solely in the guard) so the env + user-scope fallback are both considered.
+    Returns a boolean and NEVER the value."""
+    try:
+        import clearwright_egress_guard as _egress
+        return _egress.provider_key_available()
+    except Exception:  # noqa: BLE001
+        return bool(os.environ.get("OPENAI_API_KEY"))
 
 
 def build_health(root, mode=None, durable=None, codex_check=_codex_cli_on_path,
@@ -1509,6 +1515,27 @@ def build_health(root, mode=None, durable=None, codex_check=_codex_cli_on_path,
             capabilities["configured_gpt_model"] = _gpt.resolve_model()
         except Exception:  # noqa: BLE001
             capabilities["configured_gpt_model"] = None
+        # SDEG egress-guard startup self-test, surfaced in health. A failed
+        # self-test is an ERROR (drives status red): the control plane must not
+        # be trusted to dispatch councils until the guarded adapters, policy, and
+        # scanner are confirmed live. Content-free.
+        try:
+            import clearwright_egress_guard as _egress
+            st = _egress.self_test()
+            pol = (st.get("checks", {}) or {}).get("policy", {}) or {}
+            capabilities["egress_guard"] = {
+                "ok": bool(st.get("ok")),
+                "policy_version": pol.get("policy_version"),
+                "policy_sha256": pol.get("policy_sha256")}
+            if not st.get("ok"):
+                errors.append("Egress guard self-test failed ({}); council "
+                              "dispatch must be refused until resolved.".format(
+                                  ", ".join(k for k, v in (st.get("checks") or {}).items()
+                                            if isinstance(v, dict) and not v.get("ok"))))
+        except Exception:  # noqa: BLE001
+            capabilities["egress_guard"] = {"ok": False}
+            errors.append("Egress guard self-test could not run; council "
+                          "dispatch must be refused until resolved.")
         health["capabilities"] = capabilities
         if not capabilities["worker_bridge"] or not capabilities["proof_tool"]:
             errors.append("Worker bridge or proof tool is missing from tools/.")

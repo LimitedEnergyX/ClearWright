@@ -36,6 +36,13 @@ import time
 import clearwright_message as cwm
 import clearwright_work as cww
 import clearwright_verdict as cwv
+import clearwright_egress_guard as _egress
+
+# SDEG (Decision 2A): Codex dispatch is stdin-only and flows ONLY through the
+# egress guard. The marker lets the guard self-test confirm the guarded adapter
+# is live before the control plane accepts council dispatch.
+GUARDED = True
+_egress.register_adapter("clearwright_codex_review")
 
 STDIN_HANG_MARKER = "Reading additional input from stdin"
 MIN_SUBSTANTIVE_BYTES = 40
@@ -134,21 +141,31 @@ def effective_timeout(packet_bytes, base=None, env_get=os.environ.get):
     return min(cap, base + per * math.ceil((packet_bytes or 0) / 100_000))
 
 
-def run_codex(prompt, timeout, cwd=None):
+def run_codex(prompt, timeout, cwd=None, egress_context=None):
     """Invoke the local Codex CLI read-only and non-interactively, passing the
     prompt via STDIN (with EOF, so the old "waiting on stdin" hang cannot
     occur), with a hard timeout. Returns (output, telemetry). Never raises on
     timeout; the telemetry records timed_out. (Not unit-tested; the
-    classification/posting logic around it is.)"""
+    classification/posting logic around it is.)
+
+    Egress boundary (SDEG, Decision 2A): the EXACT stdin bytes are validated by
+    the egress guard, which also owns the subprocess launch (stdin-only; cwd is
+    a fresh temp dir, never a ClearWright tree). ``egress_context`` is REQUIRED;
+    its absence is fail-closed (returns a content-free egress_blocked telemetry,
+    never a dispatch)."""
     cmd = build_codex_cmd()
     start = time.monotonic()
     try:
-        proc = subprocess.run(
-            cmd, input=(prompt or ""), capture_output=True, text=True,
-            timeout=timeout, cwd=cwd, encoding="utf-8", errors="replace")
+        proc = _egress.codex_launch(cmd, prompt, timeout, context=egress_context,
+                                    caller="clearwright_codex_review")
         elapsed = time.monotonic() - start
         output = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
         return output, build_telemetry(output, proc.returncode, elapsed, timed_out=False)
+    except _egress.EgressBlocked as exc:
+        elapsed = time.monotonic() - start
+        tel = build_telemetry("", None, elapsed, timed_out=False)
+        tel["egress_blocked"] = exc.reason
+        return "", tel
     except subprocess.TimeoutExpired as exc:
         elapsed = time.monotonic() - start
         partial = (exc.stdout or "")
@@ -270,7 +287,7 @@ def review_structured(root, *, thread_id=None, work_item_id=None, packet_id=None
                       council_id=None, round=None, phase="plan", context_text="",
                       prompt=None, timeout=90, runner=run_codex,
                       available_fn=codex_available, cwd=None, actor="claude",
-                      note_on_failure=True):
+                      note_on_failure=True, egress_context=None):
     """Run a real Codex read-only review and return the SAME structured verdict
     shape as the GPT adapter. Posts a codex/reviewer message ONLY on a real,
     successful, substantive, and validated run. A hang, timeout, empty run, or
@@ -298,8 +315,30 @@ def review_structured(root, *, thread_id=None, work_item_id=None, packet_id=None
         return note("Codex CLI unavailable; no Codex participation claimed.",
                     "unavailable", build_telemetry("", None, 0.0))
 
-    full_prompt = prompt or (STRUCTURED_PROMPT + "\n\n" + (context_text or ""))
-    output, telemetry = runner(full_prompt, timeout, cwd)
+    # On the sensitive tier the guard owns the canonical stdin (a fixed scaffold
+    # plus exactly one construction-proven derivative block, nothing else) and
+    # validates it by byte-equality. On the standard tier the normal structured
+    # prompt is used and the guard validates the exact bytes with the tripwire.
+    if egress_context is not None and getattr(egress_context, "tier", None) == "sensitive":
+        full_prompt = _egress.build_sensitive_codex_prompt(context_text or "")
+    elif getattr(egress_context, "tier", None) == "internal_technical":
+        # On the ITS tier the guard owns the canonical stdin (the guard-owned
+        # instruction + "\n\n" + the composed packet); context_text IS the
+        # composed ITS packet built by the engine.
+        full_prompt = _egress.build_its_codex_prompt(context_text or "")
+    else:
+        full_prompt = prompt or (STRUCTURED_PROMPT + "\n\n" + (context_text or ""))
+    try:
+        output, telemetry = runner(full_prompt, timeout, cwd,
+                                   egress_context=egress_context)
+    except TypeError:
+        # A test-injected runner may not accept egress_context; the guard is
+        # still enforced by the production run_codex path.
+        output, telemetry = runner(full_prompt, timeout, cwd)
+    if isinstance(telemetry, dict) and telemetry.get("egress_blocked"):
+        return note("Codex dispatch blocked by the egress guard ({}); no Codex "
+                    "participation claimed.".format(telemetry["egress_blocked"]),
+                    "egress_blocked", telemetry)
     kind = classify(True, telemetry, output)
     if kind == "timeout":
         return note("Codex CLI timed out after {}s; no Codex participation claimed.".format(timeout),
@@ -323,9 +362,11 @@ def review_structured(root, *, thread_id=None, work_item_id=None, packet_id=None
         return result
 
     tel = _structured_telemetry(telemetry, council_id, round, phase, "review")
+    # SDEG: scan reviewer output before persistence (content-free on a hit).
+    _safe_body, _ = _egress.redact_for_persistence(_structured_body(verdict, tel))
     msg = _note(root, {"thread_id": thread_id, "work_item_id": work_item_id,
                        "packet_id": packet_id}, "codex", "reviewer", "inbound",
-                "codex-cli", _structured_body(verdict, tel))
+                "codex-cli", _safe_body)
     # Provenance: a validated, substantive codex-cli run.
     return {"ok": True, "posted": True, "reviewer": "codex", "verdict": verdict,
             "validated": True, "source": "codex-cli", "telemetry": tel,

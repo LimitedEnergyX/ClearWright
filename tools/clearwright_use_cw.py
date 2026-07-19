@@ -109,6 +109,36 @@ def _load(inline, path):
     return ""
 
 
+def _resolve_approved_scope(args):
+    """Fold --approved-scope-file into args.approved_scope. Returns an exit code
+    to abort with, or None to proceed. The two forms are mutually exclusive
+    (EXIT_USAGE). The file is read preserving interior CRLFs verbatim; exactly
+    one terminal \\r?\\n is stripped so a scope FILE (which normally ends in a
+    newline) hashes identically to the same text passed inline via
+    --approved-scope."""
+    path = getattr(args, "approved_scope_file", None)
+    if not path:
+        return None
+    if getattr(args, "approved_scope", None) is not None:
+        return _emit({"ok": False, "error": "approved_scope_conflict",
+                      "detail": "pass only one of --approved-scope / "
+                                "--approved-scope-file"},
+                     EXIT_USAGE, getattr(args, "json", True))
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            text = fh.read()
+    except (FileNotFoundError, UnicodeDecodeError, OSError) as exc:
+        return _emit({"ok": False, "error": "approved_scope_file_unreadable",
+                      "detail": type(exc).__name__},
+                     EXIT_USAGE, getattr(args, "json", True))
+    if text.endswith("\r\n"):
+        text = text[:-2]
+    elif text.endswith("\n"):
+        text = text[:-1]
+    args.approved_scope = text
+    return None
+
+
 def _emit(result, code, as_json=True):
     text = json.dumps(result) if as_json else json.dumps(result, indent=2)
     print(text)
@@ -1420,6 +1450,11 @@ def _add_council_args(p):
                         "only; nothing submitted, zero reviewer cost.")
     p.add_argument("--model", default=None, metavar="NAME")
     p.add_argument("--approved-scope", default=None, metavar="TEXT")
+    p.add_argument("--approved-scope-file", default=None, metavar="PATH",
+                   help="Read the approved scope from a file (mutually exclusive "
+                        "with --approved-scope; interior newlines preserved "
+                        "verbatim, exactly one terminal newline stripped so a "
+                        "scope file hashes identically to the same text inline).")
     p.add_argument("--min-rounds", type=int, default=cwrc.DEFAULT_MIN_ROUNDS,
                    help="Substantive-round floor (bounds: 2 <= min <= max <= 5).")
     p.add_argument("--max-rounds", type=int, default=cwrc.DEFAULT_MAX_ROUNDS,
@@ -1471,6 +1506,11 @@ def build_parser():
     p_start.add_argument("--thread-id", default=None, metavar="ID")
     p_start.add_argument("--packet-id", default=None, metavar="ID")
     p_start.add_argument("--approved-scope", default=None, metavar="TEXT")
+    p_start.add_argument("--approved-scope-file", default=None, metavar="PATH",
+                         help="Read the approved scope from a file (mutually "
+                              "exclusive with --approved-scope; interior "
+                              "newlines preserved, one terminal newline "
+                              "stripped for inline-parity hashing).")
     p_start.add_argument("--actor", default="claude", metavar="ID")
     p_start.add_argument("--json", action="store_true")
     p_start.set_defaults(func=cmd_start)
@@ -1583,6 +1623,10 @@ def main():
     t0 = _time.monotonic()
     code = EXIT_RUNTIME
     try:
+        sc = _resolve_approved_scope(args)
+        if sc is not None:
+            code = sc
+            return code
         code = args.func(args)
         return code
     finally:

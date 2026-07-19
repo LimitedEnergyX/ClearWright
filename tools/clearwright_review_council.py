@@ -787,7 +787,13 @@ def _verdict_residue_hit(verdict):
         for item in (v.get(field) or []):
             if isinstance(item, str):
                 parts.append(item)
-    _safe, findings = guard.redact_for_persistence("\n".join(parts))
+    # Fail closed on ANY scanner error (defense in depth): redact_for_persistence
+    # already fails closed internally to a scanner_exception finding, but an
+    # unexpected exception at the call site is also treated as a hard residue hit.
+    try:
+        _safe, findings = guard.redact_for_persistence("\n".join(parts))
+    except Exception:  # noqa: BLE001 - scanner failure must not open the gate
+        return True
     return any(k != "unicode_confusable" for k in (findings or {}))
 
 
@@ -1500,8 +1506,15 @@ def attach_reconciliation(root, council, reconciliation):
         parts.extend(str((f or {}).get("finding") or "")
                      for f in (normalized.get("rejected_findings") or []))
         parts.extend(str(b) for b in (normalized.get("unresolved_blockers") or []))
-        _safe, _findings = guard.redact_for_persistence("\n".join(parts))
-        if any(k != "unicode_confusable" for k in (_findings or {})):
+        # Fail closed on ANY scanner error (defense in depth): redact_for_persistence
+        # already returns a scanner_exception finding rather than raising, but an
+        # unexpected exception at the call site is also treated as a hard hit.
+        try:
+            _safe, _findings = guard.redact_for_persistence("\n".join(parts))
+            _hard = any(k != "unicode_confusable" for k in (_findings or {}))
+        except Exception:  # noqa: BLE001 - scanner failure must not open the gate
+            _hard = True
+        if _hard:
             raise cwv.VerdictError("reconciliation failed the pre-persistence "
                                    "residue scan; nothing was attached")
     save_round(root, council, latest)

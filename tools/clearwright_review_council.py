@@ -773,6 +773,24 @@ def _granted_extra(state):
     return sum(int(g.get("extra_attempts", 0)) for g in (state or {}).get("grants", []))
 
 
+def _verdict_residue_hit(verdict):
+    """Universal pre-persistence residue gate for a reviewer verdict on the
+    NON-ITS path (V2). Renders the verdict's free-text (summary plus the string
+    items of the structured arrays) and returns True on a HARD residue hit
+    (reusing the guard's redact_for_persistence; hard = any category except
+    unicode_confusable, and a scanner exception fails closed to a hit). Clean
+    verdicts return False, so the normal path is unchanged."""
+    v = verdict or {}
+    parts = [v.get("summary") or ""]
+    for field in ("blocking_findings", "required_changes", "nonblocking_findings",
+                  "disagreements", "assumptions", "questions", "recommended_plan"):
+        for item in (v.get(field) or []):
+            if isinstance(item, str):
+                parts.append(item)
+    _safe, findings = guard.redact_for_persistence("\n".join(parts))
+    return any(k != "unicode_confusable" for k in (findings or {}))
+
+
 def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
               artifact_ids=(), gpt_fn=None, codex_fn=None, sleep=time.sleep):
     """Dispatch one review round under the persistent attempt budget and return
@@ -965,9 +983,17 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
             if _recon_rec:
                 _its_derived_node(_recon_rec, _rd_no)
             _its_derived_node(_srec, _rd_no)
-        # 5. The review context is the LAST component.
-        components.append({"id": "ctx-" + hashlib.sha256(
-            base_context.encode("utf-8")).hexdigest()[:12], "text": base_context})
+        # 5. The review context is the LAST component, and is represented in the
+        #    lineage as a hash-bound ASSEMBLY node over the verified src nodes so
+        #    the guard's composition-to-lineage binding resolves it (V1). The node
+        #    id is the SAME id used for the ctx component; its content_hash is
+        #    sha256(base_context). It carries NO `derived`, so it resolves STANDARD
+        #    when the srcs are STANDARD and never forces sensitivity by itself.
+        ctx_sha = hashlib.sha256(base_context.encode("utf-8")).hexdigest()
+        ctx_id = "ctx-" + ctx_sha[:12]
+        components.append({"id": ctx_id, "text": base_context})
+        graph_obj.add(ctx_id, _egress.CLASS_MACHINE,
+                      source_ids=list(_existing_src_ids), content_hash=ctx_sha)
         # 6. Fixed scaffold for this round: round-1 preamble, or the follow-up
         #    scaffold (which folds the scoped-round guidance + prior-rounds
         #    framing) once at least one prior substantive round exists.
@@ -975,10 +1001,13 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
                                 else ITS_SCAFFOLD_FOLLOWUP)
         _scaffold_node_id = _its_scaffold_node(its_scaffold_version)
         # 7. Rebind the candidate over the src nodes + this round's scaffold +
-        #    the prior-round summary artifacts (no inline node exists — step 3
-        #    refused any).
+        #    the prior-round summary artifacts + the ctx node (no inline node
+        #    exists — step 3 refused any). Every composition["components"] entry
+        #    (each summary + the ctx) is now a lineage node reachable from the
+        #    candidate whose content hash equals its component frame sha.
         graph_obj.add(cand, _egress.CLASS_MACHINE,
-                      source_ids=_existing_src_ids + [_scaffold_node_id] + summary_ids,
+                      source_ids=(_existing_src_ids + [_scaffold_node_id]
+                                  + summary_ids + [ctx_id]),
                       domain=_cand_node.get("domain"))
         # 8. Build the canonical ITS packet + composition; bind the dynamic
         #    provider metadata (model + token cap) into the composition so the
@@ -1295,6 +1324,14 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
                     attempts_used[reviewer] = 0
                     continue
                 its_finding_ids[reviewer] = _rec["artifact_id"]
+            elif _verdict_residue_hit(cached["result"].get("verdict")):
+                # V2: re-scan the cached NON-ITS verdict before reuse; a hard
+                # residue hit blocks reuse and the round does not commit
+                # (mirrors the ITS residue gate above).
+                statuses[reviewer] = "residue_blocked"
+                results[reviewer] = None
+                attempts_used[reviewer] = 0
+                continue
             results[reviewer] = cached["result"]
             statuses[reviewer] = "review"
             attempts_used[reviewer] = 0  # reused, no new call
@@ -1338,13 +1375,21 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
                         result = None
                         break
                     its_finding_ids[reviewer] = _frec["artifact_id"]
+                elif _verdict_residue_hit(result.get("verdict")):
+                    # V2: universal pre-persistence residue gate on the NON-ITS
+                    # path. A hard residue hit in the reviewer's own verdict text
+                    # discards the result: it is NOT cached and the round cannot
+                    # commit (mirrors the ITS reviewer-output residue gate).
+                    statuses[reviewer] = "residue_blocked"
+                    result = None
+                    break
                 pending[key] = {"fingerprint": fp, "result": result, "at": cwm._now_iso()}
                 _persist_council(root, council)
                 break
         results[reviewer] = result
         attempts_used[reviewer] = attempt_state.get(key, {}).get("calls", 0)
         if statuses.get(reviewer) == "residue_blocked":
-            pass  # ITS residue: recorded content-free; not a counted review
+            pass  # residue (ITS or non-ITS): not a counted review; not persisted
         elif result is None:
             statuses[reviewer] = "attempts_exhausted"
         elif result.get("hard_gate"):
@@ -1445,6 +1490,20 @@ def attach_reconciliation(root, council, reconciliation):
         _fids["reconciliation"] = rec["artifact_id"]
         _its["artifact_ids"] = _fids
         latest["its"] = _its
+    else:
+        # V2: universal pre-persistence residue gate on the NON-ITS path. The
+        # reconciliation free-text must be residue-scanned before it is durably
+        # attached, mirroring the ITS gate. A hard hit fails closed and the round
+        # file is NOT updated (save_round is never reached).
+        parts = [normalized.get("summary") or ""]
+        parts.extend(str(p) for p in (normalized.get("revised_plan") or []))
+        parts.extend(str((f or {}).get("finding") or "")
+                     for f in (normalized.get("rejected_findings") or []))
+        parts.extend(str(b) for b in (normalized.get("unresolved_blockers") or []))
+        _safe, _findings = guard.redact_for_persistence("\n".join(parts))
+        if any(k != "unicode_confusable" for k in (_findings or {})):
+            raise cwv.VerdictError("reconciliation failed the pre-persistence "
+                                   "residue scan; nothing was attached")
     save_round(root, council, latest)
 
     # Post the reconciliation durably so dissent stays visible in the thread.

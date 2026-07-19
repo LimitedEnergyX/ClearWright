@@ -117,6 +117,7 @@ REASONS = (
     "source_mutated_after_verification", "repo_unresolvable",
     # INTERNAL_TECHNICAL_STANDARD lane
     "its_lane_not_authorized", "its_composition_unbound",
+    "its_component_unbound",
     "its_component_missing", "its_component_mismatch", "its_scaffold_stale",
     "its_generated_scan_failed",
 )
@@ -560,7 +561,8 @@ class LineageGraph(object):
         self._nodes = {}
 
     def add(self, node_id, classification, *, source_ids=None, provenance=None,
-            escalated=False, domain=None, sanitizer=None, derived=None):
+            escalated=False, domain=None, sanitizer=None, derived=None,
+            content_hash=None):
         if classification not in (CLASS_RAW, CLASS_MACHINE, CLASS_SANITIZED_OK):
             raise EgressBlocked("lineage_unverifiable",
                                 {"detail": "bad classification"})
@@ -574,11 +576,30 @@ class LineageGraph(object):
             "id": node_id, "classification": classification,
             "source_ids": list(source_ids or []), "provenance": provenance,
             "escalated": bool(escalated), "domain": domain, "sanitizer": sanitizer,
-            "derived": derived}
+            "derived": derived, "content_hash": content_hash}
         return node_id
 
     def get(self, node_id):
         return self._nodes.get(node_id)
+
+    def reachable_from(self, node_id):
+        """Set of node ids reachable by following ``source_ids`` transitively
+        from ``node_id`` (its direct + transitive ancestors). Cycle-safe via a
+        visited set; a source id that names no node is simply not added
+        (resolution elsewhere already fails closed on missing/cyclic). Pure —
+        raises nothing for normal input."""
+        reached = set()
+        stack = [node_id]
+        while stack:
+            node = self._nodes.get(stack.pop())
+            if node is None:
+                continue
+            for sid in (node.get("source_ids") or []):
+                if sid in reached or sid not in self._nodes:
+                    continue
+                reached.add(sid)
+                stack.append(sid)
+        return reached
 
     def to_records(self):
         """Content-free node list, durable and rebuildable. Provenance keeps
@@ -593,7 +614,7 @@ class LineageGraph(object):
             g.add(n["id"], n["classification"], source_ids=n.get("source_ids"),
                   provenance=n.get("provenance"), escalated=n.get("escalated", False),
                   domain=n.get("domain"), sanitizer=n.get("sanitizer"),
-                  derived=n.get("derived"))
+                  derived=n.get("derived"), content_hash=n.get("content_hash"))
         return g
 
     def resolve_sensitivity(self, node_id, _stack=None):
@@ -718,6 +739,22 @@ class LineageGraph(object):
 
 def _h(s):
     return _sha256_bytes(str(s).encode("utf-8"))[:16]
+
+
+def _node_content_hash(node):
+    """The node's recorded content hash, or None. Reads, in order: the top-level
+    ``content_hash`` (pure ASSEMBLY nodes, e.g. the ctx node), then
+    ``derived.content_hash`` (scanned generated artifacts), then
+    ``provenance.sha256`` (RAW sources / scaffolds)."""
+    if not node:
+        return None
+    h = node.get("content_hash")
+    if h is not None:
+        return h
+    h = (node.get("derived") or {}).get("content_hash")
+    if h is not None:
+        return h
+    return (node.get("provenance") or {}).get("sha256")
 
 
 # --------------------------------------------------------------------------- #
@@ -1184,6 +1221,25 @@ def _enforce(data_bytes, context, loaded, *, codex_prompt=None):
                     pb.get("gpt_model"), packet_text, pb.get("max_output_tokens")):
                 raise EgressBlocked("its_composition_unbound",
                                     {"detail": "noncanonical_body"})
+        # Composition-to-lineage binding (both sub-paths, once packet_text + comp
+        # are known): verify_its_composition only proves the packet decomposes
+        # into the CALLER-SUPPLIED manifest — it does not prove the manifest's
+        # components are real, reachable lineage nodes. Bind every declared
+        # component to a node reachable from the candidate whose recorded content
+        # hash equals the component frame sha, so a forged manifest+packet pair
+        # cannot ship arbitrary component text as ITS. (The scaffold frame is
+        # validated against the shipped registry above, not re-bound here.)
+        if context.graph is None or context.candidate_id is None:
+            raise EgressBlocked("its_composition_unbound", {"detail": "no_graph"})
+        reach = context.graph.reachable_from(context.candidate_id)
+        for c in (comp.get("components") or []):
+            node = context.graph.get(c["id"])
+            if node is None or c["id"] not in reach:
+                raise EgressBlocked("its_component_unbound",
+                                    {"detail": "not_in_lineage"})
+            if _node_content_hash(node) != c.get("sha256"):
+                raise EgressBlocked("its_component_mismatch",
+                                    {"detail": "lineage_hash"})
     return decision
 
 

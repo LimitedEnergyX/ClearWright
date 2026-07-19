@@ -523,5 +523,37 @@ class HappyPathMultiRound(_ItsBase):
         self.assertEqual(r2["its"]["lane"], "internal_technical")
 
 
+class Scenario15ForgedCtxComponent(_ItsBase):
+    """V1 production path: the ctx component's text is swapped for arbitrary
+    content AFTER the composition is built, so it no longer matches the hash-
+    bound ctx lineage node the engine registered for the real base_context. The
+    guard's composition-to-lineage binding blocks both reviewers at send; the
+    round does not commit. Fails before the fix (the forged packet would
+    dispatch); passes after."""
+
+    def test_ctx_swapped_after_build_is_blocked_by_lineage_binding(self):
+        council = self._its_council()
+        orig_build = guard.build_its_packet
+
+        def swapped_build(scaffold_version, components):
+            # Keep the ctx component id (bound to the ORIGINAL base_context in the
+            # lineage) but swap its text -> the manifest sha no longer equals the
+            # ctx node's recorded content hash, so the binding loop mismatches.
+            comps = [dict(c) for c in components]
+            comps[-1] = dict(comps[-1],
+                             text=comps[-1]["text"] + "\nFORGED EXTRA CONTENT\n")
+            return orig_build(scaffold_version, comps)
+
+        guard.build_its_packet = swapped_build
+        try:
+            report = self._run(council, gpt_fn=_gpt_reviewer(),
+                               codex_fn=_codex_reviewer())
+        finally:
+            guard.build_its_packet = orig_build
+        self.assertFalse(report["committed"], report)
+        self.assertNotEqual(report["statuses"].get("gpt"), "review")
+        self.assertNotEqual(report["statuses"].get("codex"), "review")
+
+
 if __name__ == "__main__":
     unittest.main()

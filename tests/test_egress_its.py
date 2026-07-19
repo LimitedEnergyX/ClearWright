@@ -187,5 +187,83 @@ class ItsEnforceFailClosed(unittest.TestCase):
         self.assertEqual(cm.exception.reason, "its_composition_unbound")
 
 
+class ItsComponentLineageBinding(unittest.TestCase):
+    """V1 guard hardening: a declared ITS composition must not merely decompose
+    the packet — every component must ALSO be a lineage node reachable from the
+    candidate whose recorded content hash equals the component frame sha. These
+    negative tests drive a CANONICAL body through gpt_send (so verify_its_
+    composition and the byte-equality check both pass) and prove the new
+    composition-to-lineage binding blocks a forged manifest. SYNTHETIC only."""
+
+    def _its_graph_with_finding(self):
+        g = guard.LineageGraph()
+        _std(g)  # "src" -> STANDARD approved_repo_file
+        g.add("scaffold", guard.CLASS_RAW, provenance={"class": "fixed_scaffold"})
+        g.add("finding", guard.CLASS_MACHINE, source_ids=["src"],
+              derived={"scan_passed": True})
+        return g
+
+    def _send_canonical(self, g, comp, packet_text):
+        comp["provider_binding"] = {"gpt_model": "m", "max_output_tokens": 10}
+        ctx = guard.EgressContext("internal_technical", graph=g,
+                                  candidate_id="packet", require_graph=True,
+                                  lane="internal_technical", its_composition=comp)
+        body = guard.build_its_gpt_body("m", packet_text, 10)
+        return guard.gpt_send(body, 5, context=ctx, key_getter=lambda: "k",
+                              transport=lambda *a: (200, "{}"),
+                              caller="clearwright_gpt_review")
+
+    def test_forged_ctx_component_not_a_lineage_node_is_unbound(self):
+        # A composition whose ctx component text is ARBITRARY (its id names no
+        # lineage node) is refused even though the packet decomposes cleanly.
+        g = self._its_graph_with_finding()
+        g.add("packet", guard.CLASS_MACHINE, source_ids=["src", "scaffold", "finding"])
+        packet_text, comp = guard.build_its_packet(
+            _SCAFFOLD_V, [{"id": "ctx-forged", "text": "arbitrary reviewer context\n"}])
+        with self.assertRaises(guard.EgressBlocked) as cm:
+            self._send_canonical(g, comp, packet_text)
+        self.assertEqual(cm.exception.reason, "its_component_unbound")
+        self.assertEqual(cm.exception.summary.get("detail"), "not_in_lineage")
+
+    def test_component_in_lineage_with_hash_mismatch_is_mismatch(self):
+        # The component id IS a reachable lineage node, but the frame sha does
+        # not equal the node's recorded content hash -> its_component_mismatch.
+        g = self._its_graph_with_finding()
+        g.add("sum1", guard.CLASS_MACHINE, source_ids=["src"],
+              derived={"scan_passed": True, "content_hash": "b" * 64})
+        g.add("packet", guard.CLASS_MACHINE,
+              source_ids=["src", "scaffold", "finding", "sum1"])
+        packet_text, comp = guard.build_its_packet(
+            _SCAFFOLD_V, [{"id": "sum1", "text": "declared summary text\n"}])
+        with self.assertRaises(guard.EgressBlocked) as cm:
+            self._send_canonical(g, comp, packet_text)
+        self.assertEqual(cm.exception.reason, "its_component_mismatch")
+        self.assertEqual(cm.exception.summary.get("detail"), "lineage_hash")
+
+    def test_component_absent_from_graph_is_unbound(self):
+        # A composition component id absent from the graph entirely is refused.
+        g = self._its_graph_with_finding()
+        g.add("packet", guard.CLASS_MACHINE, source_ids=["src", "scaffold", "finding"])
+        packet_text, comp = guard.build_its_packet(
+            _SCAFFOLD_V, [{"id": "does-not-exist", "text": "some text\n"}])
+        with self.assertRaises(guard.EgressBlocked) as cm:
+            self._send_canonical(g, comp, packet_text)
+        self.assertEqual(cm.exception.reason, "its_component_unbound")
+
+    def test_component_present_but_unreachable_is_unbound(self):
+        # A node that exists but is NOT in the candidate's reachable ancestry is
+        # refused (the reachable_from enforcement, distinct from node-absent).
+        g = self._its_graph_with_finding()
+        g.add("orphan", guard.CLASS_MACHINE, source_ids=["src"],
+              derived={"scan_passed": True, "content_hash": "d" * 64})
+        g.add("packet", guard.CLASS_MACHINE, source_ids=["src", "scaffold", "finding"])
+        packet_text, comp = guard.build_its_packet(
+            _SCAFFOLD_V, [{"id": "orphan", "text": "text\n"}])
+        with self.assertRaises(guard.EgressBlocked) as cm:
+            self._send_canonical(g, comp, packet_text)
+        self.assertEqual(cm.exception.reason, "its_component_unbound")
+        self.assertEqual(cm.exception.summary.get("detail"), "not_in_lineage")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -943,5 +943,91 @@ class NamingAndPrivacyTests(unittest.TestCase):
                 self.assertIsNone(private.search(text))
 
 
+class NonItsResiduePrePersistenceGate(unittest.TestCase):
+    """SDEG V2: a universal fail-closed pre-persistence residue gate on the
+    NON-ITS (standard/sensitive) path. A reviewer verdict or a reconciliation
+    whose free-text carries residual sensitive data (a synthetic SSN) must never
+    reach a durable round/pending file; the clean path is unchanged. All
+    fixtures are SYNTHETIC."""
+
+    _SSN = "123-45-6789"
+
+    def setUp(self):
+        self.root = queue("cw_v2_residue_", self)
+        res = server.do_message(self.root, {"actor": "OPERATOR-0001", "role": "operator",
+                                            "message": "Plan to review", "intent": "request"})
+        self.thread = res["thread_id"]
+        self.wid = cww.derive_work_items(self.root)[0]["work_item_id"]
+
+    def _new(self):
+        return council.create_council(self.root, thread_id=self.thread,
+                                      work_item_id=self.wid, phase="plan",
+                                      data_sensitivity="standard",
+                                      approved_scope="operator-approved test scope")
+
+    def _reviewer(self, reviewer, source, summary):
+        def fn(root, context, **kw):
+            return {"ok": True, "posted": True, "reviewer": reviewer,
+                    "verdict": make_verdict(reviewer, summary=summary),
+                    "validated": True, "source": source,
+                    "telemetry": {"reviewer": reviewer}, "message_id": reviewer[:1]}
+        return fn
+
+    def _assert_ssn_absent(self):
+        needle = self._SSN.encode("utf-8")
+        for dirpath, _dirs, files in os.walk(self.root):
+            for name in files:
+                with open(os.path.join(dirpath, name), "rb") as fh:
+                    self.assertNotIn(needle, fh.read(),
+                                     "synthetic SSN leaked into {}".format(name))
+
+    def test_reviewer_verdict_ssn_is_residue_blocked_and_not_persisted(self):
+        c = self._new()
+        poisoned = ("Reviewed; a residual identifier {} appears in the diff "
+                    "notes.".format(self._SSN))
+        report = council.run_round(
+            self.root, c, "clean technical review context", sleep=lambda *_: None,
+            gpt_fn=self._reviewer("gpt", "openai-api", poisoned),
+            codex_fn=self._reviewer("codex", "codex-cli", "Clean review; no issues found."))
+        self.assertFalse(report["committed"], report)
+        self.assertEqual(report["statuses"].get("gpt"), "residue_blocked")
+        # No committed substantive round; the SSN is in NO round/pending file.
+        rounds = council.load_rounds(self.root, c["council_id"])
+        self.assertEqual(council.substantive_round_count(rounds), 0)
+        self._assert_ssn_absent()
+
+    def test_clean_verdicts_still_commit(self):
+        # Regression guard: the residue gate must not disturb the clean path.
+        c = self._new()
+        report = council.run_round(
+            self.root, c, "clean technical review context", sleep=lambda *_: None,
+            gpt_fn=self._reviewer("gpt", "openai-api", "A clean, substantive review."),
+            codex_fn=self._reviewer("codex", "codex-cli", "Another clean review."))
+        self.assertTrue(report["committed"], report)
+        self.assertTrue(report["substantive"], report)
+
+    def test_reconciliation_ssn_raises_and_round_file_not_updated(self):
+        c = self._new()
+        # Commit a clean round first.
+        council.run_round(self.root, c, "clean technical review context",
+                          sleep=lambda *_: None,
+                          gpt_fn=self._reviewer("gpt", "openai-api", "Clean review one."),
+                          codex_fn=self._reviewer("codex", "codex-cli", "Clean review two."))
+        c = council.load_council(self.root, c["council_id"])
+        poisoned_recon = {
+            "accepted_findings": [], "rejected_findings": [],
+            "required_plan_changes": [], "revised_plan": [], "unresolved_blockers": [],
+            "ready_to_proceed": False,
+            "summary": ("Reconciled the reviews; a residual identifier {} slipped "
+                        "into the notes.".format(self._SSN))}
+        with self.assertRaises(cwv.VerdictError):
+            council.attach_reconciliation(self.root, c, poisoned_recon)
+        # The round file was NOT updated: its reconciliation stays None and the
+        # SSN is absent everywhere under the queue root.
+        rounds = council.load_rounds(self.root, c["council_id"])
+        self.assertIsNone(rounds[-1].get("reconciliation"))
+        self._assert_ssn_absent()
+
+
 if __name__ == "__main__":
     unittest.main()

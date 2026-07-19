@@ -21,8 +21,8 @@ escalates a request because the channel, resource, authority, dependency, policy
 boundary, priority lane, or next stage is not clear. DTA is a successful safety
 outcome, not a failure, and it never flows to FAILED.
 
-**Clearance message vs execution state.** RTA, CTA, and DTA are clearance decisions
-(messages), not execution states. Execution state describes how work progresses (for
+**Clearance message vs execution state.** RTA, CTA, and DTA are clearance messages
+— the request, the grant, and the denial — not execution states. Execution state describes how work progresses (for
 example queued, claimed, in progress, verifying, done, failed, superseded). Today the
 implementation records one combined packet status in which RTA/CTA/DTA also appear as
 values; there is no separate execution-state enum. FAILED means execution broke after

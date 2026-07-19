@@ -318,11 +318,13 @@ and `ESCALATED`. `RESERVED`, `FROZEN`, and `DEGRADED` are [protocol direction].
 
 ## The four protocol dimensions
 
-RTA, CTA, and DTA are clearance MESSAGES — decisions about whether an actor may
-proceed — not execution states. Reasoning about the protocol correctly means
-keeping four separate dimensions distinct [protocol direction]:
+RTA, CTA, and DTA are clearance MESSAGES — an RTA requests clearance, a CTA
+grants it, and a DTA denies it — not execution states. Reasoning about the
+protocol correctly means keeping four separate dimensions distinct
+[protocol direction]:
 
-- **Clearance decision:** `RTA`, `CTA`, `DTA`.
+- **Clearance decision:** `RTA`, `CTA`, `DTA` — the request, the grant, and the
+  denial in the clearance dimension.
 - **Execution state:** `QUEUED`, `CLAIMED`, `IN_PROGRESS`, `VERIFYING`, `DONE`,
   `FAILED`, `SUPERSEDED`.
 - **Review state:** `IN_REVIEW`, `RFI_PENDING`, `OPERATOR_REQUIRED`.
@@ -345,7 +347,7 @@ The [implemented] packet `status` values map to the dimensions as follows:
 | `FAILED` | Execution | Execution broke AFTER a valid clearance. |
 | `SUPERSEDED` | Execution | A later decision replaced this one. |
 
-`RTA`, `CTA`, and `DTA` are clearance decisions that today ALSO appear as values of
+`RTA`, `CTA`, and `DTA` are clearance messages that today ALSO appear as values of
 the single combined `status` field; the protocol does not claim a separate
 execution-state enum in code. The execution-state values `QUEUED`, `CLAIMED`,
 and `VERIFYING`, the review-state value `OPERATOR_REQUIRED`, and the channel

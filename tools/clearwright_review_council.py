@@ -791,6 +791,33 @@ def _verdict_residue_hit(verdict):
     return any(k != "unicode_confusable" for k in (findings or {}))
 
 
+def _canonical_reconciliation_text(normalized):
+    """Deterministic canonical serialization of the COMPLETE normalized
+    reconciliation object — the exact object attach_reconciliation persists
+    (latest["reconciliation"] = normalized). No manual field list: canonical JSON
+    inherently covers every current and future nested field (summary,
+    revised_plan, accepted_findings, rejected_findings and their finding/reason/
+    evidence, required_plan_changes, resolutions and their notes, unresolved_
+    blockers, nested dicts, nested lists). Raises on any serialization failure
+    (unsupported value / non-serializable structure) so the caller fails closed;
+    NO default= coercion, so an unsupported value blocks persistence rather than
+    being silently stringified."""
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
+
+def _reconciliation_residue_hit(normalized):
+    """Pre-persistence residue gate for a NON-ITS reconciliation (V2). Scans the
+    COMPLETE canonical normalized reconciliation before it is stored or reused.
+    Fails closed (returns True) on any serialization or scanner error, so a
+    blocked or unscannable reconciliation is never persisted."""
+    try:
+        text = _canonical_reconciliation_text(normalized)
+        _safe, findings = guard.redact_for_persistence(text)
+    except Exception:  # noqa: BLE001 - serialization/scan failure must not open the gate
+        return True
+    return any(k != "unicode_confusable" for k in (findings or {}))
+
+
 def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
               artifact_ids=(), gpt_fn=None, codex_fn=None, sleep=time.sleep):
     """Dispatch one review round under the persistent attempt budget and return
@@ -1492,23 +1519,14 @@ def attach_reconciliation(root, council, reconciliation):
         latest["its"] = _its
     else:
         # V2: universal pre-persistence residue gate on the NON-ITS path. The
-        # reconciliation free-text must be residue-scanned before it is durably
-        # attached, mirroring the ITS gate. A hard hit fails closed and the round
-        # file is NOT updated (save_round is never reached).
-        parts = [normalized.get("summary") or ""]
-        parts.extend(str(p) for p in (normalized.get("revised_plan") or []))
-        parts.extend(str((f or {}).get("finding") or "")
-                     for f in (normalized.get("rejected_findings") or []))
-        parts.extend(str(b) for b in (normalized.get("unresolved_blockers") or []))
-        # Fail closed on ANY scanner error (defense in depth): redact_for_persistence
-        # already returns a scanner_exception finding rather than raising, but an
-        # unexpected exception at the call site is also treated as a hard hit.
-        try:
-            _safe, _findings = guard.redact_for_persistence("\n".join(parts))
-            _hard = any(k != "unicode_confusable" for k in (_findings or {}))
-        except Exception:  # noqa: BLE001 - scanner failure must not open the gate
-            _hard = True
-        if _hard:
+        # COMPLETE canonical normalized reconciliation object (the exact object
+        # save_round persists) is residue-scanned before it is durably attached —
+        # not a manually selected field list, so every nested dict/list, finding,
+        # reason, evidence value, plan change, resolution note, blocker, summary,
+        # and any future normalized field is covered. A hard hit, or any
+        # serialization/scanner failure, fails closed: VerdictError is raised,
+        # save_round is never reached, and the round file is NOT updated.
+        if _reconciliation_residue_hit(normalized):
             raise cwv.VerdictError("reconciliation failed the pre-persistence "
                                    "residue scan; nothing was attached")
     save_round(root, council, latest)

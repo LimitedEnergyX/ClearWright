@@ -1056,6 +1056,104 @@ class NonItsResiduePrePersistenceGate(unittest.TestCase):
         self.assertIsNone(rounds[-1].get("reconciliation"))
         self._assert_ssn_absent()
 
+    # --- Complete-canonical reconciliation scan (operator authority
+    # msg-20260719T035209304158): the WHOLE normalized reconciliation object is
+    # scanned before persistence, not a selected field list. -------------------
+    def _committed(self):
+        c = self._new()
+        council.run_round(
+            self.root, c, "clean technical review context", sleep=lambda *_: None,
+            gpt_fn=self._reviewer("gpt", "openai-api", "Clean review one."),
+            codex_fn=self._reviewer("codex", "codex-cli", "Clean review two."))
+        return council.load_council(self.root, c["council_id"])
+
+    def _base_recon(self, **over):
+        r = {"ready_to_proceed": False, "summary": "Reconciled the reviews; all clean.",
+             "accepted_findings": [], "rejected_findings": [], "required_plan_changes": [],
+             "revised_plan": [], "unresolved_blockers": [], "resolutions": []}
+        r.update(over)
+        return r
+
+    def _assert_recon_blocked_no_residue(self, c, recon):
+        with self.assertRaises(cwv.VerdictError):
+            council.attach_reconciliation(self.root, c, recon)
+        rounds = council.load_rounds(self.root, c["council_id"])
+        self.assertIsNone(rounds[-1].get("reconciliation"))
+        self._assert_ssn_absent()
+
+    def test_recon_residue_in_accepted_findings_blocks(self):
+        # Fail-before (pre-fix field-selective scan omits accepted_findings) /
+        # pass-after: residue here is caught by the complete canonical scan.
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            accepted_findings=["Accepted a point noting {}".format(self._SSN)]))
+
+    def test_recon_residue_in_required_plan_changes_blocks(self):
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            required_plan_changes=["Change the plan regarding {}".format(self._SSN)]))
+
+    def test_recon_residue_in_resolution_note_nested_dict_blocks(self):
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            resolutions=[{"ref": "gpt.required_changes[0]", "disposition": "planned",
+                          "note": "resolution note carrying {}".format(self._SSN)}]))
+
+    def test_recon_residue_in_rejected_finding_reason_blocks(self):
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            rejected_findings=[{"finding": "f", "reason": "reason with {}".format(self._SSN),
+                                "evidence": ["clean evidence"]}]))
+
+    def test_recon_residue_in_rejected_finding_evidence_nested_list_blocks(self):
+        c = self._committed()
+        self._assert_recon_blocked_no_residue(c, self._base_recon(
+            rejected_findings=[{"finding": "f", "reason": "a clean reason",
+                                "evidence": ["evidence value with {}".format(self._SSN)]}]))
+
+    def test_recon_clean_persists_and_stored_matches_scanned_canonical(self):
+        c = self._committed()
+        clean = self._base_recon(summary="A clean reconciliation, nothing sensitive here.",
+                                 accepted_findings=["accepted ok"], revised_plan=["do x"],
+                                 resolutions=[{"ref": "gpt.required_changes[0]",
+                                               "disposition": "planned", "note": "fine"}])
+        normalized = cwv.validate_reconciliation(clean)
+        council.attach_reconciliation(self.root, c, clean)
+        stored = council.load_rounds(self.root, c["council_id"])[-1].get("reconciliation")
+        self.assertIsNotNone(stored)
+        # The stored object is exactly the object that was scanned.
+        self.assertEqual(council._canonical_reconciliation_text(stored),
+                         council._canonical_reconciliation_text(normalized))
+
+    def test_recon_scanner_exception_fails_closed(self):
+        c = self._committed()
+        orig = council.guard.redact_for_persistence
+        council.guard.redact_for_persistence = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("scanner boom"))
+        try:
+            with self.assertRaises(cwv.VerdictError):
+                council.attach_reconciliation(self.root, c, self._base_recon())
+            self.assertIsNone(
+                council.load_rounds(self.root, c["council_id"])[-1].get("reconciliation"))
+        finally:
+            council.guard.redact_for_persistence = orig
+
+    def test_recon_serialization_exception_fails_closed(self):
+        c = self._committed()
+        orig = council.cwv.validate_reconciliation
+        # A normalized object with a non-JSON-serializable value: canonical
+        # serialization raises TypeError, so the gate fails closed.
+        council.cwv.validate_reconciliation = lambda r: {
+            "ready_to_proceed": False, "summary": "x" * 12, "rejected_findings": [],
+            "unresolved_blockers": [], "unserializable": {1, 2, 3}}
+        try:
+            with self.assertRaises(cwv.VerdictError):
+                council.attach_reconciliation(self.root, c, self._base_recon())
+            self.assertIsNone(
+                council.load_rounds(self.root, c["council_id"])[-1].get("reconciliation"))
+        finally:
+            council.cwv.validate_reconciliation = orig
+
 
 if __name__ == "__main__":
     unittest.main()

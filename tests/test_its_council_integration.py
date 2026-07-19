@@ -599,5 +599,40 @@ class Scenario16DefaultGptProviderBindingContract(_ItsBase):
         self.assertEqual(captured.get("text"), "COMPOSED ITS PACKET")
 
 
+class Scenario17GovernedItLaneConsequence(_ItsBase):
+    """Review-driven (cw-council-20260719T204834514030): prove the READ-PATH
+    CONSEQUENCE, not just the resolver return. A persisted governed +
+    internal_technical envelope whose _audit is a STALE 'sensitive' re-resolves via
+    the read path AND selects the internal_technical DISPATCH LANE at council
+    creation; an unspecified governed item stays sensitive -> user lane."""
+
+    def test_persisted_governed_it_selects_internal_technical_lane(self):
+        env = {"task_kind": "governed", "request": "r", "approved_scope": "s",
+               "intended_actions": ["a"], "excluded_actions": ["x"],
+               "operator_authority_source": "test", "verification_required": True,
+               "data_sensitivity": "internal_technical"}
+        use_cw._persist_envelope(self.root, "msg-gov-it", env,
+                                 {"classification": "governed", "data_sensitivity": "sensitive",
+                                  "data_sensitivity_source": "ineligible_failclosed"})
+        wid = "message:msg-gov-it"
+        self.assertEqual(use_cw._data_sensitivity(self.root, wid), "internal_technical")
+        council = cwrc.create_council(self.root, thread_id="t-lane", work_item_id=wid,
+                                      data_sensitivity=use_cw._data_sensitivity(self.root, wid))
+        self.assertEqual(council["dispatch_lane"], "internal_technical")
+        self.assertEqual(council["data_sensitivity"], "internal_technical")
+
+    def test_persisted_governed_unspecified_selects_user_lane(self):
+        env = {"task_kind": "governed", "request": "r", "approved_scope": "s",
+               "intended_actions": ["a"], "excluded_actions": ["x"],
+               "operator_authority_source": "test"}
+        use_cw._persist_envelope(self.root, "msg-gov-unspec", env,
+                                 {"classification": "governed", "data_sensitivity": "sensitive"})
+        wid = "message:msg-gov-unspec"
+        self.assertEqual(use_cw._data_sensitivity(self.root, wid), "sensitive")
+        council = cwrc.create_council(self.root, thread_id="t-lane2", work_item_id=wid,
+                                      data_sensitivity=use_cw._data_sensitivity(self.root, wid))
+        self.assertEqual(council["dispatch_lane"], "user")
+
+
 if __name__ == "__main__":
     unittest.main()

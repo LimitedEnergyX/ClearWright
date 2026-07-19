@@ -184,6 +184,17 @@ def council_dir(root, council_id):
     return os.path.join(councils_root(root), council_id)
 
 
+# os.replace over a destination that a reader holds open WITHOUT
+# FILE_SHARE_DELETE raises OSError winerror 5 (access denied) or 32 (sharing
+# violation) on Windows. The server's plain-open council/queue reads can briefly
+# hold such a handle, so retry the rename with short PRE-attempt backoffs (the
+# first delay is 0, so the common no-contention case pays nothing). POSIX never
+# sets winerror, so the first attempt succeeds or a non-winerror error re-raises
+# immediately -- behaviour there is unchanged.
+_REPLACE_RETRY_DELAYS = (0, 0.05, 0.1, 0.2, 0.4, 0.8)
+_REPLACE_RETRY_WINERRORS = (5, 32)
+
+
 def _atomic_write_json(path, obj):
     """Raises clearwright_writer_lock.MaintenanceInProgress while an archive
     operation holds exclusivity over this queue root. ``path`` is always under
@@ -198,8 +209,24 @@ def _atomic_write_json(path, obj):
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    return path
+        last_exc = None
+        for delay in _REPLACE_RETRY_DELAYS:
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(tmp, path)
+                return path
+            except OSError as exc:
+                if getattr(exc, "winerror", None) not in _REPLACE_RETRY_WINERRORS:
+                    raise
+                last_exc = exc
+        # Every attempt hit a retryable sharing/access error: best-effort remove
+        # the staged tmp, then raise the REAL error (never a synthesized one).
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise last_exc
 
 
 def _queue_root_from_path(path):

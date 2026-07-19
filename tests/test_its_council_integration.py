@@ -363,15 +363,22 @@ class Scenario10UnscannedReuse(_ItsBase):
 
 class Scenario11NonTechnicalWorkItem(_ItsBase):
     def test_ineligible_task_kind_declaration_fails_closed_to_sensitive(self):
-        for kind in ("chat", "governed"):
+        # high_risk and chat remain INELIGIBLE for the internal_technical lane and
+        # fail closed to sensitive. governed became eligible under authority
+        # msg-20260719T185647356093 (governance and content-sensitivity are
+        # separate axes) — see the eligible-kinds boundary below; high_risk stays
+        # excluded.
+        for kind in ("chat", "high_risk"):
             resolved, why = use_cw._resolve_data_sensitivity(
                 {"data_sensitivity": "internal_technical", "task_kind": kind})
             self.assertEqual(resolved, "sensitive")
             self.assertEqual(why, "ineligible_failclosed")
-        # Boundary: an eligible task_kind is honored.
-        resolved, why = use_cw._resolve_data_sensitivity(
-            {"data_sensitivity": "internal_technical", "task_kind": "analysis"})
-        self.assertEqual((resolved, why), ("internal_technical", "declared"))
+        # Boundary: eligible task_kinds are honored at the coarse declaration gate
+        # (dispatch still proves provenance/composition/exact-byte independently).
+        for kind in ("analysis", "actionable", "governed"):
+            resolved, why = use_cw._resolve_data_sensitivity(
+                {"data_sensitivity": "internal_technical", "task_kind": kind})
+            self.assertEqual((resolved, why), ("internal_technical", "declared"))
 
     def test_standard_council_over_its_graph_is_lane_not_authorized(self):
         # create_council maps data_sensitivity "standard" -> dispatch_lane "user".

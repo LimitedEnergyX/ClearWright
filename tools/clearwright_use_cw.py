@@ -257,12 +257,20 @@ def _resolve_data_sensitivity(env_or_none):
             return "standard", "declared"
         if declared == "internal_technical":
             # The INTERNAL_TECHNICAL_STANDARD lane is CW-technical-self-review
-            # ONLY. Eligibility is enforced HERE at declaration (an analysis or
-            # actionable task_kind) AND independently by ancestry at dispatch: a
+            # ONLY. Eligibility is a COARSE declaration gate here (an analysis,
+            # actionable, or governed task_kind) AND is independently, finally
+            # proven by repository identity + source provenance + ancestry +
+            # composition binding + exact-final-byte tripwire at dispatch: a
             # declared-eligible item whose content is not fully git-verified
-            # STANDARD still blocks (fail-closed either way).
+            # STANDARD still blocks (fail-closed either way). governed is eligible
+            # because governance (clearance/gates/authority/verification) and
+            # content sensitivity are SEPARATE axes — a governed item may carry
+            # only approved internal technical material. This does NOT infer
+            # internal_technical from governed status (the operator must DECLARE
+            # it) and never grants dispatch on its own. high_risk stays excluded;
+            # anything absent/ambiguous stays fail-closed sensitive.
             task_kind = str(env_or_none.get("task_kind") or "").strip().lower()
-            if task_kind in ("analysis", "actionable"):
+            if task_kind in ("analysis", "actionable", "governed"):
                 return "internal_technical", "declared"
             return "sensitive", "ineligible_failclosed"
         if declared == "sensitive":
@@ -749,6 +757,22 @@ def _envelope_audit(root, work_item_id):
         return None
 
 
+def _envelope_record(root, work_item_id):
+    """The FULL persisted envelope record (top-level envelope fields + _audit),
+    or None. Top-level task_kind/data_sensitivity are the PRESERVED REQUESTED
+    values (never mutated); _audit holds the RESOLVED-at-start values. Used to
+    re-derive classification dynamically without reading or mutating _audit."""
+    if not work_item_id or ":" not in work_item_id:
+        return None
+    mid = work_item_id.split(":", 1)[1]
+    path = os.path.join(root, "task_envelopes", mid + ".json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh) or None
+    except (OSError, ValueError):
+        return None
+
+
 def _review_profile(root, work_item_id):
     """The review_profile recorded on this work item's envelope, or 'code'."""
     audit = _envelope_audit(root, work_item_id) or {}
@@ -779,20 +803,24 @@ def _assemble_lineage(args):
 
 
 def _data_sensitivity(root, work_item_id):
-    """SDEG: the data_sensitivity recorded on this work item's envelope. The
-    fail-closed default is 'sensitive' — an unbound council, a missing envelope,
-    or any value other than an explicit 'standard' / 'internal_technical'
-    resolves to sensitive so the egress guard applies the strict (construction-
-    proof) tier. 'internal_technical' selects the CW-technical-self-review lane;
-    eligibility was already gated at declaration and is re-enforced by ancestry
-    at dispatch."""
-    audit = _envelope_audit(root, work_item_id) or {}
-    declared = str(audit.get("data_sensitivity") or "").strip().lower()
-    if declared == "internal_technical":
-        return "internal_technical"
-    if declared == "standard":
-        return "standard"
-    return "sensitive"
+    """SDEG: the CONTENT sensitivity that selects this work item's egress lane,
+    re-derived DYNAMICALLY from the item's PRESERVED REQUESTED envelope via the
+    current resolver — NOT read from the persisted (possibly stale) resolved
+    _audit value, and WITHOUT mutating any durable record. So an item declared
+    governed + internal_technical whose _audit was persisted 'sensitive' by the
+    earlier (stricter) resolver re-resolves correctly with no historical rewrite,
+    while an unspecified/ambiguous/sensitive item still resolves 'sensitive'. The
+    fail-closed default is 'sensitive' (missing/unreadable envelope, or anything
+    not resolving to an explicit 'standard'/'internal_technical'). Resolving
+    'internal_technical' only selects the CW-technical-self-review lane — a COARSE
+    declaration gate; dispatch eligibility is independently and finally proven by
+    repository-identity/provenance/ancestry/composition/exact-final-byte
+    enforcement at dispatch, so this read never grants dispatch."""
+    record = _envelope_record(root, work_item_id)
+    if not record:
+        return "sensitive"
+    resolved, _src = _resolve_data_sensitivity(record)
+    return resolved
 
 
 def _verify_councils(root, work_item_id):

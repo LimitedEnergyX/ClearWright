@@ -17,7 +17,9 @@ commitments.
   fail-closed verification before completion; review profiles; message
   payload integrity; artifact and evidence handling; a durable archive
   layer with hash-bound operator approval and crash-safe recovery; canonical
-  summaries and a durable audit trail.
+  summaries and a durable audit trail; and a fail-closed egress guard on the
+  review-council dispatch path with a dedicated internal_technical (ITS) lane
+  for governed self-review of ClearWright's own code.
 - A local long-running operator service exists. Fail-closed plan gates and
   review profiles exist. ClearWright does not create autonomous authority
   and does not ship an independent production policy engine or general
@@ -25,17 +27,22 @@ commitments.
 
 ## Next
 
-- **Pre-Leapfrog Stabilization Gate**: message-scoped work-item identity,
-  same-thread isolation, derived-queue completeness, gate idempotency,
-  selected-task state isolation, server lifecycle evidence, and a safe
-  manual launcher.
-- **Project Leapfrog** (next major milestone): one trusted Stable
-  ClearWright instance governs development and verification of one isolated
-  Candidate instance - separate runtime roots and secrets, an explicit
-  permitted-channel matrix, promotion only under durable operator
+- **Pre-Leapfrog Stabilization Gate: complete** (verified on merged code,
+  2026-07-15). Message-scoped work-item identity, same-thread isolation,
+  derived-queue completeness, gate idempotency, selected-task state
+  isolation, server lifecycle evidence, and a safe manual launcher are done;
+  the internal_technical classification repair is part of the merged baseline.
+- **ALF Phase 1 planning** (Automated Leapfrog, active now): an internal,
+  evidence-bound track that observes governed runs, records durable
+  improvement findings, and proposes governed-work specifications for operator
+  promotion. Phase 1 is planning only - schemas and architecture to a plan
+  gate - and creates no autonomous authority. It is the concrete
+  self-improvement vehicle feeding Project Leapfrog.
+- **Project Leapfrog** (next major implementation milestone): one trusted
+  Stable ClearWright instance governs development and verification of one
+  isolated Candidate instance - separate runtime roots and secrets, an
+  explicit permitted-channel matrix, promotion only under durable operator
   authority, verified rollback, and a first end-to-end promotion proof.
-  Implementation starts only after the stabilization gate is verified
-  complete.
 
 ## Later (in dependency order)
 

@@ -7,6 +7,10 @@ fields, never prose similarity. It removes manual copy/paste of reviews: the
 council engine calls the reviewers, stores the results, and returns one
 machine-readable JSON verdict with a meaningful exit code.
 
+Every reviewer request is constructed and transmitted through a single
+fail-closed egress guard, and governed self-review of ClearWright's own code
+runs in a dedicated internal_technical (ITS) dispatch lane.
+
 This is early alpha software and a local reference implementation.
 
 ## Honesty and authority

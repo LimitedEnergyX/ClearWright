@@ -154,7 +154,12 @@ Statuses: **standing** (in force), **planned** (adopted for future work).
 - **Consequences:** a dedicated governed stabilization work item precedes
   Leapfrog; its completion is a hard release gate (PROJECT_PLAN.md
   section 10).
-- **Status:** standing. **Milestone:** Pre-Leapfrog Stabilization Gate.
+- **Update (2026-07-20):** the stabilization work item completed on merged
+  code (2026-07-15); the section 10 gate items are verified complete. The
+  internal_technical classification repair (PR 83, merge 419b1f8) is part of
+  that merged, verified control-plane baseline.
+- **Status:** standing (gate satisfied). **Milestone:** Pre-Leapfrog
+  Stabilization Gate.
 
 ## D-13. Deterministic agreement is not weakened for speed
 
@@ -167,3 +172,39 @@ Statuses: **standing** (in force), **planned** (adopted for future work).
   existing rule; capped councils still escalate to the operator.
 - **Status:** standing. **Milestone:** Council Efficiency and
   Observability.
+
+## D-14. Governed work may declare an internal technical review lane
+
+- **Decision:** a governed work item may declare its content as internal
+  technical material and, when it does, its review is dispatched through a
+  dedicated internal-technical (ITS) lane that binds every reviewer input to
+  committed, tracked, approved-repository sources under the fail-closed
+  egress guard. The declaration selects a review lane only; it never relaxes
+  governance.
+- **Rationale:** ClearWright must be able to review its own control-plane
+  code with the same real GPT + Codex council it applies to other work,
+  without weakening the sensitive-data default for everything else.
+- **Consequences:** clearance, operator authority, gates, protected review,
+  and verification continue to key on task kind, not on the declared
+  sensitivity; dispatch eligibility (provenance, composition binding,
+  exact-byte and tripwire checks) is proven before any council id or
+  reviewer attempt is spent; the fail-closed default remains sensitive.
+- **Status:** standing. **Milestone:** Council Efficiency and Observability.
+
+## D-15. Self-improvement begins as an evidence-bound findings track
+
+- **Decision:** ClearWright's self-improvement work (Automated Leapfrog,
+  ALF) begins as an internal, evidence-bound track that observes governed
+  runs, records durable improvement findings, and proposes governed-work
+  specifications; the operator alone promotes a finding into implementation
+  work. Phase 1 is planning only.
+- **Rationale:** a self-improving governance system must separate
+  observation and proposal from authority, so it can surface what to fix
+  without ever authorizing its own changes.
+- **Consequences:** ALF captures observations and proposes findings but
+  cannot create authority, create governed work items, or begin
+  implementation; promotion is an operator decision under the normal
+  governed workflow. ALF is the concrete self-improvement vehicle that feeds
+  Project Leapfrog; it does not add a new project phase.
+- **Status:** planned (Phase 1 in planning). **Milestone:** Project
+  Leapfrog.

@@ -1,9 +1,12 @@
 # ClearWright End-of-Alpha Target State: Human Command to Final Output
 
 > **This is a protocol-vision target state for end of alpha.** It describes
-> intended accountability boundaries and workflow behavior. It is not a claim
-> that all agent automation shown here is implemented today. For what the public
-> alpha actually ships, see [Current alpha implementation boundary](#current-alpha-implementation-boundary)
+> intended accountability boundaries and workflow behavior. Automated,
+> independent multi-model review already ships and is in daily governed use;
+> what this diagram adds on top is a specific end-to-end packet-lane
+> integration that is not a claim that every step shown is wired together
+> today. For what the public alpha actually ships, see
+> [Current alpha implementation boundary](#current-alpha-implementation-boundary)
 > below.
 
 This document shows the intended end-of-alpha accountability flow: how a human
@@ -27,9 +30,13 @@ queue lanes.
 - **GitHub**: witness log for branches, commits, PRs, CI, and merge history.
 - **Consensus**: may support a decision but does not grant authority.
 
-The named multi-agent roles above (GPT Review Manager, Codex Code Worker, and the
-consensus loop) describe intended operating behavior. They are labeled in the
-diagram as roadmap, not shipped automation.
+The named multi-agent roles above (GPT Review Manager, Codex Code Worker, and
+the consensus loop) describe intended operating behavior for this specific
+packet-lane flow. ClearWright already ships an automated Review Council that
+runs real, independent GPT and Codex review of a plan under a deterministic
+agreement rule, through a fail-closed egress guard, and it is in daily governed
+use. What remains roadmap in this diagram is the end-to-end packet-lane
+integration shown here, not the existence of automated multi-model review.
 
 ## Packet statuses and lanes
 
@@ -270,14 +277,27 @@ graph TD
 
 ## Current alpha implementation boundary
 
-The current public alpha provides local manual tooling for packet validation,
-manual `CTA` / `DTA` / `RFI` decisions, claim handling, and lifecycle
-transitions. The named multi-agent roles shown in stages such as review, Codex
-drafting, and consensus loops describe intended end-of-alpha operating behavior
-and are not presented as autonomous shipped automation.
+What ships today is more than manual tooling, and less than the fully wired
+packet-lane flow drawn above. Concretely, the current alpha provides, in daily
+governed use on a single operator machine:
 
-Concretely, what ships today is a set of manual, single-machine command-line
-tools plus the clearance packet schema and the four-lane queue model. The
-orchestrator, reviewer, and worker roles in this diagram are how those pieces are
-intended to be operated by the end of alpha, not a description of running
-automation. See [ROADMAP.md](../ROADMAP.md) for status and direction.
+- the clearance packet schema, the four-lane queue, and local tools for packet
+  validation, manual `CTA` / `DTA` / `RFI` decisions, claim handling, and
+  lifecycle transitions;
+- an automated Review Council that runs real, independent GPT and Codex review
+  of a plan and decides with a deterministic agreement rule over structured
+  verdicts (never prose);
+- the governed "Use CW" loop, fail-closed plan gates, and fail-closed
+  verification before completion;
+- a fail-closed egress guard on the review-council dispatch path, with a
+  dedicated internal_technical (ITS) lane for governed self-review of
+  ClearWright's own code.
+
+What remains target is the specific end-to-end packet-lane automation drawn
+here: the automatic progression of a single clearance packet from `RTA` through
+`IN_REVIEW` challenge, `CTA` lease checks, the bounded engineering loop, and
+final review is the intended end-of-alpha integration, not yet one running
+pipeline. The shipped Review Council operates over work items and councils
+rather than by animating one packet through every lane in this diagram.
+ClearWright remains single-operator and local: it is not multi-user and not
+publicly deployable. See [ROADMAP.md](../ROADMAP.md) for status and direction.

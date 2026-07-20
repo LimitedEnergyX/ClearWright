@@ -242,11 +242,14 @@ before a clearance decision is made. [implemented] See
 
 **SDEG — Sensitive Data Egress Guard.** A control that prevents raw sensitive data
 (for example PII or PHI) from crossing a boundary; its raw PII/PHI egress block is a
-non-bypassable control. [in development, SDEG feature branch unmerged]
+non-bypassable control. Merged and enforced on the review-council dispatch path
+(provenance and composition binding, exact-byte and tripwire checks at send).
+[implemented]
 
 **ITS — Internal Technical Standard.** A provenance classification for ClearWright's
 own internal technical content, allowing governed self-review to proceed when every
-input has verified technical ancestry. [in development]
+input has verified technical ancestry. Used by the internal_technical dispatch lane,
+merged and exercised by real GPT + Codex self-review councils. [implemented]
 
 **RRQH — Repository, Runtime, and Queue Hygiene.** Governance work keeping the
 repository, runtime, and clearance queue clean and consistent. [completed governance

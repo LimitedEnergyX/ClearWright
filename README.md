@@ -20,7 +20,10 @@ Act (CTA), Denied to Act (DTA), Request for Information (RFI), and durable
 > **Status: early local alpha.** ClearWright is a local reference implementation
 > of the ClearWright Protocol, human-commanded and operator-controlled, and under
 > active development. It is in daily governed use by its operator - including
-> governing this repository's own development. It is not production-ready.
+> governing this repository's own development through an automated real GPT +
+> Codex Review Council that dispatches over a fail-closed egress guard. It is
+> single-operator and local: not multi-user, not publicly deployable, and not
+> production-ready.
 > Strategic plan: [PROJECT_PLAN.md](PROJECT_PLAN.md) · public summary:
 > [ROADMAP.md](ROADMAP.md) · decisions: [docs/DECISIONS.md](docs/DECISIONS.md).
 
@@ -134,6 +137,15 @@ This repository ships the local, single-machine foundation:
   Council (start / plan / council / progress / incident / verify / complete /
   status) with compact JSON and stable exit codes. Council agreement never grants
   authority; the operator's approved scope does. See [docs/USE_CW.md](docs/USE_CW.md).
+- A **fail-closed egress guard** (Sensitive Data Egress Guard) on the
+  review-council dispatch path (`tools/clearwright_egress_guard.py`): every real
+  GPT and Codex request is bound to committed, tracked, approved-repository
+  sources, verified byte-for-byte against a canonical form at send, and scanned
+  for sensitive-data and unicode-confusable tripwires, with provider credentials
+  resolved only inside the guard and never exposed to adapters. Governed
+  self-review of ClearWright's own control-plane code runs in a dedicated
+  **internal_technical (ITS)** dispatch lane, and dispatch eligibility is proven
+  before any council id or reviewer attempt is spent.
 - **Fail-closed plan gates**: a plan or incident council that escalates to the
   operator creates a durable gate; the governed workflow refuses to proceed
   until a durable, post-gate operator authority message resolves it.

@@ -5,6 +5,33 @@ will be added when releases begin.
 
 ## Unreleased
 
+- Internal technical review lane and classification repair (PR #83, merge
+  419b1f8; governed `internal_technical` work item). A governed work item that
+  explicitly declares `data_sensitivity: internal_technical` now resolves into
+  the internal-technical (ITS) dispatch lane instead of failing closed to
+  `sensitive`, so ClearWright's own control-plane code can be reviewed by the
+  real GPT + Codex council under fail-closed provenance and egress enforcement.
+  Sensitivity is re-derived dynamically from the preserved task envelope, so no
+  historical record is rewritten; the fail-closed default, clearance, operator
+  authority, gates, protected review, and verification requirements are all
+  unchanged (clearance keys on task kind, not on sensitivity). The previously
+  suspected GPT request-body construction defect was investigated and disproved
+  (the production adapter already builds bytes identical to the guard's
+  canonical form), so no unnecessary code change was made; the construction is
+  regression-locked. Round-trip regression tests cover the classification and
+  the ITS council integration; PR and merged-main CI green.
+- Fail-closed egress guard on the review-council dispatch path (Sensitive Data
+  Egress Guard, SDEG; enforced at the current merged baseline 419b1f8). Every
+  real GPT and Codex review is constructed and transmitted through one guarded
+  egress boundary that binds the outbound packet to its committed, tracked,
+  approved-repository sources (provenance and composition binding), re-verifies
+  the exact outbound bytes against a canonical form at send, scans the full
+  payload for sensitive-data and unicode-confusable tripwires, and re-checks
+  source bindings for time-of-check/time-of-use safety. Provider credentials
+  are resolved only inside the guard and are never exposed to adapters. The
+  classification is fail-closed: anything not provably approved technical
+  content blocks, and dispatch eligibility is proven before a council id or
+  reviewer attempt is spent.
 - Stabilization verification fixes (verify council round 1, work item
   message:msg-20260715T033322041191). The stop helper
   (`tools/stop-clearwright.ps1`) now copies the server's own recorded

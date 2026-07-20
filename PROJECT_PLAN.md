@@ -58,17 +58,18 @@ Capability matrix:
 | Artifact and evidence handling (pinning, hashes, capability-aware reviewer delivery) | local alpha | [repo-verifiable] PRs #31-#32 |
 | Task-centered operator site (three-region desktop, six-phase stepper, unified History ledger, archived-record labeling) | local alpha | [repo-verifiable] PRs #35-#37, `tests/test_site_ia_corrective.py` |
 | Canonical summaries, durable operator authority records, append-only audit trail | local alpha | [repo-verifiable] PRs #25-#38 |
+| Fail-closed egress guard (SDEG) on the review-council dispatch path; internal_technical (ITS) dispatch lane for governed self-review | local alpha | [repo-verifiable] present and enforced at merge 419b1f8, internal_technical classification repair PR #83, `tools/clearwright_egress_guard.py`; [operator-attested] real GPT + Codex ITS councils (July 2026) |
 | Stable/Candidate self-improvement topology (Project Leapfrog) | planned | no code exists |
 | Multi-user identity, SSO, workspace isolation | planned | no code exists |
 | Project registry and scoped connector | planned | no code exists |
 | Installer and deployment | planned (deferred) | no code exists |
 | VPN infrastructure | non-goal | ClearWright may operate over an administrator-selected private network; it does not provide or manage VPN infrastructure |
 
-Known defects under repair (work in progress, own governed work item):
-message-scoped work-item identity in shared threads, duplicate gate creation
-on capped-council bookkeeping, selected-task display isolation, server
-lifecycle logging, and a safe manual launcher. These are tracked as the
-**Pre-Leapfrog Stabilization Gate** (section 10).
+The **Pre-Leapfrog Stabilization Gate** (section 10) - message-scoped
+work-item identity in shared threads, duplicate gate creation on
+capped-council bookkeeping, selected-task display isolation, server lifecycle
+logging, and a safe manual launcher - is verified complete on merged code
+(2026-07-15).
 
 ## 4. Completed foundation
 
@@ -82,10 +83,14 @@ end-to-end by governing this repository's own development.
 
 ## 5. Current active phase
 
-**Planning alignment** (this document set) plus the **Pre-Leapfrog
-Stabilization Gate** (section 10). Project Leapfrog is the next active
-implementation milestone and begins only after the stabilization gate is
-verified complete.
+The **Pre-Leapfrog Stabilization Gate** (section 10) is verified complete on
+merged code (2026-07-15). The current active track is **ALF Phase 1 planning**
+(Automated Leapfrog): an internal, evidence-bound system that observes governed
+runs, records durable improvement findings, and proposes governed-work
+specifications for operator promotion. Phase 1 is planning only - schemas and
+architecture to a plan gate, creating no autonomous authority. ALF is the
+concrete self-improvement vehicle that feeds **Project Leapfrog**, which remains
+the next major implementation milestone.
 
 ## 6. Planned phases
 
@@ -230,8 +235,9 @@ approve itself.
 
 ## 10. Pre-Leapfrog Stabilization Gate (mandatory)
 
-Leapfrog implementation cannot start until each of the following is
-verified complete on merged code:
+**Status: verified complete on merged code (2026-07-15).** Leapfrog
+implementation could not start until each of the following was verified
+complete on merged code; each item below is now met:
 
 1. **Message-scoped work-item identity** - every actionable message has
    its own work-item identity; claims, councils, gates, summaries,

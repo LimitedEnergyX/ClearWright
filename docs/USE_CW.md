@@ -8,6 +8,10 @@ progress, consult an Incident Council on glitches, run a Verification Council on
 the result, and record completion. The operator supplies the task and the scope;
 the skill runs the workflow.
 
+Governed self-review of ClearWright's own code runs in a dedicated
+internal_technical (ITS) dispatch lane, and every reviewer request is
+constructed and transmitted through a single fail-closed egress guard.
+
 This is early alpha software and a local reference implementation.
 
 ## One entry point

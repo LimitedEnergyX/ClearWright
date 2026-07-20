@@ -2,11 +2,11 @@
 
 ![ClearWright](assets/brand/clearwright-dark-badge.png)
 
-ClearWright is an operator-controlled authorization, consensus, and audit layer
+ClearWright is an operator-controlled clearance, review, and audit layer
 for multi-AI-agent work. Agents request clearance before they occupy the next
 workflow channel, check readiness before starting expensive work, and act within
-operator-defined authority classes. Consensus supports clearance; it does not
-grant authority. The operator remains the highest authority and final override,
+operator-defined authority classes. Independent review supports clearance; it
+does not grant authority. The operator remains the highest authority and final override,
 and every request leaves a durable record.
 
 Operator-controlled means the operator defines policy, authority classes, and

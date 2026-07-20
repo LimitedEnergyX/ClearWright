@@ -42,7 +42,10 @@ exercises these mechanisms locally for governed workflows: a clearance queue, a 
 console and an append-only audit record, an automated review council that runs real independent review
 by two separate AI models through a fail-closed egress guard, and fail-closed gates and verification
 before completion. Planning for its first self-improvement capability is complete and has passed a
-two-reviewer plan gate; no implementation authority has been granted and no such code exists yet. The
+two-reviewer plan gate; no implementation authority has been granted and no such code exists yet. Beyond
+that governed two-model review lane, review and advising for this work have also been exercised through
+ChatGPT (API and WebUI), Codex, Claude, and Grok Pro WebUI. Grok currently participates via the WebUI as
+an out-of-band production advisor; full API integration into the governed review lane is pending. The
 clearance, review, and audit pattern is the core idea; the local implementation is an evolving proof of
 concept.
 

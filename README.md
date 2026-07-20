@@ -27,6 +27,27 @@ Act (CTA), Denied to Act (DTA), Request for Information (RFI), and durable
 > Strategic plan: [PROJECT_PLAN.md](PROJECT_PLAN.md) · public summary:
 > [ROADMAP.md](ROADMAP.md) · decisions: [docs/DECISIONS.md](docs/DECISIONS.md).
 
+## ClearWright Protocol: Human Authority for AI-Assisted Work
+
+The core idea is simple and strict:
+
+- AI may prepare plans and perform work inside an approved scope.
+- Independent reviewers may challenge those plans.
+- Only an explicit, durable human authorization releases the next step.
+- The system stays fail-closed. Absence of clearance is treated as denial.
+- Every decision, including the authorization itself, is written to a durable, append-only audit record.
+
+ClearWright today is a local, single-operator, early-alpha proof of concept that implements and
+exercises these mechanisms locally for governed workflows: a clearance queue, a durable operator
+console and an append-only audit record, an automated review council that runs real independent review
+by two separate AI models through a fail-closed egress guard, and fail-closed gates and verification
+before completion. Planning for its first self-improvement capability is complete and has passed a
+two-reviewer plan gate; no implementation authority has been granted and no such code exists yet. The
+clearance, review, and audit pattern is the core idea; the local implementation is an evolving proof of
+concept.
+
+Full description: [docs/CLEARWRIGHT_PROTOCOL_PUBLIC.md](docs/CLEARWRIGHT_PROTOCOL_PUBLIC.md).
+
 ## Why ClearWright
 
 Capable agents still need coordination. Without a clearance layer, agents start

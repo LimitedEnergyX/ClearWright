@@ -363,15 +363,22 @@ class Scenario10UnscannedReuse(_ItsBase):
 
 class Scenario11NonTechnicalWorkItem(_ItsBase):
     def test_ineligible_task_kind_declaration_fails_closed_to_sensitive(self):
-        for kind in ("chat", "governed"):
+        # high_risk and chat remain INELIGIBLE for the internal_technical lane and
+        # fail closed to sensitive. governed became eligible under authority
+        # msg-20260719T185647356093 (governance and content-sensitivity are
+        # separate axes) — see the eligible-kinds boundary below; high_risk stays
+        # excluded.
+        for kind in ("chat", "high_risk"):
             resolved, why = use_cw._resolve_data_sensitivity(
                 {"data_sensitivity": "internal_technical", "task_kind": kind})
             self.assertEqual(resolved, "sensitive")
             self.assertEqual(why, "ineligible_failclosed")
-        # Boundary: an eligible task_kind is honored.
-        resolved, why = use_cw._resolve_data_sensitivity(
-            {"data_sensitivity": "internal_technical", "task_kind": "analysis"})
-        self.assertEqual((resolved, why), ("internal_technical", "declared"))
+        # Boundary: eligible task_kinds are honored at the coarse declaration gate
+        # (dispatch still proves provenance/composition/exact-byte independently).
+        for kind in ("analysis", "actionable", "governed"):
+            resolved, why = use_cw._resolve_data_sensitivity(
+                {"data_sensitivity": "internal_technical", "task_kind": kind})
+            self.assertEqual((resolved, why), ("internal_technical", "declared"))
 
     def test_standard_council_over_its_graph_is_lane_not_authorized(self):
         # create_council maps data_sensitivity "standard" -> dispatch_lane "user".
@@ -553,6 +560,78 @@ class Scenario15ForgedCtxComponent(_ItsBase):
         self.assertFalse(report["committed"], report)
         self.assertNotEqual(report["statuses"].get("gpt"), "review")
         self.assertNotEqual(report["statuses"].get("codex"), "review")
+
+
+class Scenario16DefaultGptProviderBindingContract(_ItsBase):
+    """Regression lock for the DISPROVED GPT provider-binding root cause
+    (runtime/work/REPAIR-GPT-RCA-DISPROOF.md): the production gpt_fn used by the
+    real council (cwrc._default_gpt) forwards max_output_tokens=4000 and the
+    plan-supplied model to gpt_adapter.review(), which is the sole place
+    resolve_model() runs. So the ITS body is built from the canonical (resolved
+    model, 4000) values and NEVER falls back to the 3000 default. Scenario12
+    proves the resulting wire bytes are canonical via _gpt_reviewer (a faithful
+    stand-in); this test pins _default_gpt ITSELF, so a future regression that
+    omitted the token cap or passed a divergent/unresolved model is caught here
+    rather than only at a live dispatch."""
+
+    def test_default_gpt_forwards_canonical_tokens_and_plan_model_to_review(self):
+        captured = {}
+        orig = gpt_adapter.review
+
+        def fake_review(root, text, **kw):
+            captured.update(kw)
+            captured["text"] = text
+            return {"ok": True, "posted": True, "reviewer": "gpt"}
+
+        gpt_adapter.review = fake_review
+        try:
+            cwrc._default_gpt(
+                self.root, "COMPOSED ITS PACKET", thread_id="t", work_item_id="wi",
+                packet_id=None, council_id="c", round_no=1, phase="plan",
+                model="gpt-plan-model", timeout=5, egress_context=None)
+        finally:
+            gpt_adapter.review = orig
+        # The canonical token cap is forwarded (never the 3000 default) ...
+        self.assertEqual(captured.get("max_output_tokens"), 4000)
+        # ... and the plan-supplied model reaches review() unchanged (review is
+        # the sole resolve_model() site, guaranteeing adapter/guard model parity).
+        self.assertEqual(captured.get("model"), "gpt-plan-model")
+        self.assertEqual(captured.get("text"), "COMPOSED ITS PACKET")
+
+
+class Scenario17GovernedItLaneConsequence(_ItsBase):
+    """Review-driven (cw-council-20260719T204834514030): prove the READ-PATH
+    CONSEQUENCE, not just the resolver return. A persisted governed +
+    internal_technical envelope whose _audit is a STALE 'sensitive' re-resolves via
+    the read path AND selects the internal_technical DISPATCH LANE at council
+    creation; an unspecified governed item stays sensitive -> user lane."""
+
+    def test_persisted_governed_it_selects_internal_technical_lane(self):
+        env = {"task_kind": "governed", "request": "r", "approved_scope": "s",
+               "intended_actions": ["a"], "excluded_actions": ["x"],
+               "operator_authority_source": "test", "verification_required": True,
+               "data_sensitivity": "internal_technical"}
+        use_cw._persist_envelope(self.root, "msg-gov-it", env,
+                                 {"classification": "governed", "data_sensitivity": "sensitive",
+                                  "data_sensitivity_source": "ineligible_failclosed"})
+        wid = "message:msg-gov-it"
+        self.assertEqual(use_cw._data_sensitivity(self.root, wid), "internal_technical")
+        council = cwrc.create_council(self.root, thread_id="t-lane", work_item_id=wid,
+                                      data_sensitivity=use_cw._data_sensitivity(self.root, wid))
+        self.assertEqual(council["dispatch_lane"], "internal_technical")
+        self.assertEqual(council["data_sensitivity"], "internal_technical")
+
+    def test_persisted_governed_unspecified_selects_user_lane(self):
+        env = {"task_kind": "governed", "request": "r", "approved_scope": "s",
+               "intended_actions": ["a"], "excluded_actions": ["x"],
+               "operator_authority_source": "test"}
+        use_cw._persist_envelope(self.root, "msg-gov-unspec", env,
+                                 {"classification": "governed", "data_sensitivity": "sensitive"})
+        wid = "message:msg-gov-unspec"
+        self.assertEqual(use_cw._data_sensitivity(self.root, wid), "sensitive")
+        council = cwrc.create_council(self.root, thread_id="t-lane2", work_item_id=wid,
+                                      data_sensitivity=use_cw._data_sensitivity(self.root, wid))
+        self.assertEqual(council["dispatch_lane"], "user")
 
 
 if __name__ == "__main__":

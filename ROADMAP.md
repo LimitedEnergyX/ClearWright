@@ -37,7 +37,9 @@ commitments.
   improvement findings, and proposes governed-work specifications for operator
   promotion. Phase 1 is planning only - schemas and architecture to a plan
   gate - and creates no autonomous authority. It is the concrete
-  self-improvement vehicle feeding Project Leapfrog.
+  self-improvement vehicle feeding Project Leapfrog. See
+  [docs/alf/ALF-VISION.md](docs/alf/ALF-VISION.md) for the ALF vision graphic
+  (planned capability; not yet shipped).
 - **Project Leapfrog** (next major implementation milestone): one trusted
   Stable ClearWright instance governs development and verification of one
   isolated Candidate instance - separate runtime roots and secrets, an

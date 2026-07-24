@@ -114,6 +114,43 @@ class IdentityAndContainmentTest(unittest.TestCase):
         with self.assertRaises(alf.AlfError):
             rev._read_message(self.q, "../secret")
 
+    def _can_symlink(self):
+        try:
+            tgt = os.path.join(self.q, "_st")
+            os.makedirs(tgt, exist_ok=True)
+            lnk = os.path.join(self.q, "_sl")
+            os.symlink(tgt, lnk)
+            os.unlink(lnk)
+            return True
+        except (OSError, NotImplementedError, AttributeError):
+            return False
+
+    def test_contained_rejects_symlink_escape(self):
+        if not self._can_symlink():
+            self.skipTest("symlinks not permitted in this environment")
+        outside = tempfile.mkdtemp(prefix="alf-out-")
+        try:
+            link = os.path.join(alf.alf_root(self.q), "observations", "evil-link")
+            os.symlink(outside, link, target_is_directory=True)
+            with self.assertRaises(alf.AlfError):
+                alf._contained(os.path.join(link, "x.json"), self.q)
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_rmtree_does_not_follow_symlink(self):
+        if not self._can_symlink():
+            self.skipTest("symlinks not permitted in this environment")
+        outside = tempfile.mkdtemp(prefix="alf-out-")
+        sentinel = os.path.join(outside, "keep.txt")
+        with open(sentinel, "w") as fh:
+            fh.write("x")
+        sdir = alf.staged_dir(self.q, "op-cleanup0001")
+        os.makedirs(sdir, exist_ok=True)
+        os.symlink(outside, os.path.join(sdir, "link"), target_is_directory=True)
+        alf._rmtree(sdir)
+        self.assertTrue(os.path.exists(sentinel))  # never followed the link outward
+        shutil.rmtree(outside, ignore_errors=True)
+
 
 class TornJournalTest(unittest.TestCase):
     def setUp(self):
@@ -269,6 +306,23 @@ class DeltaTamperTest(unittest.TestCase):
         dup = alf.chained_record(body, recs[-1]["line_sha256"])  # dup revision_no
         with open(hp, "a", encoding="utf-8") as fh:
             fh.write(alf.canonical_line(dup).decode("utf-8"))
+        with self.assertRaises(alf.IntegrityHalt):
+            dlt.generate_delta(self.q, "run-x")
+
+    def test_altered_finding_revision_retained_hash_fails_closed(self):
+        # alter the embedded finding record but retain revision_sha256, and recompute
+        # ONLY the outer line chain so verify_chain passes; the revision_sha256
+        # recompute in _resolve_finding_revision must still catch it.
+        hp = syn.finding_history_path(self.q, "ALF-0001")
+        recs, _ = alf._read_valid_lines(hp)
+        rec = recs[-1]
+        rec["record"] = dict(rec["record"])
+        rec["record"]["title"] = "TAMPERED"
+        body = {k: v for k, v in rec.items() if k != "line_sha256"}
+        rec["line_sha256"] = alf.sha256_hex(alf.canonical_bytes(body))
+        with open(hp, "w", encoding="utf-8") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n")
         with self.assertRaises(alf.IntegrityHalt):
             dlt.generate_delta(self.q, "run-x")
 

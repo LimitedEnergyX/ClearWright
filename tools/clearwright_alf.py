@@ -180,9 +180,12 @@ def safe_rel(rel):
 
 
 def _contained(path, q):
-    """Ensure the normalized absolute path is a descendant of alf_root(q)."""
-    root = os.path.abspath(alf_root(q))
-    full = os.path.abspath(path)
+    """Ensure the SYMLINK-RESOLVED absolute path is a descendant of alf_root(q).
+    realpath (not abspath) resolves symlinks / junctions / Windows reparse points,
+    so a link planted inside alf/ that points outside the subtree is caught
+    (round-4 HIGH). alf_root itself is realpath-resolved as the trusted anchor."""
+    root = os.path.realpath(alf_root(q))
+    full = os.path.realpath(path)
     if full != root and not full.startswith(root + os.sep):
         raise AlfError("path escapes alf root: {!r}".format(path))
     return path
@@ -562,7 +565,8 @@ def _append_line_fsync(path, line_bytes):
 
 
 def _replace_bytes_fsync(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
     tmp = path + ".tmp-" + sha256_hex(data)[:8]
     with open(tmp, "wb") as fh:
         fh.write(data)
@@ -582,14 +586,30 @@ def _replace_bytes_fsync(path, data):
             except OSError:
                 pass
             raise
+    # Durable directory entry so a committed replace survives power loss (round-4).
+    cwl._fsync_dir(directory)
 
 
 def _rmtree(path):
+    """Remove a staging directory WITHOUT following symlinks (round-4): a link is
+    unlinked, never traversed, so cleanup can never delete outside alf/."""
+    if os.path.islink(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return
     if not os.path.isdir(path):
         return
     for name in os.listdir(path):
+        child = os.path.join(path, name)
         try:
-            os.remove(os.path.join(path, name))
+            if os.path.islink(child):
+                os.unlink(child)
+            elif os.path.isdir(child):
+                _rmtree(child)
+            else:
+                os.remove(child)
         except OSError:
             pass
     try:
@@ -694,8 +714,20 @@ def recover(q):
         known = {b["op_id"] for b in begins}
         if os.path.isdir(sroot):
             for name in os.listdir(sroot):
-                if name not in known:
-                    _rmtree(os.path.join(sroot, name))
+                if name in known:
+                    continue
+                cand = os.path.join(sroot, name)
+                if os.path.islink(cand):
+                    try:
+                        os.unlink(cand)  # never follow a planted staging link
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    _contained(cand, q)  # realpath-contained before recursive remove
+                except AlfError:
+                    continue
+                _rmtree(cand)
         return {"status": "recovered" if recovered else "clean",
                 "recovered": recovered, "torn_tail": tail is not None}
 

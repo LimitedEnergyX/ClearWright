@@ -87,6 +87,13 @@ def _verify_snapshot_refs(q, snapshot):
         if live is None or live.get("line_sha256") != a.get("line_sha256"):
             raise alf.IntegrityHalt("delta snapshot attribution {} missing or altered"
                                     .format(a["attribution_id"]))
+    # Re-authenticate every referenced finding-history chain too (round-4 HIGH); the
+    # per-revision revision_sha256 is recomputed in _resolve_finding_revision.
+    for fr in snapshot.get("finding_revisions", []):
+        chain = alf.verify_chain(syn.finding_history_path(q, fr["entry_id"]))
+        if chain:
+            raise alf.IntegrityHalt("delta finding-history chain break for {}: {}"
+                                    .format(fr["entry_id"], "; ".join(chain)))
 
 
 def _delta_chain_path(q):
@@ -164,9 +171,19 @@ def _resolve_finding_revision(q, eid, rn, expected_sha):
     if len(matches) != 1:  # missing OR duplicate revision_no -> fail closed (round-3)
         raise alf.IntegrityHalt("finding {} rev {}: {} matching revisions (expected "
                                 "exactly 1)".format(eid, rn, len(matches)))
-    if matches[0].get("revision_sha256") != expected_sha:
-        raise alf.IntegrityHalt("finding {} rev {} sha divergent".format(eid, rn))
-    return matches[0]["record"]
+    r = matches[0]
+    # RECOMPUTE revision_sha256 over the revision payload (minus its own hash and the
+    # outer chain fields) so an altered record that retained a stale revision_sha256
+    # AND recomputed the outer line chain is still caught (round-4 HIGH).
+    body = {k: v for k, v in r.items()
+            if k not in ("revision_sha256", "prev_line_sha256", "line_sha256")}
+    if alf.sha256_hex(alf.canonical_bytes(body)) != r.get("revision_sha256"):
+        raise alf.IntegrityHalt("finding {} rev {} revision_sha256 does not "
+                                "authenticate its record".format(eid, rn))
+    if r.get("revision_sha256") != expected_sha:
+        raise alf.IntegrityHalt("finding {} rev {} sha divergent from snapshot"
+                                .format(eid, rn))
+    return r["record"]
 
 
 def _derive(q, snapshot):

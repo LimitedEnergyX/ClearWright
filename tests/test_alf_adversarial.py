@@ -151,6 +151,22 @@ class IdentityAndContainmentTest(unittest.TestCase):
         self.assertTrue(os.path.exists(sentinel))  # never followed the link outward
         shutil.rmtree(outside, ignore_errors=True)
 
+    def test_fixed_name_path_symlink_escape_rejected(self):
+        # A symlink planted at a FIXED-NAME directory (observations/) that points
+        # outside must be rejected by the centralized _p containment, not only the
+        # id-bearing/tested paths.
+        if not self._can_symlink():
+            self.skipTest("symlinks not permitted in this environment")
+        outside = tempfile.mkdtemp(prefix="alf-out-")
+        try:
+            obs_dir = os.path.join(alf.alf_root(self.q), "observations")
+            shutil.rmtree(obs_dir, ignore_errors=True)
+            os.symlink(outside, obs_dir, target_is_directory=True)
+            with self.assertRaises(alf.AlfError):
+                alf.observation_file(self.q, "obs-abc123")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
 
 class TornJournalTest(unittest.TestCase):
     def setUp(self):
@@ -233,6 +249,33 @@ class ConcurrencyTest(unittest.TestCase):
         for t in threads:
             t.join()
         self.assertEqual(len(set(made)), 6)  # no two creators shared an entry_id
+        self.assertTrue(alf.verify_hashes(self.q)["ok"])
+
+    def test_concurrent_delta_generation_single_commit(self):
+        obs = alf.build_observation(kind="council_outcome", subsystem="council_engine",
+                                    summary="d", run_id="run-c",
+                                    source_refs=[{"ref": "c:1", "sha256": "a" * 64,
+                                                  "role": "observed_occurrence"}])
+        alf.capture(self.q, obs)
+        syn.create_finding(self.q, {"title": "t", "status": "PRIORITIZED",
+                                    "subsystem": "cli", "failure_class": "lifecycle_failure",
+                                    "blast_radius": "single_subsystem",
+                                    "priority_tier": 1, "priority_score": 1}, run_id="run-c")
+        errs = []
+
+        def worker():
+            try:
+                dlt.generate_delta(self.q, "run-c")
+            except Exception as exc:  # noqa: BLE001
+                errs.append(repr(exc))
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errs, [])  # all generated-or-verified-noop, none corrupt
+        self.assertTrue(os.path.exists(dlt.delta_path(self.q, "run-c")))
         self.assertTrue(alf.verify_hashes(self.q)["ok"])
 
 
@@ -323,6 +366,18 @@ class DeltaTamperTest(unittest.TestCase):
         with open(hp, "w", encoding="utf-8") as fh:
             for r in recs:
                 fh.write(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n")
+        with self.assertRaises(alf.IntegrityHalt):
+            dlt.generate_delta(self.q, "run-x")
+
+    def test_persisted_snapshot_value_tamper_fails_closed(self):
+        # tamper the persisted immutable snapshot; rerun must authenticate its bytes
+        # against the delta's input_snapshot_sha256 anchor and fail closed.
+        sp = dlt.snapshot_path(self.q, "run-x")
+        with open(sp, encoding="utf-8") as fh:
+            snap = json.load(fh)
+        snap["run_id"] = "run-TAMPERED"
+        with open(sp, "w", encoding="utf-8") as fh:
+            json.dump(snap, fh)
         with self.assertRaises(alf.IntegrityHalt):
             dlt.generate_delta(self.q, "run-x")
 

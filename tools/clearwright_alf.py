@@ -88,7 +88,12 @@ def alf_root(queue_root):
 
 
 def _p(queue_root, *parts):
-    return os.path.join(alf_root(queue_root), *parts)
+    # Centralized containment-safe path constructor (round-5): EVERY ALF path is
+    # realpath-contained under alf_root, so a symlink/junction/reparse point planted
+    # at ANY component (journal, observations, meta, quarantine, findings, deltas)
+    # that points outside is rejected for reads, writes, and cleanup - not only the
+    # id-bearing paths. The id validators (safe_id/safe_rel) still guard the leaf.
+    return _contained(os.path.join(alf_root(queue_root), *parts), queue_root)
 
 
 def observations_dir(q):

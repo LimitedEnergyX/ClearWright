@@ -292,37 +292,51 @@ def _anchors(q, input_snapshot_sha256):
 def generate_delta(q, run_id, work_item_id=None):
     alf.ensure_layout(q)
     spath, dpath = snapshot_path(q, run_id), delta_path(q, run_id)
-    if os.path.exists(spath):
-        if not os.path.exists(dpath):
-            raise alf.AlfError("run {}: input snapshot exists but the delta file is "
-                               "missing (inconsistent state; fail closed)".format(run_id))
-        with open(spath, encoding="utf-8") as fh:
-            snapshot = json.load(fh)
-        recomputed = _content_with_meta(_derive(q, snapshot), run_id, work_item_id)
-        with open(dpath, encoding="utf-8") as fh:
-            stored = json.load(fh)
-        stored_content = {k: v for k, v in stored.items()
-                          if k not in ("generated_at", "anchors")}
-        if stored_content == recomputed:
-            return {"status": "noop", "run_id": run_id}
-        raise alf.IntegrityHalt(
-            "Run Improvement Delta rerun divergence for run {} against its immutable "
-            "snapshot (Tier 1 durable-record-integrity)".format(run_id))
-    snapshot = _build_snapshot(q, run_id)
-    input_snapshot_sha256 = alf.sha256_hex(alf.canonical_bytes(snapshot) + b"\n")
-    anchors = _anchors(q, input_snapshot_sha256)
-    delta = _content_with_meta(_derive(q, snapshot), run_id, work_item_id)
-    delta["generated_at"] = alf.now_iso()
-    delta["anchors"] = anchors
-    anchors_sha = alf.sha256_hex(alf.canonical_bytes(anchors))
-    op = alf.Operation(q, "delta_generate", [run_id])
-    op.replace_file("deltas/rid-{}.input.json".format(run_id), snapshot)
-    op.replace_file("deltas/rid-{}.json".format(run_id), delta)
-    op.replace_file("meta/delta-chain.json", {"last_anchors_sha256": anchors_sha})
-    op.commit()
-    return {"status": "generated", "run_id": run_id,
-            "input_snapshot_sha256": input_snapshot_sha256,
-            "anchors_sha256": anchors_sha}
+    out = {}
+
+    def _build(op):
+        # The rerun/first-gen decision AND all reads/writes run UNDER one writer lock
+        # (round-5), so two concurrent generators cannot both pass the absent-check
+        # and double-write the first snapshot/delta.
+        if os.path.exists(spath):
+            if not os.path.exists(dpath):
+                raise alf.AlfError("run {}: input snapshot exists but the delta file "
+                                   "is missing (fail closed)".format(run_id))
+            with open(spath, encoding="utf-8") as fh:
+                snapshot = json.load(fh)
+            with open(dpath, encoding="utf-8") as fh:
+                stored = json.load(fh)
+            # Authenticate the persisted snapshot bytes against the delta's recorded
+            # input_snapshot_sha256 anchor (round-5): a tampered snapshot fails closed.
+            snap_sha = alf.sha256_hex(alf.canonical_bytes(snapshot) + b"\n")
+            if snap_sha != (stored.get("anchors") or {}).get("input_snapshot_sha256"):
+                raise alf.IntegrityHalt("delta rerun: persisted snapshot bytes diverge "
+                                        "from the delta's input_snapshot_sha256 anchor")
+            recomputed = _content_with_meta(_derive(q, snapshot), run_id, work_item_id)
+            stored_content = {k: v for k, v in stored.items()
+                              if k not in ("generated_at", "anchors")}
+            if stored_content == recomputed:
+                out["result"] = {"status": "noop", "run_id": run_id}
+                return True  # verified no-op, no write
+            raise alf.IntegrityHalt(
+                "Run Improvement Delta rerun divergence for run {} against its "
+                "immutable snapshot (Tier 1)".format(run_id))
+        snapshot = _build_snapshot(q, run_id)
+        input_sha = alf.sha256_hex(alf.canonical_bytes(snapshot) + b"\n")
+        anchors = _anchors(q, input_sha)
+        delta = _content_with_meta(_derive(q, snapshot), run_id, work_item_id)
+        delta["generated_at"] = alf.now_iso()
+        delta["anchors"] = anchors
+        anchors_sha = alf.sha256_hex(alf.canonical_bytes(anchors))
+        op.replace_file("deltas/rid-{}.input.json".format(run_id), snapshot)
+        op.replace_file("deltas/rid-{}.json".format(run_id), delta)
+        op.replace_file("meta/delta-chain.json", {"last_anchors_sha256": anchors_sha})
+        out["result"] = {"status": "generated", "run_id": run_id,
+                         "input_snapshot_sha256": input_sha, "anchors_sha256": anchors_sha}
+        return None
+
+    alf.Operation(q, "delta_generate", [run_id]).commit(build=_build)
+    return out["result"]
 
 
 def load_delta(q, run_id):

@@ -1526,7 +1526,9 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
 
     _persist_council(root, council)
     exhausted = [rev for rev, st in statuses.items() if st == "attempts_exhausted"]
-    # Enabler A: surface the durable normalized failure reasons per reviewer.
+    # Enabler A (approved enabler schema addition per CTA items 2-3, NOT the
+    # additive-alf subtree): surface the durable normalized failure reasons per
+    # reviewer. This adds normalized_reasons to attempt_state and to this return.
     normalized_reasons = {
         rev: attempt_state.get(_attempt_key(round_no, rev), {}).get("normalized_reasons", [])
         for rev in statuses}

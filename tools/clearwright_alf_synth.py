@@ -338,9 +338,14 @@ def list_findings(q):
         return out
     import json as _j
     for name in sorted(os.listdir(d)):
-        if name.endswith(".json"):
-            with open(os.path.join(d, name), encoding="utf-8") as fh:
-                out.append(_j.load(fh))
+        if not name.endswith(".json"):
+            continue
+        try:
+            path = finding_head_path(q, name[:-5])  # validates entry_id + contains
+        except alf.AlfError:
+            continue  # skip malformed / non-conforming finding filenames (round-6)
+        with open(path, encoding="utf-8") as fh:
+            out.append(_j.load(fh))
     return out
 
 

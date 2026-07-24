@@ -167,6 +167,27 @@ class IdentityAndContainmentTest(unittest.TestCase):
         finally:
             shutil.rmtree(outside, ignore_errors=True)
 
+    def test_root_alf_symlink_escape_rejected(self):
+        # QUEUE_ROOT/alf itself pre-planted as a symlink to outside: the anchor is the
+        # real queue root + lexical 'alf', so ensure_layout/capture fail closed and
+        # nothing is written outside the queue root (round-6 Codex).
+        if not self._can_symlink():
+            self.skipTest("symlinks not permitted in this environment")
+        q2 = tempfile.mkdtemp(prefix="alf-rootq-")
+        outside = tempfile.mkdtemp(prefix="alf-out-")
+        try:
+            os.symlink(outside, os.path.join(q2, "alf"), target_is_directory=True)
+            with self.assertRaises(alf.AlfError):
+                alf.ensure_layout(q2)
+            with self.assertRaises(alf.AlfError):
+                alf.capture(q2, alf.build_observation(kind="executor_note",
+                                                      subsystem="cli", summary="x",
+                                                      run_id="r"))
+            self.assertEqual(os.listdir(outside), [])  # never wrote outside
+        finally:
+            shutil.rmtree(q2, ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)
+
 
 class TornJournalTest(unittest.TestCase):
     def setUp(self):

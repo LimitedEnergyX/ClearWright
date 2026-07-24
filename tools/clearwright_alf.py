@@ -45,6 +45,19 @@ _REPLACE_RETRY_WINERRORS = (5, 32)
 # within one process, so a compound transaction is atomic on both axes (HIGH-3).
 _COMMIT_LOCK = threading.RLock()
 
+# Phase-2 hardening residuals (operator-accepted 2026-07-24; OUT of the packet
+# section-8 threat model, which explicitly EXCLUDES an attacker with filesystem write
+# access to QUEUE_ROOT able to plant symlinks/junctions). Verification rounds 2-6 fixed
+# every in-model defect and both reviewers confirmed the corrections; the following
+# deeper hardening is deferred to a later governed increment, per section 8's own
+# honest-boundary convention:
+#   - no-follow / O_EXCL-safe creation for predictable temporary-replace, staged-payload,
+#     and quarantine-output paths (a symlink pre-planted at those exact paths could
+#     redirect a write outside alf/);
+#   - byte-level authentication of the RAW persisted delta/snapshot bytes against a
+#     durable committed journal staged-write hash (rerun currently re-derives and
+#     compares deterministic content AND authenticates the snapshot hash).
+
 OBSERVATION_KINDS = {
     "run_started", "run_completed", "run_closed", "council_round",
     "council_outcome", "reviewer_attempt", "dispatch_failure", "gate_created",
@@ -185,11 +198,15 @@ def safe_rel(rel):
 
 
 def _contained(path, q):
-    """Ensure the SYMLINK-RESOLVED absolute path is a descendant of alf_root(q).
-    realpath (not abspath) resolves symlinks / junctions / Windows reparse points,
-    so a link planted inside alf/ that points outside the subtree is caught
-    (round-4 HIGH). alf_root itself is realpath-resolved as the trusted anchor."""
-    root = os.path.realpath(alf_root(q))
+    """Ensure `path` resolves under QUEUE_ROOT/alf. The trusted anchor is the REAL
+    queue root plus a LEXICAL 'alf' component - NOT realpath(alf_root(q)), because if
+    QUEUE_ROOT/alf is itself a planted symlink/junction/reparse point, realpath would
+    FOLLOW it and every check would pass, moving the whole store outside (round-6). A
+    real alf/ that is a link is rejected outright; child links pointing outside are
+    caught because realpath(path) then falls outside the lexical anchor (round-4)."""
+    if os.path.islink(alf_root(q)):
+        raise AlfError("QUEUE_ROOT/alf is a symlink/junction; refusing (round-6)")
+    root = os.path.join(os.path.realpath(q), "alf")
     full = os.path.realpath(path)
     if full != root and not full.startswith(root + os.sep):
         raise AlfError("path escapes alf root: {!r}".format(path))

@@ -25,11 +25,49 @@ ALF_RECORD_VERSION = alf.ALF_RECORD_VERSION
 
 
 def delta_path(q, run_id):
-    return alf._p(q, "deltas", "rid-{}.json".format(run_id))
+    return alf._contained(
+        alf._p(q, "deltas", "rid-{}.json".format(alf.safe_id(run_id, "run_id"))), q)
 
 
 def snapshot_path(q, run_id):
-    return alf._p(q, "deltas", "rid-{}.input.json".format(run_id))
+    return alf._contained(alf._p(
+        q, "deltas", "rid-{}.input.json".format(alf.safe_id(run_id, "run_id"))), q)
+
+
+def _verify_snapshot_refs(q, snapshot):
+    """Verify every content-addressed reference the immutable snapshot records still
+    resolves to bytes with the recorded hash (HIGH-4). A missing, altered, or
+    unverifiable occurrence/observation/attribution reference fails closed rather
+    than being ignored. Finding revisions are hash-verified in _resolve_finding_revision."""
+    occ_by_id = {r.get("occurrence_id"): r
+                 for r in alf._read_valid_lines(alf.occurrences_path(q))[0]}
+    for o in snapshot.get("occurrences", []):
+        live = occ_by_id.get(o["occurrence_id"])
+        if live is None or live.get("line_sha256") != o.get("line_sha256"):
+            raise alf.IntegrityHalt("delta snapshot occurrence {} missing or altered"
+                                    .format(o["occurrence_id"]))
+    idx_by_id = {r.get("observation_id"): r
+                 for r in alf._read_valid_lines(alf.index_path(q))[0]}
+    for ob in snapshot.get("observations", []):
+        live = idx_by_id.get(ob["observation_id"])
+        if live is None or live.get("sha256") != ob.get("sha256"):
+            raise alf.IntegrityHalt("delta snapshot observation {} missing or altered "
+                                    "in index".format(ob["observation_id"]))
+        ofile = alf.observation_file(q, ob["observation_id"])
+        if not os.path.exists(ofile):
+            raise alf.IntegrityHalt("delta snapshot observation {} file missing"
+                                    .format(ob["observation_id"]))
+        with open(ofile, "rb") as fh:
+            if alf.sha256_hex(fh.read()) != ob["sha256"]:
+                raise alf.IntegrityHalt("delta snapshot observation {} bytes diverge"
+                                        .format(ob["observation_id"]))
+    led_by_id = {r.get("attribution_id"): r
+                 for r in alf._read_valid_lines(alf.ledger_path(q))[0]}
+    for a in snapshot.get("attributions", []):
+        live = led_by_id.get(a["attribution_id"])
+        if live is None or live.get("line_sha256") != a.get("line_sha256"):
+            raise alf.IntegrityHalt("delta snapshot attribution {} missing or altered"
+                                    .format(a["attribution_id"]))
 
 
 def _delta_chain_path(q):
@@ -112,6 +150,7 @@ def _resolve_finding_revision(q, eid, rn, expected_sha):
 
 
 def _derive(q, snapshot):
+    _verify_snapshot_refs(q, snapshot)  # HIGH-4: fail closed on any divergent ref
     run_id = snapshot["run_id"]
     idx, _ = alf._read_valid_lines(alf.index_path(q))
     first_seen = {r["observation_id"]: r["run_id"] for r in idx}
@@ -217,6 +256,9 @@ def generate_delta(q, run_id, work_item_id=None):
     alf.ensure_layout(q)
     spath, dpath = snapshot_path(q, run_id), delta_path(q, run_id)
     if os.path.exists(spath):
+        if not os.path.exists(dpath):
+            raise alf.AlfError("run {}: input snapshot exists but the delta file is "
+                               "missing (inconsistent state; fail closed)".format(run_id))
         with open(spath, encoding="utf-8") as fh:
             snapshot = json.load(fh)
         recomputed = _content_with_meta(_derive(q, snapshot), run_id, work_item_id)

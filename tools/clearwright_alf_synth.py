@@ -189,11 +189,13 @@ def compute_score(finding, occurrence_count=None, regression_flag=0):
 # Findings store (packet section 6): head + append-only chained revision log.
 # --------------------------------------------------------------------------- #
 def finding_head_path(q, entry_id):
-    return alf._p(q, "findings", entry_id + ".json")
+    return alf._contained(
+        alf._p(q, "findings", alf.safe_id(entry_id, "entry_id") + ".json"), q)
 
 
 def finding_history_path(q, entry_id):
-    return alf._p(q, "findings", "history", entry_id + ".jsonl")
+    return alf._contained(alf._p(
+        q, "findings", "history", alf.safe_id(entry_id, "entry_id") + ".jsonl"), q)
 
 
 def _seq_path(q):
@@ -227,46 +229,77 @@ def _revision_record(finding, revision_no, revising_actor, reason, run_id, prev)
 
 def create_finding(q, finding, revising_actor="alf-synth", reason="created",
                    run_id=None):
-    """Allocate a gap-allowed entry_id and write revision 1 + the head, all inside
-    one journal transaction. Returns the entry_id."""
+    """Allocate a gap-allowed entry_id and write revision 1 + head + the sequence
+    bump, ALL inside one writer lock (HIGH-3): the sequence read/allocation happens
+    under the same lock as the commit, so two creators cannot claim the same id.
+    Returns the entry_id."""
     materialize_model(q)
-    entry_id, nxt = _next_entry_id(q)
     finding = dict(finding)
-    finding["entry_id"] = entry_id
     finding["alf_record_version"] = ALF_RECORD_VERSION
-    hist_rel = "findings/history/{}.jsonl".format(entry_id)
-    prev, _ = alf.chain_head(finding_history_path(q, entry_id))
-    revision = _revision_record(finding, 1, revising_actor, reason, run_id, prev)
+    out = {}
 
-    op = alf.Operation(q, "create_finding", [entry_id])
-    op.append_line(hist_rel, revision)
-    op.replace_file("findings/{}.json".format(entry_id), finding)
-    op.replace_file("meta/entry-seq.json", {"last": nxt})
-    op.commit()
-    return entry_id
+    def _build(op):
+        entry_id, nxt = _next_entry_id(q)  # sequence read UNDER the lock
+        f = dict(finding)
+        f["entry_id"] = entry_id
+        op.subject_ids = [entry_id]
+        prev, _ = alf.chain_head(finding_history_path(q, entry_id))
+        op.append_line("findings/history/{}.jsonl".format(entry_id),
+                       _revision_record(f, 1, revising_actor, reason, run_id, prev))
+        op.replace_file("findings/{}.json".format(entry_id), f)
+        op.replace_file("meta/entry-seq.json", {"last": nxt})
+        out["entry_id"] = entry_id
+        return None
+
+    alf.Operation(q, "create_finding", []).commit(build=_build)
+    return out["entry_id"]
+
+
+def _atomic_finding_update(q, entry_id, op_kind, produce, actor="alf-synth",
+                           run_id=None):
+    """Atomic finding revision (HIGH-3): produce(head) runs UNDER the writer lock
+    and returns None for a no-op, or (next_record, reason, ledger_lines). The head
+    load, all idempotence/existence reads produce() performs, revision_no, and the
+    chain predecessor are computed under the SAME lock as the commit. Returns
+    {"revision_no": n} or {} on no-op."""
+    out = {}
+
+    def _build(op):
+        head = load_finding(q, entry_id)
+        produced = produce(head)
+        if produced is None:
+            return True  # no-op
+        nxt_record, reason, extra_appends = produced
+        nxt_record = dict(nxt_record)
+        nxt_record["entry_id"] = entry_id
+        nxt_record["alf_record_version"] = ALF_RECORD_VERSION
+        revisions = _read_history(q, entry_id)
+        revision_no = revisions[-1]["revision_no"] + 1 if revisions else 1
+        prev, _ = alf.chain_head(finding_history_path(q, entry_id))
+        op.append_line("findings/history/{}.jsonl".format(entry_id),
+                       _revision_record(nxt_record, revision_no, actor, reason,
+                                        run_id, prev))
+        op.replace_file("findings/{}.json".format(entry_id), nxt_record)
+        for target_rel, payload in (extra_appends or []):
+            op.append_line(target_rel, payload)
+        out["revision_no"] = revision_no
+        return None
+
+    alf.Operation(q, op_kind, [entry_id, "rev"]).commit(build=_build)
+    return out
 
 
 def update_finding(q, entry_id, mutate, revising_actor="alf-synth",
                    reason="update", run_id=None):
-    """Append a new revision. `mutate` receives the current head record and returns
-    the next record. Head is rewritten to equal the new revision's record."""
-    head = load_finding(q, entry_id)
-    if head is None:
-        raise alf.AlfError("no finding {}".format(entry_id))
-    nxt_record = dict(mutate(dict(head)))
-    nxt_record["entry_id"] = entry_id
-    nxt_record["alf_record_version"] = ALF_RECORD_VERSION
-    hist_path = finding_history_path(q, entry_id)
-    revisions = _read_history(q, entry_id)
-    revision_no = revisions[-1]["revision_no"] + 1 if revisions else 1
-    prev, _ = alf.chain_head(hist_path)
-    revision = _revision_record(nxt_record, revision_no, revising_actor, reason,
-                                run_id, prev)
-    op = alf.Operation(q, "update_finding", [entry_id, str(revision_no)])
-    op.append_line("findings/history/{}.jsonl".format(entry_id), revision)
-    op.replace_file("findings/{}.json".format(entry_id), nxt_record)
-    op.commit()
-    return revision_no
+    """Append a new revision atomically. `mutate` receives the current head record
+    (loaded UNDER the lock) and returns the next record."""
+    def _produce(head):
+        if head is None:
+            raise alf.AlfError("no finding {}".format(entry_id))
+        return (mutate(dict(head)), reason, None)
+    res = _atomic_finding_update(q, entry_id, "update_finding", _produce,
+                                 actor=revising_actor, run_id=run_id)
+    return res.get("revision_no")
 
 
 def load_finding(q, entry_id):
@@ -432,19 +465,15 @@ def _runs_attributed(q, entry_id):
 
 def _write_finding_revision(q, entry_id, nxt_record, reason, run_id, actor,
                             ledger_lines=None, op_kind="update_finding"):
-    """Append a finding revision + head + optional ledger lines in ONE journal
-    transaction, so a counter update and its ledger attribution are atomic."""
-    revisions = _read_history(q, entry_id)
-    revision_no = revisions[-1]["revision_no"] + 1 if revisions else 1
-    prev, _ = alf.chain_head(finding_history_path(q, entry_id))
-    revision = _revision_record(nxt_record, revision_no, actor, reason, run_id, prev)
-    op = alf.Operation(q, op_kind, [entry_id, str(revision_no)])
-    op.append_line("findings/history/{}.jsonl".format(entry_id), revision)
-    op.replace_file("findings/{}.json".format(entry_id), nxt_record)
-    for ll in (ledger_lines or []):
-        op.append_line("attributions/ledger.jsonl", ll)
-    op.commit()
-    return revision_no
+    """Compatibility wrapper: write a PRE-COMPUTED revision (+ optional ledger lines)
+    atomically via _atomic_finding_update. Callers whose read-checks must be
+    transactional should instead pass a produce() that reads UNDER the lock."""
+    appends = [("attributions/ledger.jsonl", ll) for ll in (ledger_lines or [])]
+    res = _atomic_finding_update(
+        q, entry_id, op_kind,
+        lambda head: (nxt_record, reason, appends),
+        actor=actor, run_id=run_id)
+    return res.get("revision_no")
 
 
 def _fold_metrics(record, metrics):
@@ -464,35 +493,43 @@ def _iv_from_finding(f):
 
 
 def attribute_occurrence(q, entry_id, occurrence, attribution_type):
-    """Fold one occurrence's metrics into a finding EXACTLY once (idempotent via
-    the ledger). attribution_type in initial_evidence|recurrence|regression|waste."""
+    """Fold one occurrence's metrics into a finding EXACTLY once. The ledger
+    idempotence check, new-run check, fold, and commit all run UNDER one writer
+    lock (HIGH-3), so a concurrent duplicate cannot double-count."""
     occ_id = occurrence["occurrence_id"]
     run_id = occurrence.get("run_id")
     att_id = attribution_id(occ_id, entry_id, attribution_type)
-    if ledger_has(q, att_id):
+    ctx = {}
+
+    def _produce(head):
+        if head is None:
+            raise alf.AlfError("no finding {}".format(entry_id))
+        if ledger_has(q, att_id):
+            ctx["idempotent"] = True
+            return None
+        is_new_run = run_id not in _runs_attributed(q, entry_id)
+        nxt = dict(head)
+        if attribution_type in ("recurrence", "regression"):
+            nxt["occurrence_count"] = int(nxt.get("occurrence_count", 0) or 0) + 1
+        if is_new_run:
+            nxt["affected_run_count"] = int(nxt.get("affected_run_count", 0) or 0) + 1
+        if occurrence.get("captured_at"):
+            nxt["last_seen_at"] = occurrence["captured_at"]
+        _fold_metrics(nxt, occurrence.get("metrics"))
+        ctx["is_new_run"] = is_new_run
+        ledger_line = {
+            "alf_record_version": ALF_RECORD_VERSION, "attribution_id": att_id,
+            "occurrence_id": occ_id, "observation_id": occurrence.get("observation_id"),
+            "entry_id": entry_id, "attribution_type": attribution_type,
+            "at": alf.now_iso(), "run_id": run_id}
+        return (nxt, "attribute:{}".format(attribution_type),
+                [("attributions/ledger.jsonl", ledger_line)])
+
+    res = _atomic_finding_update(q, entry_id, "attribute", _produce, run_id=run_id)
+    if ctx.get("idempotent"):
         return {"attributed": False, "attribution_id": att_id, "reason": "idempotent"}
-    head = load_finding(q, entry_id)
-    if head is None:
-        raise alf.AlfError("no finding {}".format(entry_id))
-    is_new_run = run_id not in _runs_attributed(q, entry_id)
-    nxt = dict(head)
-    if attribution_type in ("recurrence", "regression"):
-        nxt["occurrence_count"] = int(nxt.get("occurrence_count", 0) or 0) + 1
-    if is_new_run:
-        nxt["affected_run_count"] = int(nxt.get("affected_run_count", 0) or 0) + 1
-    if occurrence.get("captured_at"):
-        nxt["last_seen_at"] = occurrence["captured_at"]
-    _fold_metrics(nxt, occurrence.get("metrics"))
-    ledger_line = {
-        "alf_record_version": ALF_RECORD_VERSION, "attribution_id": att_id,
-        "occurrence_id": occ_id, "observation_id": occurrence.get("observation_id"),
-        "entry_id": entry_id, "attribution_type": attribution_type,
-        "at": alf.now_iso(), "run_id": run_id}
-    rn = _write_finding_revision(q, entry_id, nxt,
-                                 "attribute:{}".format(attribution_type), run_id,
-                                 "alf-synth", [ledger_line], op_kind="attribute")
-    return {"attributed": True, "attribution_id": att_id, "revision_no": rn,
-            "new_run": is_new_run}
+    return {"attributed": True, "attribution_id": att_id,
+            "revision_no": res["revision_no"], "new_run": ctx["is_new_run"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -530,48 +567,59 @@ def record_regression(q, entry_id, occurrence):
     occ_id = occurrence["occurrence_id"]
     run_id = occurrence.get("run_id")
     att_id = attribution_id(occ_id, entry_id, "regression")
-    if ledger_has(q, att_id):
+    ctx = {}
+
+    def _produce(head):
+        if head is None:
+            raise alf.AlfError("no finding {}".format(entry_id))
+        if ledger_has(q, att_id):
+            ctx["idempotent"] = True
+            return None
+        baseline = head.get("release_baseline") or {}
+        nxt = dict(head)
+        nxt["occurrence_count"] = int(nxt.get("occurrence_count", 0) or 0) + 1
+        if run_id not in _runs_attributed(q, entry_id):
+            nxt["affected_run_count"] = int(nxt.get("affected_run_count", 0) or 0) + 1
+        if occurrence.get("captured_at"):
+            nxt["last_seen_at"] = occurrence["captured_at"]
+        _fold_metrics(nxt, occurrence.get("metrics"))
+        nxt["status"] = "PRIORITIZED"
+        recomputed_tier = assign_tier(_iv_from_finding(nxt))["tier"]
+        baseline_tier = baseline.get("tier")
+        eff_tier = min(recomputed_tier, baseline_tier) if baseline_tier is not None \
+            else recomputed_tier
+        recomputed_score = compute_score(nxt, occurrence_count=nxt["occurrence_count"],
+                                         regression_flag=1)
+        if baseline_tier is not None and eff_tier == baseline_tier \
+                and baseline.get("score") is not None:
+            eff_score = max(recomputed_score, baseline["score"])
+        else:
+            eff_score = recomputed_score
+        nxt["priority_tier"] = eff_tier
+        nxt["priority_score"] = eff_score
+        rel = list(nxt.get("related_entries", []))
+        rel.append({"entry_id": entry_id, "relationship": "regression_of"})
+        nxt["related_entries"] = rel
+        nxt["tier_decision"] = {
+            "recomputed_tier": recomputed_tier, "recomputed_score": recomputed_score,
+            "baseline_tier": baseline_tier, "baseline_score": baseline.get("score"),
+            "effective_tier": eff_tier, "effective_score": eff_score,
+            "regression_floor_applied": True, "computed_at": alf.now_iso()}
+        ctx["eff_tier"], ctx["eff_score"] = eff_tier, eff_score
+        ledger_line = {
+            "alf_record_version": ALF_RECORD_VERSION, "attribution_id": att_id,
+            "occurrence_id": occ_id, "observation_id": occurrence.get("observation_id"),
+            "entry_id": entry_id, "attribution_type": "regression",
+            "at": alf.now_iso(), "run_id": run_id}
+        return (nxt, "regression_reopen",
+                [("attributions/ledger.jsonl", ledger_line)])
+
+    res = _atomic_finding_update(q, entry_id, "regression", _produce, run_id=run_id)
+    if ctx.get("idempotent"):
         return {"attributed": False, "attribution_id": att_id, "reason": "idempotent"}
-    head = load_finding(q, entry_id)
-    baseline = head.get("release_baseline") or {}
-    nxt = dict(head)
-    nxt["occurrence_count"] = int(nxt.get("occurrence_count", 0) or 0) + 1
-    if run_id not in _runs_attributed(q, entry_id):
-        nxt["affected_run_count"] = int(nxt.get("affected_run_count", 0) or 0) + 1
-    if occurrence.get("captured_at"):
-        nxt["last_seen_at"] = occurrence["captured_at"]
-    _fold_metrics(nxt, occurrence.get("metrics"))
-    nxt["status"] = "PRIORITIZED"
-    recomputed_tier = assign_tier(_iv_from_finding(nxt))["tier"]
-    baseline_tier = baseline.get("tier")
-    eff_tier = min(recomputed_tier, baseline_tier) if baseline_tier is not None \
-        else recomputed_tier
-    recomputed_score = compute_score(nxt, occurrence_count=nxt["occurrence_count"],
-                                     regression_flag=1)
-    if baseline_tier is not None and eff_tier == baseline_tier \
-            and baseline.get("score") is not None:
-        eff_score = max(recomputed_score, baseline["score"])
-    else:
-        eff_score = recomputed_score
-    nxt["priority_tier"] = eff_tier
-    nxt["priority_score"] = eff_score
-    rel = list(nxt.get("related_entries", []))
-    rel.append({"entry_id": entry_id, "relationship": "regression_of"})
-    nxt["related_entries"] = rel
-    nxt["tier_decision"] = {
-        "recomputed_tier": recomputed_tier, "recomputed_score": recomputed_score,
-        "baseline_tier": baseline_tier, "baseline_score": baseline.get("score"),
-        "effective_tier": eff_tier, "effective_score": eff_score,
-        "regression_floor_applied": True, "computed_at": alf.now_iso()}
-    ledger_line = {
-        "alf_record_version": ALF_RECORD_VERSION, "attribution_id": att_id,
-        "occurrence_id": occ_id, "observation_id": occurrence.get("observation_id"),
-        "entry_id": entry_id, "attribution_type": "regression",
-        "at": alf.now_iso(), "run_id": run_id}
-    rn = _write_finding_revision(q, entry_id, nxt, "regression_reopen", run_id,
-                                 "alf-synth", [ledger_line], op_kind="regression")
-    return {"attributed": True, "attribution_id": att_id, "revision_no": rn,
-            "effective_tier": eff_tier, "effective_score": eff_score}
+    return {"attributed": True, "attribution_id": att_id,
+            "revision_no": res["revision_no"], "effective_tier": ctx["eff_tier"],
+            "effective_score": ctx["eff_score"]}
 
 
 # --------------------------------------------------------------------------- #

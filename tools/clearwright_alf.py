@@ -29,7 +29,9 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
+import threading
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -38,6 +40,10 @@ import clearwright_writer_lock as cwl  # noqa: E402
 ALF_RECORD_VERSION = 1
 SENTINEL = "0" * 64
 _REPLACE_RETRY_WINERRORS = (5, 32)
+# In-process serialization that COMPLEMENTS the cross-process writer token: the OS
+# region lock serializes concurrent CLI processes, and this lock serializes threads
+# within one process, so a compound transaction is atomic on both axes (HIGH-3).
+_COMMIT_LOCK = threading.RLock()
 
 OBSERVATION_KINDS = {
     "run_started", "run_completed", "run_closed", "council_round",
@@ -90,7 +96,8 @@ def observations_dir(q):
 
 
 def observation_file(q, obs_id):
-    return _p(q, "observations", obs_id + ".json")
+    return _contained(
+        _p(q, "observations", safe_id(obs_id, "observation_id") + ".json"), q)
 
 
 def index_path(q):
@@ -130,8 +137,84 @@ def _chained_files(q):
 def ensure_layout(q):
     for d in (observations_dir(q), _p(q, "attributions"), _p(q, "journal"),
               _p(q, "journal", "staged"), _p(q, "meta"), _p(q, "findings"),
-              _p(q, "findings", "history"), _p(q, "deltas"), _p(q, "specs")):
+              _p(q, "findings", "history"), _p(q, "deltas"), _p(q, "specs"),
+              quarantine_dir(q)):
         os.makedirs(d, exist_ok=True)
+
+
+def quarantine_dir(q):
+    return _p(q, "quarantine")
+
+
+# --------------------------------------------------------------------------- #
+# Identifier + path-containment safety (verification HIGH-1)
+# --------------------------------------------------------------------------- #
+_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$")
+
+
+def safe_id(value, kind="id"):
+    """Validate a caller-influenced identifier used as a filename component BEFORE
+    any filesystem access. Rejects empties, path separators, drive/UNC, absolute
+    paths, '..' traversal, colons, and control characters. Returns the value."""
+    if (not isinstance(value, str) or ".." in value
+            or not _SAFE_ID.match(value)):
+        raise AlfError("unsafe {} {!r}: must be [A-Za-z0-9][A-Za-z0-9._-]* with no "
+                       "separators, drive, absolute path, colon, or traversal"
+                       .format(kind, value))
+    return value
+
+
+def safe_rel(rel):
+    """Validate a relative target path (e.g. 'observations/index.jsonl'): forward
+    slashes only, every component a safe id, no '.'/'..'/absolute/drive/UNC/backslash/
+    colon/NUL. Returns the component list."""
+    if (not isinstance(rel, str) or not rel or rel.startswith("/")
+            or "\\" in rel or ":" in rel or "\x00" in rel):
+        raise AlfError("unsafe target_rel {!r}".format(rel))
+    parts = rel.split("/")
+    for p in parts:
+        if p in ("", ".", ".."):
+            raise AlfError("unsafe target_rel component in {!r}".format(rel))
+        safe_id(p, "path component")
+    return parts
+
+
+def _contained(path, q):
+    """Ensure the normalized absolute path is a descendant of alf_root(q)."""
+    root = os.path.abspath(alf_root(q))
+    full = os.path.abspath(path)
+    if full != root and not full.startswith(root + os.sep):
+        raise AlfError("path escapes alf root: {!r}".format(path))
+    return path
+
+
+def _heal_torn_tail(q, path):
+    """If a chained-JSONL file ends WITHOUT a terminating newline, its final line is
+    a demonstrably torn partial write (a crash mid-append). Archive the torn bytes
+    verbatim to alf/quarantine/ and truncate to the last complete line, so a
+    subsequent append can never concatenate onto a partial line (HIGH-2). A
+    parseable line that BREAKS the hash chain is NOT healed here; verify_chain
+    reports it and callers fail closed. Returns True if it healed a torn tail."""
+    if not os.path.exists(path):
+        return False
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if not data or data.endswith(b"\n"):
+        return False
+    idx = data.rfind(b"\n")
+    torn = data[idx + 1:]
+    os.makedirs(quarantine_dir(q), exist_ok=True)
+    qpath = os.path.join(quarantine_dir(q), "{}.torn-{}".format(
+        os.path.basename(path), sha256_hex(torn)[:16]))
+    with open(qpath, "wb") as fh:
+        fh.write(torn)
+        fh.flush()
+        os.fsync(fh.fileno())
+    with open(path, "r+b") as fh:
+        fh.truncate(idx + 1)
+        fh.flush()
+        os.fsync(fh.fileno())
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -305,10 +388,12 @@ class Operation:
         self._replaces = []  # (target_rel, obj)
 
     def append_line(self, target_rel, payload):
+        safe_rel(target_rel)  # reject traversal before it is ever staged
         self._appends.append((target_rel, dict(payload)))
         return self
 
     def replace_file(self, target_rel, obj):
+        safe_rel(target_rel)
         self._replaces.append((target_rel, obj))
         return self
 
@@ -386,9 +471,18 @@ class Operation:
             "chained_files": heads,
         }
 
-    def commit(self):
+    def commit(self, build=None):
+        """Atomic transaction (HIGH-3): the OPTIONAL `build(op)` callback runs
+        UNDER the single writer lock so every existence/idempotence/sequence check,
+        staged-write registration, head read, and the commit occur inside one
+        serialization boundary. If build returns non-None, it is a no-op result and
+        no records are written."""
         ensure_layout(self.q)
-        with cwl.write_token(self.q, purpose="alf"):
+        with _COMMIT_LOCK, cwl.write_token(self.q, purpose="alf"):
+            if build is not None:
+                noop = build(self)
+                if noop is not None:
+                    return noop
             staged = self._derive()
             op_id = "op-" + sha256_hex(canonical_bytes({
                 "operation_kind": self.operation_kind,
@@ -444,6 +538,7 @@ class Operation:
 
     def _journal_append(self, payload):
         path = journal_path(self.q)
+        _heal_torn_tail(self.q, path)  # never append onto a torn journal tail
         prev, _ = chain_head(path)
         rec = chained_record(payload, prev)
         _append_line_fsync(path, canonical_line(rec))
@@ -504,10 +599,14 @@ def _rmtree(path):
 
 
 def _apply_staged_write(q, target_rel, staged_bytes, write_kind, bindings):
-    """Idempotently apply one staged write. Used by both commit and recovery, so
-    a replay converges byte-identically or fails closed."""
-    path = _p(q, *target_rel.split("/"))
+    """Idempotently apply one staged write. Used by both commit and recovery, so a
+    replay converges byte-identically or fails closed. target_rel is validated and
+    contained under alf_root before any filesystem access, including during journal
+    replay (HIGH-1)."""
+    parts = safe_rel(target_rel)
+    path = _contained(_p(q, *parts), q)
     if write_kind == "append_line":
+        _heal_torn_tail(q, path)  # never append onto a torn target tail (HIGH-2)
         records, _ = _read_valid_lines(path)
         pos = bindings["expected_chain_position"]
         staged_line = json.loads(staged_bytes.decode("utf-8"))
@@ -549,7 +648,15 @@ def recover(q):
     jpath = journal_path(q)
     if not os.path.exists(jpath):
         return {"status": "clean", "recovered": []}
-    with cwl.write_token(q, purpose="alf-recover"):
+    with _COMMIT_LOCK, cwl.write_token(q, purpose="alf-recover"):
+        # HIGH-2: quarantine + truncate a torn journal tail BEFORE using any record;
+        # then fail closed on any surviving interior chain/hash break rather than
+        # replaying from an unauthenticated prefix.
+        _heal_torn_tail(q, jpath)
+        chain_problems = verify_chain(jpath)
+        if chain_problems:
+            raise IntegrityHalt("journal chain break; halting ALF synthesis: "
+                                + "; ".join(chain_problems))
         records, tail = _read_valid_lines(jpath)
         recovered = []
         committed = {r["op_id"] for r in records if r.get("event") == "op_commit"}
@@ -646,15 +753,19 @@ def _identity_fields(obs):
 
 def capture(queue_root, obs):
     """Record one observation + its per-run occurrence in a single journal
-    transaction. Idempotent: re-capturing identical facts is a verified no-op;
-    a same-short-id different-identity write is refused (collision)."""
+    transaction, with ALL existence/idempotence/collision checks performed INSIDE
+    the same writer lock as the commit (HIGH-3), so concurrent captures cannot both
+    observe absence and duplicate-write. A same-short-id different-identity write is
+    refused (collision)."""
     ensure_layout(queue_root)
-    obs_id = obs["observation_id"]
+    obs_id = safe_id(obs["observation_id"], "observation_id")
     ofile = observation_file(queue_root, obs_id)
     occ_id = "occ-" + content_sha256(
         {"observation_id": obs_id, "run_id": obs.get("run_id")})[:16]
+    obs_bytes = canonical_bytes(obs) + b"\n"
+    state = {}
 
-    with cwl.write_token(queue_root, purpose="alf-capture"):
+    def _build(op):
         new_fact = not os.path.exists(ofile)
         if not new_fact:
             with open(ofile, "rb") as fh:
@@ -662,35 +773,30 @@ def capture(queue_root, obs):
             if _identity_fields(existing) != _identity_fields(obs):
                 raise IntegrityHalt(
                     "id_collision: {} exists with different identity".format(obs_id))
-        # Occurrence idempotence: same occurrence_id already present -> no-op.
         occ_records, _ = _read_valid_lines(occurrences_path(queue_root))
         if any(r.get("occurrence_id") == occ_id for r in occ_records):
-            return {"observation_id": obs_id, "occurrence_id": occ_id,
-                    "created_fact": False, "created_occurrence": False}
+            state["result"] = {"observation_id": obs_id, "occurrence_id": occ_id,
+                               "created_fact": False, "created_occurrence": False}
+            return True  # non-None: commit skips; result is stashed in state
+        if new_fact:
+            op.replace_file("observations/{}.json".format(obs_id), obs)
+            op.append_line("observations/index.jsonl", {
+                "alf_record_version": ALF_RECORD_VERSION, "observation_id": obs_id,
+                "sha256": sha256_hex(obs_bytes), "captured_at": obs["captured_at"],
+                "run_id": obs.get("run_id"), "kind": obs["kind"]})
+        op.append_line("observations/occurrences.jsonl", {
+            "alf_record_version": ALF_RECORD_VERSION, "occurrence_id": occ_id,
+            "observation_id": obs_id, "run_id": obs.get("run_id"),
+            "captured_at": obs["captured_at"], "capture_method": obs["capture_method"],
+            "capturing_actor": obs["capturing_actor"], "metrics": obs.get("metrics")})
+        state["created_fact"] = new_fact
+        return None
 
-    obs_bytes = canonical_bytes(obs) + b"\n"
-    op = Operation(queue_root, "capture", [obs_id, occ_id])
-    if new_fact:
-        # The immutable observation file is a replace_file into a non-existent
-        # target (expected_mode absent), so it is journaled + crash-safe too.
-        op.replace_file("observations/{}.json".format(obs_id), obs)
-        op.append_line("observations/index.jsonl", {
-            "alf_record_version": ALF_RECORD_VERSION,
-            "observation_id": obs_id, "sha256": sha256_hex(obs_bytes),
-            "captured_at": obs["captured_at"], "run_id": obs.get("run_id"),
-            "kind": obs["kind"],
-        })
-    op.append_line("observations/occurrences.jsonl", {
-        "alf_record_version": ALF_RECORD_VERSION,
-        "occurrence_id": occ_id, "observation_id": obs_id,
-        "run_id": obs.get("run_id"), "captured_at": obs["captured_at"],
-        "capture_method": obs["capture_method"],
-        "capturing_actor": obs["capturing_actor"],
-        "metrics": obs.get("metrics"),
-    })
-    op.commit()
+    Operation(queue_root, "capture", [obs_id, occ_id]).commit(build=_build)
+    if "result" in state:
+        return state["result"]
     return {"observation_id": obs_id, "occurrence_id": occ_id,
-            "created_fact": new_fact, "created_occurrence": True}
+            "created_fact": state["created_fact"], "created_occurrence": True}
 
 
 # --------------------------------------------------------------------------- #
@@ -723,6 +829,26 @@ def verify_hashes(queue_root):
                 rec["observation_id"]))
     # 3. checkpoint ancestry proof (best-effort authentication vs journal)
     problems += _verify_checkpoint(q)
+    # 4. finding history chains + head-equals-rebuild (extended coverage)
+    hist_dir = _p(q, "findings", "history")
+    if os.path.isdir(hist_dir):
+        for name in sorted(os.listdir(hist_dir)):
+            if not name.endswith(".jsonl"):
+                continue
+            hpath = os.path.join(hist_dir, name)
+            problems += verify_chain(hpath)
+            revs, _ = _read_valid_lines(hpath)
+            if revs:
+                entry_id = name[:-6]
+                head_file = _p(q, "findings", entry_id + ".json")
+                if not os.path.exists(head_file):
+                    problems.append("finding {} history without head".format(entry_id))
+                    continue
+                with open(head_file, "rb") as fh:
+                    head_bytes = fh.read()
+                if head_bytes != canonical_bytes(revs[-1].get("record")) + b"\n":
+                    problems.append("finding {} head != last revision (rebuild "
+                                    "mismatch)".format(entry_id))
     return {"ok": not problems, "problems": problems,
             "observation_count": len(index_records)}
 

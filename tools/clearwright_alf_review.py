@@ -17,6 +17,7 @@ document the OPERATOR later uses to open governed work through the normal workfl
 import argparse
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -60,20 +61,37 @@ def _message_consumed(q, message_id):
 # Surfacing (automated, disposition-free): PRIORITIZED -> OPERATOR_REVIEW
 # --------------------------------------------------------------------------- #
 def surface_for_review(q, entry_id):
-    head = syn.load_finding(q, entry_id)
-    if head is None:
-        raise alf.AlfError("no finding {}".format(entry_id))
-    if head.get("status") != "PRIORITIZED":
+    entry_id = alf.safe_id(entry_id, "entry_id")
+    ctx = {}
+
+    def _produce(head):
+        if head is None:
+            raise alf.AlfError("no finding {}".format(entry_id))
+        if head.get("status") != "PRIORITIZED":
+            ctx["skipped"] = True
+            return None
+        return (dict(head, status="OPERATOR_REVIEW", surfaced_at=alf.now_iso()),
+                "surface_for_review", None)
+
+    syn._atomic_finding_update(q, entry_id, "surface", _produce)
+    if ctx.get("skipped"):
         return {"surfaced": False, "reason": "not PRIORITIZED"}
-    nxt = dict(head, status="OPERATOR_REVIEW", surfaced_at=alf.now_iso())
-    syn._write_finding_revision(q, entry_id, nxt, "surface_for_review", None,
-                                "alf-synth", op_kind="surface")
     return {"surfaced": True}
 
 
 # --------------------------------------------------------------------------- #
 # Promotion gate (packet section 16): all elements required for planning approval
 # --------------------------------------------------------------------------- #
+def _conf_at_least(conf, threshold):
+    """Type-safe confidence comparison: numeric or fixed-decimal-string values are
+    coerced; anything malformed is treated as below threshold (fails closed) rather
+    than raising or mis-ordering lexicographically."""
+    try:
+        return float(conf) >= threshold
+    except (TypeError, ValueError):
+        return False
+
+
 def promotion_gate_problems(finding):
     problems = []
     for field in ("permanent_resolution", "objective_acceptance_criteria",
@@ -83,8 +101,7 @@ def promotion_gate_problems(finding):
     evidence = finding.get("evidence_references") or []
     if not any(e.get("role") == "observed_occurrence" for e in evidence):
         problems.append("no observed_occurrence evidence entry")
-    conf = finding.get("root_cause_confidence")
-    if not ((conf is not None and conf >= "0.50")
+    if not (_conf_at_least(finding.get("root_cause_confidence"), 0.50)
             or finding.get("investigation_requirement")):
         problems.append("root_cause_confidence < 0.50 and no investigation_requirement")
     for field in ("dependencies", "blockers"):
@@ -96,65 +113,66 @@ def promotion_gate_problems(finding):
 # --------------------------------------------------------------------------- #
 # Disposition (operator-only, message-bound)
 # --------------------------------------------------------------------------- #
-def _write_disposition(q, entry_id, nxt_record, reason, actor, disposition_line):
-    revisions = syn._read_history(q, entry_id)
-    revision_no = revisions[-1]["revision_no"] + 1 if revisions else 1
-    prev, _ = alf.chain_head(syn.finding_history_path(q, entry_id))
-    revision = syn._revision_record(nxt_record, revision_no, actor, reason, None, prev)
-    op = alf.Operation(q, "disposition", [entry_id, str(revision_no)])
-    op.append_line("findings/history/{}.jsonl".format(entry_id), revision)
-    op.replace_file("findings/{}.json".format(entry_id), nxt_record)
-    op.append_line("meta/dispositions.jsonl", disposition_line)
-    op.commit()
-    return revision_no
-
-
 def dispose(q, entry_id, target_status, operator_message_id, actor="OPERATOR-0001",
             deferral_reason=None, review_date=None):
-    head = syn.load_finding(q, entry_id)
-    if head is None:
-        raise alf.AlfError("no finding {}".format(entry_id))
-    cur = head.get("status")
-    if target_status not in OPERATOR_TRANSITIONS.get(cur, set()):
-        raise alf.AlfError("illegal transition {} -> {}".format(cur, target_status))
-    # operator-message binding
+    """Operator-message-bound disposition. ALL checks (legal transition, message
+    existence/role/order, the entry_id token binding, single-use/replay, DEFERRED
+    fields, and the promotion gate) and the write execute UNDER one writer lock
+    (HIGH-3), so a replay cannot slip between the single-use check and the commit."""
+    entry_id = alf.safe_id(entry_id, "entry_id")
     msg = _read_message(q, operator_message_id)
-    if msg is None:
-        raise alf.AlfError("operator message {} not found".format(operator_message_id))
-    if msg.get("role") != "operator" or msg.get("direction") != "inbound":
-        raise alf.AlfError("message is not an inbound operator message")
-    latest = syn._read_history(q, entry_id)[-1]
-    if (msg.get("at") or "") <= (latest.get("revised_at") or ""):
-        raise alf.AlfError("operator message must postdate the disposed revision")
-    if entry_id not in (msg.get("message") or ""):
-        raise alf.AlfError("operator message must name the entry_id")
-    if _message_consumed(q, operator_message_id):
-        raise alf.AlfError("operator message already used for a disposition (replay refused)")
-    if target_status == "DEFERRED" and not (deferral_reason and review_date):
-        raise alf.AlfError("DEFERRED requires deferral_reason and review_date")
-    if target_status == "APPROVED_FOR_PLANNING":
-        problems = promotion_gate_problems(head)
-        if problems:
-            raise alf.AlfError("promotion gate: " + "; ".join(problems))
-    nxt = dict(head, status=target_status,
-               operator_disposition=DISPOSITION_FOR_STATUS[target_status],
-               last_operator_reviewed_at=alf.now_iso())
-    if target_status == "DEFERRED":
-        nxt["deferral_reason"] = deferral_reason
-        nxt["review_date"] = review_date
-    disposition_line = {
-        "alf_record_version": ALF_RECORD_VERSION, "entry_id": entry_id,
-        "target_status": target_status, "operator_message_id": operator_message_id,
-        "actor": actor, "at": alf.now_iso()}
-    rn = _write_disposition(q, entry_id, nxt, "dispose:{}".format(target_status),
-                            actor, disposition_line)
-    return {"disposed": True, "status": target_status, "revision_no": rn}
+
+    def _produce(head):
+        if head is None:
+            raise alf.AlfError("no finding {}".format(entry_id))
+        cur = head.get("status")
+        if target_status not in OPERATOR_TRANSITIONS.get(cur, set()):
+            raise alf.AlfError("illegal transition {} -> {}".format(cur, target_status))
+        if msg is None:
+            raise alf.AlfError("operator message {} not found".format(operator_message_id))
+        if msg.get("role") != "operator" or msg.get("direction") != "inbound":
+            raise alf.AlfError("message is not an inbound operator message")
+        latest = syn._read_history(q, entry_id)[-1]
+        if (msg.get("at") or "") <= (latest.get("revised_at") or ""):
+            raise alf.AlfError("operator message must postdate the disposed revision")
+        # Whole-token match (not a loose substring), so 'ALF-0001' does not match
+        # inside 'ALF-00012' or an incidental mention.
+        if not re.search(r"(?<![A-Za-z0-9])" + re.escape(entry_id) + r"(?![A-Za-z0-9])",
+                         msg.get("message") or ""):
+            raise alf.AlfError("operator message must name the entry_id as a distinct token")
+        if _message_consumed(q, operator_message_id):
+            raise alf.AlfError("operator message already used for a disposition (replay refused)")
+        if target_status == "DEFERRED" and not (deferral_reason and review_date):
+            raise alf.AlfError("DEFERRED requires deferral_reason and review_date")
+        if target_status == "APPROVED_FOR_PLANNING":
+            problems = promotion_gate_problems(head)
+            if problems:
+                raise alf.AlfError("promotion gate: " + "; ".join(problems))
+        nxt = dict(head, status=target_status,
+                   operator_disposition=DISPOSITION_FOR_STATUS[target_status],
+                   last_operator_reviewed_at=alf.now_iso())
+        if target_status == "DEFERRED":
+            nxt["deferral_reason"] = deferral_reason
+            nxt["review_date"] = review_date
+        disposition_line = {
+            "alf_record_version": ALF_RECORD_VERSION, "entry_id": entry_id,
+            "target_status": target_status, "operator_message_id": operator_message_id,
+            "actor": actor, "at": alf.now_iso()}
+        return (nxt, "dispose:{}".format(target_status),
+                [("meta/dispositions.jsonl", disposition_line)])
+
+    res = syn._atomic_finding_update(q, entry_id, "disposition", _produce, actor=actor)
+    return {"disposed": True, "status": target_status,
+            "revision_no": res.get("revision_no")}
 
 
 # --------------------------------------------------------------------------- #
 # Spec rendering (packet section 18): state-neutral, re-runnable
 # --------------------------------------------------------------------------- #
 def render_spec(q, entry_id, version=1):
+    entry_id = alf.safe_id(entry_id, "entry_id")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise alf.AlfError("spec version must be a positive integer")
     head = syn.load_finding(q, entry_id)
     if head is None:
         raise alf.AlfError("no finding {}".format(entry_id))
@@ -181,7 +199,8 @@ def render_spec(q, entry_id, version=1):
         "- approved_scope: <operator to draft from the resolution above>",
         "- excluded_actions: carries every applicable ALF prohibition", ""]
     body = "\n".join(lines) + "\n"
-    path = alf._p(q, "specs", "spec-{}-v{}.md".format(entry_id, version))
+    path = alf._contained(
+        alf._p(q, "specs", "spec-{}-v{}.md".format(entry_id, version)), q)
     alf.ensure_layout(q)
     with alf.cwl.write_token(q, purpose="alf-spec"):
         alf._replace_bytes_fsync(path, body.encode("utf-8"))

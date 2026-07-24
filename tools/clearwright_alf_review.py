@@ -45,6 +45,9 @@ def dispositions_path(q):
 
 
 def _read_message(q, message_id):
+    # safe_id rejects separators/traversal/absolute/drive, so message_id is a single
+    # safe component under communications/ and cannot escape it (round-3 HIGH).
+    alf.safe_id(message_id, "operator_message_id")
     path = os.path.join(q, "communications", message_id + ".json")
     if not os.path.exists(path):
         return None

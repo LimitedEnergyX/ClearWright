@@ -117,7 +117,7 @@ def journal_path(q):
 
 
 def staged_dir(q, op_id):
-    return _p(q, "journal", "staged", op_id)
+    return _contained(_p(q, "journal", "staged", safe_id(op_id, "op_id")), q)
 
 
 def checkpoint_path(q):
@@ -668,7 +668,11 @@ def recover(q):
                 continue
             sdir = staged_dir(q, op_id)
             for entry in begin["staged_writes"]:
-                sf = os.path.join(sdir, entry["staged_file"])
+                # Treat journal-derived staged_file / target_path_rel as HOSTILE:
+                # validate before any filesystem access (round-3 HIGH).
+                safe_id(entry.get("staged_file"), "staged_file")
+                safe_rel(entry.get("target_path_rel"))
+                sf = _contained(os.path.join(sdir, entry["staged_file"]), q)
                 if not os.path.exists(sf):
                     raise IntegrityHalt("op {} staged file {} missing; halting ALF "
                                         "synthesis".format(op_id, entry["staged_file"]))
@@ -835,11 +839,16 @@ def verify_hashes(queue_root):
         for name in sorted(os.listdir(hist_dir)):
             if not name.endswith(".jsonl"):
                 continue
+            entry_id = name[:-6]
+            try:
+                safe_id(entry_id, "entry_id")  # reject malformed ALF filenames
+            except AlfError:
+                problems.append("malformed finding-history filename {!r}".format(name))
+                continue
             hpath = os.path.join(hist_dir, name)
             problems += verify_chain(hpath)
             revs, _ = _read_valid_lines(hpath)
             if revs:
-                entry_id = name[:-6]
                 head_file = _p(q, "findings", entry_id + ".json")
                 if not os.path.exists(head_file):
                     problems.append("finding {} history without head".format(entry_id))

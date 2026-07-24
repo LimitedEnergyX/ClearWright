@@ -34,20 +34,39 @@ def snapshot_path(q, run_id):
         q, "deltas", "rid-{}.input.json".format(alf.safe_id(run_id, "run_id"))), q)
 
 
+def _unique_by(records, id_field):
+    """Build an id->record map, failing closed on a DUPLICATE id in an append-only
+    store (round-3 HIGH): a duplicate could shadow the snapshot's referenced row."""
+    out = {}
+    for r in records:
+        k = r.get(id_field)
+        if k in out:
+            raise alf.IntegrityHalt(
+                "duplicate {} {!r} in append-only store".format(id_field, k))
+        out[k] = r
+    return out
+
+
 def _verify_snapshot_refs(q, snapshot):
     """Verify every content-addressed reference the immutable snapshot records still
-    resolves to bytes with the recorded hash (HIGH-4). A missing, altered, or
-    unverifiable occurrence/observation/attribution reference fails closed rather
-    than being ignored. Finding revisions are hash-verified in _resolve_finding_revision."""
-    occ_by_id = {r.get("occurrence_id"): r
-                 for r in alf._read_valid_lines(alf.occurrences_path(q))[0]}
+    resolves to bytes with the recorded hash (HIGH-4, round-3): the referenced chained
+    stores are first RE-AUTHENTICATED by verify_chain (catching an altered field with a
+    retained line hash), DUPLICATE ids fail closed, then each snapshot reference is
+    matched and hash-checked. Finding revisions are hash-verified (and duplicate
+    revision numbers rejected) in _resolve_finding_revision."""
+    for path in (alf.occurrences_path(q), alf.index_path(q), alf.ledger_path(q)):
+        chain = alf.verify_chain(path)
+        if chain:
+            raise alf.IntegrityHalt("delta ref store chain break: " + "; ".join(chain))
+    occ_by_id = _unique_by(
+        alf._read_valid_lines(alf.occurrences_path(q))[0], "occurrence_id")
     for o in snapshot.get("occurrences", []):
         live = occ_by_id.get(o["occurrence_id"])
         if live is None or live.get("line_sha256") != o.get("line_sha256"):
             raise alf.IntegrityHalt("delta snapshot occurrence {} missing or altered"
                                     .format(o["occurrence_id"]))
-    idx_by_id = {r.get("observation_id"): r
-                 for r in alf._read_valid_lines(alf.index_path(q))[0]}
+    idx_by_id = _unique_by(
+        alf._read_valid_lines(alf.index_path(q))[0], "observation_id")
     for ob in snapshot.get("observations", []):
         live = idx_by_id.get(ob["observation_id"])
         if live is None or live.get("sha256") != ob.get("sha256"):
@@ -61,8 +80,8 @@ def _verify_snapshot_refs(q, snapshot):
             if alf.sha256_hex(fh.read()) != ob["sha256"]:
                 raise alf.IntegrityHalt("delta snapshot observation {} bytes diverge"
                                         .format(ob["observation_id"]))
-    led_by_id = {r.get("attribution_id"): r
-                 for r in alf._read_valid_lines(alf.ledger_path(q))[0]}
+    led_by_id = _unique_by(
+        alf._read_valid_lines(alf.ledger_path(q))[0], "attribution_id")
     for a in snapshot.get("attributions", []):
         live = led_by_id.get(a["attribution_id"])
         if live is None or live.get("line_sha256") != a.get("line_sha256"):
@@ -141,12 +160,13 @@ def _build_snapshot(q, run_id):
 # Deterministic derivation (pure function of the snapshot + hash-verified refs)
 # --------------------------------------------------------------------------- #
 def _resolve_finding_revision(q, eid, rn, expected_sha):
-    for r in syn._read_history(q, eid):
-        if r["revision_no"] == rn:
-            if r["revision_sha256"] != expected_sha:
-                raise alf.IntegrityHalt("finding {} rev {} sha divergent".format(eid, rn))
-            return r["record"]
-    raise alf.IntegrityHalt("finding {} rev {} missing".format(eid, rn))
+    matches = [r for r in syn._read_history(q, eid) if r.get("revision_no") == rn]
+    if len(matches) != 1:  # missing OR duplicate revision_no -> fail closed (round-3)
+        raise alf.IntegrityHalt("finding {} rev {}: {} matching revisions (expected "
+                                "exactly 1)".format(eid, rn, len(matches)))
+    if matches[0].get("revision_sha256") != expected_sha:
+        raise alf.IntegrityHalt("finding {} rev {} sha divergent".format(eid, rn))
+    return matches[0]["record"]
 
 
 def _derive(q, snapshot):

@@ -85,6 +85,35 @@ class IdentityAndContainmentTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(alf.alf_root(self.q), "..",
                                                      "escape.jsonl")))
 
+    def test_recovery_rejects_traversal_op_id(self):
+        jpath = alf.journal_path(self.q)
+        jp, _ = alf.chain_head(jpath)
+        begin = alf.chained_record({"op_id": "../evil", "operation_kind": "t",
+                                    "subject_ids": ["x"], "staged_writes": [],
+                                    "at": alf.now_iso(), "event": "op_begin"}, jp)
+        alf._append_line_fsync(jpath, alf.canonical_line(begin))
+        with self.assertRaises(alf.AlfError):
+            alf.recover(self.q)
+
+    def test_recovery_rejects_traversal_staged_file(self):
+        jpath = alf.journal_path(self.q)
+        jp, _ = alf.chain_head(jpath)
+        begin = alf.chained_record({
+            "op_id": "op-ok0001", "operation_kind": "t", "subject_ids": ["x"],
+            "staged_writes": [{"target_path_rel": "observations/index.jsonl",
+                               "staged_file": "../../evil", "content_sha256": "d" * 64,
+                               "write_kind": "append_line",
+                               "expected_prev_line_sha256": alf.SENTINEL,
+                               "expected_chain_position": 1}],
+            "at": alf.now_iso(), "event": "op_begin"}, jp)
+        alf._append_line_fsync(jpath, alf.canonical_line(begin))
+        with self.assertRaises(alf.AlfError):
+            alf.recover(self.q)
+
+    def test_operator_message_id_traversal_rejected(self):
+        with self.assertRaises(alf.AlfError):
+            rev._read_message(self.q, "../secret")
+
 
 class TornJournalTest(unittest.TestCase):
     def setUp(self):
@@ -207,6 +236,40 @@ class DeltaTamperTest(unittest.TestCase):
     def test_missing_delta_file_fails_closed(self):
         os.remove(dlt.delta_path(self.q, "run-x"))  # snapshot remains, delta gone
         with self.assertRaises(alf.AlfError):
+            dlt.generate_delta(self.q, "run-x")
+
+    def test_altered_occurrence_field_retained_hash_fails_closed(self):
+        # alter a non-hash field but keep the stored line_sha256 (attacker retains the
+        # stale hash); re-authentication via verify_chain must catch it.
+        occ_path = alf.occurrences_path(self.q)
+        recs, _ = alf._read_valid_lines(occ_path)
+        recs[0]["captured_at"] = "1999-01-01T00:00:00.000000Z"
+        with open(occ_path, "w", encoding="utf-8") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n")
+        with self.assertRaises(alf.IntegrityHalt):
+            dlt.generate_delta(self.q, "run-x")
+
+    def test_duplicate_occurrence_id_fails_closed(self):
+        occ_path = alf.occurrences_path(self.q)
+        recs, _ = alf._read_valid_lines(occ_path)
+        body = {k: v for k, v in recs[0].items()
+                if k not in ("prev_line_sha256", "line_sha256")}
+        dup = alf.chained_record(body, recs[-1]["line_sha256"])  # valid chain, dup id
+        with open(occ_path, "a", encoding="utf-8") as fh:
+            fh.write(alf.canonical_line(dup).decode("utf-8"))
+        with self.assertRaises(alf.IntegrityHalt):
+            dlt.generate_delta(self.q, "run-x")
+
+    def test_duplicate_finding_revision_fails_closed(self):
+        hp = syn.finding_history_path(self.q, "ALF-0001")
+        recs, _ = alf._read_valid_lines(hp)
+        body = {k: v for k, v in recs[-1].items()
+                if k not in ("prev_line_sha256", "line_sha256")}
+        dup = alf.chained_record(body, recs[-1]["line_sha256"])  # dup revision_no
+        with open(hp, "a", encoding="utf-8") as fh:
+            fh.write(alf.canonical_line(dup).decode("utf-8"))
+        with self.assertRaises(alf.IntegrityHalt):
             dlt.generate_delta(self.q, "run-x")
 
 

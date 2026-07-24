@@ -15,6 +15,7 @@ GitHub state, or mutates code (packet s7/s20): the module contains no such call.
 """
 import argparse
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -308,6 +309,269 @@ def list_findings(q):
             with open(os.path.join(d, name), encoding="utf-8") as fh:
                 out.append(_j.load(fh))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# dedup-policy-v1 (packet section 9): proposal-based, never silent for protected
+# classes.
+# --------------------------------------------------------------------------- #
+DEDUP_STOPWORDS = sorted({
+    "the", "a", "an", "and", "or", "of", "to", "in", "is", "are", "was", "were",
+    "that", "this", "it", "its", "for", "on", "with", "as", "by", "at", "be",
+    "not", "no", "when", "which", "from", "into", "than", "then", "so",
+})
+DEDUP_POLICY_V1 = {
+    "policy_version": "dedup-policy-v1",
+    "normalization": ("ascii-lowercase the root_cause; split on every "
+                      "non-alphanumeric character except underscore; drop the "
+                      "stopword list; signature is the sorted unique token set"),
+    "stopwords": DEDUP_STOPWORDS,
+    "thresholds": {"exact": "0.90", "jaccard_high": "0.80", "jaccard_mid": "0.60"},
+}
+PROTECTED_FAILURE_CLASSES = {"authority_bypass_risk", "durable_record_integrity"}
+PROTECTED_IMPACT_AXES = ("security_impact", "authority_integrity_impact",
+                         "durable_record_integrity_impact")
+
+
+def dedup_policy_path(q):
+    return alf._p(q, "meta", "dedup-policy-v1.json")
+
+
+def materialize_dedup_policy(q):
+    alf.ensure_layout(q)
+    path = dedup_policy_path(q)
+    want = alf.canonical_bytes(DEDUP_POLICY_V1) + b"\n"
+    if os.path.exists(path):
+        with open(path, "rb") as fh:
+            if fh.read() != want:
+                raise alf.IntegrityHalt("dedup-policy-v1.json diverges; refusing")
+        return
+    with alf.cwl.write_token(q, purpose="alf-dedup-policy"):
+        alf._replace_bytes_fsync(path, want)
+
+
+def dedup_signature(root_cause):
+    toks = re.split(r"[^a-z0-9_]+", (root_cause or "").lower())
+    stop = set(DEDUP_STOPWORDS)
+    return sorted({t for t in toks if t and t not in stop})
+
+
+def _jaccard(a, b):
+    sa, sb = set(a), set(b)
+    if not sa and not sb:
+        return 1.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def is_protected(finding):
+    if finding.get("failure_class") in PROTECTED_FAILURE_CLASSES:
+        return True
+    return any(int(finding.get(a, 0) or 0) >= 2 for a in PROTECTED_IMPACT_AXES)
+
+
+def propose_dedup(q, finding):
+    """Highest-confidence duplicate_of proposal for `finding` against the store,
+    or None. Never auto-merges; protected-class pairs are flagged so the caller
+    holds them for the operator (silent-merge prohibition, packet s9)."""
+    sig = dedup_signature(finding.get("root_cause", ""))
+    key = (finding.get("subsystem"), finding.get("failure_class"))
+    best = None
+    for other in list_findings(q):
+        if other.get("entry_id") == finding.get("entry_id"):
+            continue
+        if (other.get("subsystem"), other.get("failure_class")) != key:
+            continue
+        osig = dedup_signature(other.get("root_cause", ""))
+        if osig == sig:
+            conf = "0.90"
+        else:
+            j = _jaccard(sig, osig)
+            conf = "0.80" if j >= 0.80 else ("0.60" if j >= 0.60 else None)
+        if conf is None:
+            continue
+        if best is None or conf > best["confidence"]:
+            best = {"duplicate_of": other["entry_id"], "confidence": conf,
+                    "relationship": "duplicate_of", "proposed": True,
+                    "dedup_policy_version": "dedup-policy-v1",
+                    "protected": is_protected(finding) or is_protected(other)}
+    return best
+
+
+# --------------------------------------------------------------------------- #
+# Attribution ledger + occurrence attribution (packet sections 8, 11, 13)
+# --------------------------------------------------------------------------- #
+_WASTE_FROM_METRIC = {
+    "cumulative_operator_minutes": "operator_minutes",
+    "cumulative_execution_delay": "execution_delay_seconds",
+    "cumulative_token_estimate": "token_estimate",
+    "cumulative_api_attempts_wasted": "api_attempts",
+    "cumulative_tool_attempts_wasted": "tool_attempts",
+    "cumulative_council_attempts_wasted": "council_attempts",
+}
+
+
+def attribution_id(occurrence_id, entry_id, attribution_type):
+    return "att-" + alf.content_sha256({
+        "occurrence_id": occurrence_id, "entry_id": entry_id,
+        "attribution_type": attribution_type})[:16]
+
+
+def _ledger_records(q):
+    recs, _ = alf._read_valid_lines(alf.ledger_path(q))
+    return recs
+
+
+def ledger_has(q, att_id):
+    return any(r.get("attribution_id") == att_id for r in _ledger_records(q))
+
+
+def _runs_attributed(q, entry_id):
+    return {r.get("run_id") for r in _ledger_records(q)
+            if r.get("entry_id") == entry_id}
+
+
+def _write_finding_revision(q, entry_id, nxt_record, reason, run_id, actor,
+                            ledger_lines=None, op_kind="update_finding"):
+    """Append a finding revision + head + optional ledger lines in ONE journal
+    transaction, so a counter update and its ledger attribution are atomic."""
+    revisions = _read_history(q, entry_id)
+    revision_no = revisions[-1]["revision_no"] + 1 if revisions else 1
+    prev, _ = alf.chain_head(finding_history_path(q, entry_id))
+    revision = _revision_record(nxt_record, revision_no, actor, reason, run_id, prev)
+    op = alf.Operation(q, op_kind, [entry_id, str(revision_no)])
+    op.append_line("findings/history/{}.jsonl".format(entry_id), revision)
+    op.replace_file("findings/{}.json".format(entry_id), nxt_record)
+    for ll in (ledger_lines or []):
+        op.append_line("attributions/ledger.jsonl", ll)
+    op.commit()
+    return revision_no
+
+
+def _fold_metrics(record, metrics):
+    for cum, src in _WASTE_FROM_METRIC.items():
+        v = (metrics or {}).get(src)
+        if v:
+            record[cum] = int(record.get(cum, 0) or 0) + int(v)
+
+
+def _iv_from_finding(f):
+    iv = {"risk_activity": "historical", "failure_class": f.get("failure_class")}
+    for axis in ("authority_integrity_impact", "durable_record_integrity_impact",
+                 "operator_time_impact", "execution_delay_impact",
+                 "token_api_compute_impact"):
+        iv[axis] = int(f.get(axis, 0) or 0)
+    return iv
+
+
+def attribute_occurrence(q, entry_id, occurrence, attribution_type):
+    """Fold one occurrence's metrics into a finding EXACTLY once (idempotent via
+    the ledger). attribution_type in initial_evidence|recurrence|regression|waste."""
+    occ_id = occurrence["occurrence_id"]
+    run_id = occurrence.get("run_id")
+    att_id = attribution_id(occ_id, entry_id, attribution_type)
+    if ledger_has(q, att_id):
+        return {"attributed": False, "attribution_id": att_id, "reason": "idempotent"}
+    head = load_finding(q, entry_id)
+    if head is None:
+        raise alf.AlfError("no finding {}".format(entry_id))
+    is_new_run = run_id not in _runs_attributed(q, entry_id)
+    nxt = dict(head)
+    if attribution_type in ("recurrence", "regression"):
+        nxt["occurrence_count"] = int(nxt.get("occurrence_count", 0) or 0) + 1
+    if is_new_run:
+        nxt["affected_run_count"] = int(nxt.get("affected_run_count", 0) or 0) + 1
+    if occurrence.get("captured_at"):
+        nxt["last_seen_at"] = occurrence["captured_at"]
+    _fold_metrics(nxt, occurrence.get("metrics"))
+    ledger_line = {
+        "alf_record_version": ALF_RECORD_VERSION, "attribution_id": att_id,
+        "occurrence_id": occ_id, "observation_id": occurrence.get("observation_id"),
+        "entry_id": entry_id, "attribution_type": attribution_type,
+        "at": alf.now_iso(), "run_id": run_id}
+    rn = _write_finding_revision(q, entry_id, nxt,
+                                 "attribute:{}".format(attribution_type), run_id,
+                                 "alf-synth", [ledger_line], op_kind="attribute")
+    return {"attributed": True, "attribution_id": att_id, "revision_no": rn,
+            "new_run": is_new_run}
+
+
+# --------------------------------------------------------------------------- #
+# Recurrence + regression (packet sections 11, 12)
+# --------------------------------------------------------------------------- #
+RELEASED_STATES = ("RELEASED", "MONITORING")
+
+
+def set_release_baseline(q, entry_id):
+    """Persist release_baseline the first time a finding reaches RELEASED (s12)."""
+    head = load_finding(q, entry_id)
+    if head is None or head.get("release_baseline"):
+        return
+    baseline = {"tier": head.get("priority_tier"),
+                "score": head.get("priority_score"),
+                "priority_model_version": "priority-model-v1", "at": alf.now_iso()}
+    _write_finding_revision(q, entry_id, dict(head, release_baseline=baseline),
+                            "release_baseline", None, "alf-synth")
+
+
+def record_recurrence(q, entry_id, occurrence):
+    """A repeat occurrence of an existing finding. RELEASED/MONITORING findings
+    become regressions (reopen + floor); otherwise a plain recurrence."""
+    head = load_finding(q, entry_id)
+    if head is None:
+        raise alf.AlfError("no finding {}".format(entry_id))
+    if head.get("status") in RELEASED_STATES:
+        return record_regression(q, entry_id, occurrence)
+    return attribute_occurrence(q, entry_id, occurrence, "recurrence")
+
+
+def record_regression(q, entry_id, occurrence):
+    """Reopen a released/monitored finding to PRIORITIZED with the tier-and-score
+    floor from its release_baseline (packet section 12). Idempotent per run."""
+    occ_id = occurrence["occurrence_id"]
+    run_id = occurrence.get("run_id")
+    att_id = attribution_id(occ_id, entry_id, "regression")
+    if ledger_has(q, att_id):
+        return {"attributed": False, "attribution_id": att_id, "reason": "idempotent"}
+    head = load_finding(q, entry_id)
+    baseline = head.get("release_baseline") or {}
+    nxt = dict(head)
+    nxt["occurrence_count"] = int(nxt.get("occurrence_count", 0) or 0) + 1
+    if run_id not in _runs_attributed(q, entry_id):
+        nxt["affected_run_count"] = int(nxt.get("affected_run_count", 0) or 0) + 1
+    if occurrence.get("captured_at"):
+        nxt["last_seen_at"] = occurrence["captured_at"]
+    _fold_metrics(nxt, occurrence.get("metrics"))
+    nxt["status"] = "PRIORITIZED"
+    recomputed_tier = assign_tier(_iv_from_finding(nxt))["tier"]
+    baseline_tier = baseline.get("tier")
+    eff_tier = min(recomputed_tier, baseline_tier) if baseline_tier is not None \
+        else recomputed_tier
+    recomputed_score = compute_score(nxt, occurrence_count=nxt["occurrence_count"],
+                                     regression_flag=1)
+    if baseline_tier is not None and eff_tier == baseline_tier \
+            and baseline.get("score") is not None:
+        eff_score = max(recomputed_score, baseline["score"])
+    else:
+        eff_score = recomputed_score
+    nxt["priority_tier"] = eff_tier
+    nxt["priority_score"] = eff_score
+    rel = list(nxt.get("related_entries", []))
+    rel.append({"entry_id": entry_id, "relationship": "regression_of"})
+    nxt["related_entries"] = rel
+    nxt["tier_decision"] = {
+        "recomputed_tier": recomputed_tier, "recomputed_score": recomputed_score,
+        "baseline_tier": baseline_tier, "baseline_score": baseline.get("score"),
+        "effective_tier": eff_tier, "effective_score": eff_score,
+        "regression_floor_applied": True, "computed_at": alf.now_iso()}
+    ledger_line = {
+        "alf_record_version": ALF_RECORD_VERSION, "attribution_id": att_id,
+        "occurrence_id": occ_id, "observation_id": occurrence.get("observation_id"),
+        "entry_id": entry_id, "attribution_type": "regression",
+        "at": alf.now_iso(), "run_id": run_id}
+    rn = _write_finding_revision(q, entry_id, nxt, "regression_reopen", run_id,
+                                 "alf-synth", [ledger_line], op_kind="regression")
+    return {"attributed": True, "attribution_id": att_id, "revision_no": rn,
+            "effective_tier": eff_tier, "effective_score": eff_score}
 
 
 # --------------------------------------------------------------------------- #

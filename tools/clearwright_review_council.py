@@ -880,6 +880,22 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
     # bound components (below): NO _augment_context / _guidance_header prose is
     # appended, so neither helper is ever called on this path.
     its_lane = (council.get("dispatch_lane") == "internal_technical")
+    # Enabler B (pre-allocation dispatch eligibility): if DETERMINISTIC signals on
+    # the council prove a blocker, refuse BEFORE any council id or reviewer attempt
+    # is spent, recording a safe normalized reason. Absent signals pass through
+    # unchanged; the egress guard still independently re-enforces every rule at
+    # send (fail-closed). This can only refuse earlier - it never authorizes.
+    import clearwright_dispatch_preflight as cwdp
+    _elig_ok, _elig_reason = cwdp.dispatch_eligibility(
+        council.get("preallocation_signals") or {})
+    if not _elig_ok:
+        log_invocation(root, cwdp.refused_dispatch_record(
+            phase=phase, dispatch_lane=council.get("dispatch_lane"),
+            normalized_reason=_elig_reason, detail="pre-allocation eligibility"))
+        return {"committed": False, "substantive": False, "round": round_no,
+                "hard_gate": False, "statuses": {}, "attempts": {},
+                "preallocation_refused": True, "normalized_reason": _elig_reason,
+                "reason": "pre-allocation dispatch ineligible: " + _elig_reason}
     if its_lane:
         context = base_context
     else:
@@ -1414,6 +1430,11 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
                 "error_class": (None if _validated(result) else
                                 (result or {}).get("error") or (result or {}).get("classification")),
             })
+            # Enabler A: persist a SAFE normalized failure class per failed attempt
+            # so `reviewer_unavailable` is no longer opaque (no secrets/raw bodies).
+            if not _validated(result) and not (result or {}).get("hard_gate"):
+                state.setdefault("normalized_reasons", []).append(
+                    cwdp.classify_reviewer_failure(result))
             if (result or {}).get("hard_gate"):
                 break
             if _validated(result):
@@ -1505,9 +1526,15 @@ def run_round(root, council, base_context, *, model=None, repo=None, timeout=90,
 
     _persist_council(root, council)
     exhausted = [rev for rev, st in statuses.items() if st == "attempts_exhausted"]
+    # Enabler A (approved enabler schema addition per CTA items 2-3, NOT the
+    # additive-alf subtree): surface the durable normalized failure reasons per
+    # reviewer. This adds normalized_reasons to attempt_state and to this return.
+    normalized_reasons = {
+        rev: attempt_state.get(_attempt_key(round_no, rev), {}).get("normalized_reasons", [])
+        for rev in statuses}
     return {"committed": False, "substantive": False, "round": round_no,
             "hard_gate": False, "statuses": statuses, "attempts": attempts_used,
-            "exhausted": exhausted,
+            "exhausted": exhausted, "normalized_reasons": normalized_reasons,
             "reason": ("reviewer attempt budget exhausted for: {}; the round was not "
                        "counted. Continue with a new council or an explicit "
                        "operator-authorized recovery grant.").format(", ".join(exhausted))

@@ -54,6 +54,13 @@ class ClassifyTest(unittest.TestCase):
     def test_unknown_when_no_signal(self):
         self.assertEqual(self._c({}, None), "unknown")
 
+    def test_egress_blocked_is_policy_denial(self):
+        self.assertEqual(self._c({"error": "egress_blocked"}), "policy_denial")
+
+    def test_unicode_confusable_is_tripwire(self):
+        self.assertEqual(self._c({"reason": "unicode_confusable detected"}),
+                         "tripwire_refusal")
+
     def test_does_not_read_body_fields(self):
         # a "body"/"content"/"verdict" carrying 429 must NOT leak into the class;
         # only safe fields (error/classification/reason/code) are read.

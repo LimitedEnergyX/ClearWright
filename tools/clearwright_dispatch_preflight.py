@@ -38,7 +38,7 @@ def _has_any(*subs):
 
 
 _RULES = (
-    (_has_any("tripwire"), "tripwire_refusal"),
+    (_has_any("tripwire", "confusable"), "tripwire_refusal"),
     (_has_any("composition", "hash mismatch", "byte mismatch", "sha mismatch"),
      "composition_or_hash_mismatch"),
     (_has_all("repo", "not approved"), "repo_not_approved"),
@@ -55,6 +55,7 @@ _RULES = (
               "unvalidated", "source_mismatch", "schema"), "malformed_response"),
     (_has_any("connection", "network", "unavailable", "provider", "503", "502",
               "500", "cannot reach", "refused"), "provider_unavailable"),
+    (_has_any("egress"), "policy_denial"),
     (_has_any("adapter"), "adapter_failure"),
 )
 

@@ -1,4 +1,4 @@
-# Verification Council — ALF Phase 1 implementation
+# Verification Council - ALF Phase 1 implementation
 
 You are reviewing the IMPLEMENTATION of ALF Phase 1 against the plan-gate-approved
 planning packet (PR #85, docs/alf/ALF-PHASE1-PLANNING-PACKET.md) and the operator
@@ -22,7 +22,7 @@ records are immutable evidence + acceptance fixture only; no GalleyQuest work.
 ## council-engine change)
 
 ADDITIVE new modules under tools/ (writing only under QUEUE_ROOT/alf/):
-- clearwright_alf.py (888) — Layer 1 + journal. Canonical serialization (sorted
+- clearwright_alf.py (888) - Layer 1 + journal. Canonical serialization (sorted
   keys, compact, ensure_ascii off, one trailing newline, INTEGER-ONLY numbers -
   floats refused in hashed records); per-line hash chains (64-zero sentinel);
   immutable content-addressed observations (deterministic identity EXCLUDING
@@ -34,29 +34,29 @@ ADDITIVE new modules under tools/ (writing only under QUEUE_ROOT/alf/):
   missing/corrupt staged bytes); verify-hashes (chain audit + observation-bytes-vs-
   index + checkpoint journal-authentication + ancestry proof); CLI observe/list/
   show/verify-hashes/recover.
-- clearwright_alf_synth.py (621) — priority-model-v1 (embedded verbatim; canonical
+- clearwright_alf_synth.py (621) - priority-model-v1 (embedded verbatim; canonical
   bytes + reproducible sha; divergent-overwrite refused); tier-policy-v1
   (deterministic, top-down first-match); transparent scoring; versioned findings
   store (gap-allowed crash-safe entry_id allocation; append-only hash-chained
   revision log; byte-exact head-rebuild); dedup-policy-v1 (proposal-based; protected-
   class silent-merge prohibition); idempotent attribution ledger; recurrence;
   regression reopen with tier-and-score floor.
-- clearwright_alf_delta.py (310) — Run Improvement Delta: immutable self-sufficient
+- clearwright_alf_delta.py (310) - Run Improvement Delta: immutable self-sufficient
   input snapshot; deterministic derivation via hash-verified refs; rerun is a
   verified no-op or a REFUSED divergent rewrite (Tier 1); acyclic anchor chain;
   empty delta still written; missing-delta verifier.
-- clearwright_alf_review.py (254) — legal lifecycle transition table; disposition
+- clearwright_alf_review.py (254) - legal lifecycle transition table; disposition
   verbs bound to a durable inbound operator message (exists / operator+inbound /
   postdates the disposed revision / names the entry_id / single-use replay refused);
   APPROVED_FOR_PLANNING promotion gate; disposition-free surfacing; state-neutral
   spec rendering (grants nothing).
-- clearwright_dispatch_preflight.py (136) — enablers A/B pure logic.
-- clearwright_alf_seed.py (216) — the three approved seed findings + residual
+- clearwright_dispatch_preflight.py (136) - enablers A/B pure logic.
+- clearwright_alf_seed.py (216) - the three approved seed findings + residual
   candidate, exact evidence bindings, idempotent.
-- clearwright_alf_gqfixture.py (104) — GQ acceptance fixture (read-only evidence).
+- clearwright_alf_gqfixture.py (104) - GQ acceptance fixture (read-only evidence).
 
 MODIFYING (the only change to existing code) tools/clearwright_review_council.py
-(+27) — enablers A/B, inline below.
+(+27) - enablers A/B, inline below.
 
 ## SECURITY-CRITICAL CHANGE (review closely): council-engine enabler wiring
 ```
@@ -88,13 +88,13 @@ Non-weakening argument: enabler B only refuses when `council.preallocation_signa
 prove a blocker (normal councils carry no such key → dispatch_eligibility({}) →
 (True, None) → unchanged path); the egress guard still independently re-enforces
 every rule at SEND. classify_reviewer_failure reads only safe fields
-(error/classification/reason/error_class/code) — never raw provider bodies/verdicts
-— and returns one of 13 fixed classes.
+(error/classification/reason/error_class/code) - never raw provider bodies/verdicts
+- and returns one of 13 fixed classes.
 
 ## Design invariants asserted (and tested)
 - Additive: no existing record shape changed; alf_record_version 1; absence of alf/
   means no data. verify: full suite green incl unchanged council/queue/gate tests.
-- Immutability tamper-EVIDENT (not physically append-only) — honest boundary in the
+- Immutability tamper-EVIDENT (not physically append-only) - honest boundary in the
   code: chains detect mutation/reorder/non-terminal deletion; expected-head
   checkpoints (journal-authenticated, ancestry-proof) detect isolated truncation;
   coordinated rollback is reported as an explicit undetectable boundary, never a
@@ -120,11 +120,11 @@ seed tiers/scores; GQ fixture quantifies 10 reviewer_unavailable / 40 attempts /
 4 work items and PRESERVES causal uncertainty.
 
 ## Review questions
-1. Is the three-layer separation implemented soundly — the append-only hash-chained
+1. Is the three-layer separation implemented soundly - the append-only hash-chained
    revision log and byte-exact head-rebuild?
 2. Is the operation journal's acyclic anchoring + crash recovery correct and
    fail-closed (no double-count, no loss, halt on missing staged bytes)?
-3. Is the operator-control boundary complete — can ANY implemented ALF path create
+3. Is the operator-control boundary complete - can ANY implemented ALF path create
    authority, governed work, GitHub state, mutate code, alter a disposition without
    a valid operator message, or bypass the promotion gate?
 4. Do enablers A/B weaken ANY fail-closed security/provenance/authority/egress

@@ -31,6 +31,9 @@ CSS = _read("style.css")
 
 
 
+RE_PARSE = r"function parseWorkRoute[\s\S]{0,4000}?\n\}"
+
+
 def _block_of(html, elem_id):
     """Return the balanced-div source of the element carrying elem_id.
 
@@ -68,8 +71,18 @@ class SelectionRestorationTest(unittest.TestCase):
         self.assertIn("catch", m2.group(0))
 
     def test_restore_runs_at_boot_after_the_queue_loads(self):
+        """Scoped to wire(), because the retry path contains a textually
+        similar call and would satisfy a whole-file assertion without proving
+        anything about boot."""
         self.assertIn("restoreActiveSelection", APP)
-        self.assertRegex(APP, r"refreshWorkItems\(\)\s*\.then\(\s*restoreActiveSelection")
+        i = APP.index("function wire()")
+        j = APP.index("function handleOperatorAction")
+        boot = APP[i:j]
+        self.assertIn("refreshWorkItems()", boot)
+        self.assertIn("restoreActiveSelection()", boot)
+        self.assertIn("initJumpToLatest();", boot)
+        # Restoration must follow a SUCCESSFUL load, not run unconditionally.
+        self.assertIn("refreshWorkItems().then(", boot)
 
     def test_explicit_deep_link_wins_over_stored_selection(self):
         m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
@@ -245,6 +258,124 @@ class ComposerBindingTest(unittest.TestCase):
         """
         self.assertIn("isConfirmedTarget: () => !!selectedConvThread", APP)
         self.assertNotIn("selectedConvThread || selectedWorkItemId", APP)
+
+
+class RouteParsingTest(unittest.TestCase):
+    """decodeURIComponent raises URIError on malformed percent-encoding.
+
+    Unguarded at boot, that exception propagates out of wire() BEFORE
+    restoration, status reporting and the refresh timers are installed, so one
+    bad URL would disable the console instead of being reported.
+    """
+
+    def test_one_guarded_parser_is_shared(self):
+        self.assertIn("function parseWorkRoute", APP)
+        m = re.search(RE_PARSE, APP)
+        body = m.group(0)
+        self.assertIn("try {", body)
+        self.assertIn("catch", body)
+        self.assertIn("malformed: true", body)
+
+    def test_no_unguarded_decode_remains_on_the_route_paths(self):
+        for fn in ("applyWorkHashRoute", "restoreActiveSelection"):
+            m = re.search(r"function " + fn + r"[\s\S]{0,4000}?\n\}", APP)
+            self.assertNotIn("decodeURIComponent", m.group(0),
+                             fn + " must go through parseWorkRoute")
+
+    def test_boot_route_reports_a_malformed_link(self):
+        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("route.malformed", body)
+        self.assertIn("showRestoreStatus", body)
+        self.assertIn("clearWorkRoute()", body)
+
+    def test_a_bad_message_fragment_does_not_discard_a_valid_work_id(self):
+        m = re.search(RE_PARSE, APP)
+        body = m.group(0)
+        after = body.split("let msg = null;")[1]
+        self.assertIn("catch", after)
+        self.assertIn("msg = null", after)
+
+
+class StaleRouteClearingTest(unittest.TestCase):
+    """'Clear it and say so' has to be literally true."""
+
+    def test_invalid_route_is_removed_from_the_url(self):
+        self.assertIn("function clearWorkRoute", APP)
+        m = re.search(r"function clearWorkRoute[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("replaceState", m.group(0))
+        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("clearWorkRoute()", r.group(0))
+
+    def test_selection_is_cleared_unconditionally(self):
+        """A conditional clear could announce 'nothing is selected' while a
+        different prior selection survived."""
+        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        unknown = r.group(0).split("if (!known)")[1][:400]
+        self.assertIn("selectTask(null);", unknown)
+        self.assertNotIn("selectedWorkItemId === wid", unknown)
+
+
+class DeepLinkPolicyTest(unittest.TestCase):
+    """Both reviewers asked for an explicit terminal-item policy.
+
+    Decision: an EXPLICIT link may open a terminal item, because reviewing
+    finished work is the point of sharing a link. That is inspection, not
+    active-session restoration, so it is never persisted as the active
+    selection. Automatic restoration still excludes terminal items entirely.
+    """
+
+    def test_terminal_deep_link_is_not_persisted_as_active(self):
+        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        body = r.group(0)
+        self.assertIn("if (!isActiveItem(known))", body)
+        tail = body.split("if (!isActiveItem(known))")[1][:400]
+        self.assertIn("persistSelection(null)", tail)
+        self.assertIn("showRestoreStatus", tail)
+
+    def test_the_policy_is_documented_where_it_is_enforced(self):
+        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("POLICY", r.group(0))
+
+    def test_automatic_restoration_still_excludes_terminal_items(self):
+        m = re.search(r"function rankActiveWorkItems[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("filter(isActiveItem)", m.group(0))
+
+
+class RuntimeCoverageTest(unittest.TestCase):
+    """The reviewers asked for coverage that executes, not just source text."""
+
+    def test_a_runtime_harness_exists_and_is_dependency_free(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        harness = os.path.join(here, "dom", "session_ux_runtime.mjs")
+        self.assertTrue(os.path.isfile(harness))
+        src = open(harness, encoding="utf-8").read()
+        # Every import must resolve to a Node builtin: no installed package,
+        # no browser driver, nothing that needs an install step.
+        imports = re.findall(r'from "([^"]+)"', src)
+        self.assertTrue(imports, "harness should import something")
+        for mod in imports:
+            self.assertTrue(mod.startswith("node:"),
+                            "non-builtin import would add a dependency: " + mod)
+        self.assertNotIn("require(", src)
+        here2 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.assertFalse(os.path.exists(os.path.join(here2, "package.json")),
+                         "no package manifest may be introduced")
+
+    def test_the_harness_states_its_limitation(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        src = open(os.path.join(here, "dom", "session_ux_runtime.mjs"),
+                   encoding="utf-8").read()
+        self.assertIn("LIMITATION", src)
+
+    def test_the_harness_covers_the_defects_that_actually_occurred(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        src = open(os.path.join(here, "dom", "session_ux_runtime.mjs"),
+                   encoding="utf-8").read()
+        for probe in ("conversationScrollEl", "parseWorkRoute",
+                      "convComposerTarget", "rankActiveWorkItems",
+                      "wake_pending", "unresolved"):
+            self.assertIn(probe, src)
 
 
 class UnresolvedDestinationTest(unittest.TestCase):

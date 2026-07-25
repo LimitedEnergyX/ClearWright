@@ -1593,26 +1593,49 @@ function rankActiveWorkItems(items) {
 // legitimate because there is genuinely no active work.
 function restoreActiveSelection() {
   const items = lastWorkItems || [];
-  const deep = /[#&]work=([^&]+)/.exec(location.hash || "");
+  const deep = parseWorkRoute(location.hash);
+  if (deep && deep.malformed) {
+    clearWorkRoute();
+    selectTask(null);
+    persistSelection(null);
+    showRestoreStatus("That link could not be read, so nothing is selected.");
+    return;
+  }
   if (deep) {
     // An explicit deep link always wins. It is applied on load BEFORE the work
     // queue has been fetched, so the durable thread id could not be resolved at
     // that point; bind it now that the queue is known. Without this the
     // conversation stays empty and the composer shows no thread.
-    const wid = decodeURIComponent(deep[1]);
+    const wid = deep.work_item_id;
     const known = items.find((it) => it.work_item_id === wid);
     if (!known) {
-      // A malformed, stale, or unavailable deep link must not leave a selected
-      // work item with no queue-backed identity. Clear it, say so, and do not
-      // persist it as the active selection.
-      if (selectedWorkItemId === wid) selectTask(null);
+      // A stale or unavailable deep link must not leave a selected work item
+      // with no queue-backed identity. Clear the selection UNCONDITIONALLY --
+      // announcing "nothing is selected" while some other prior selection
+      // survived would be a false statement -- drop the route so a reload does
+      // not repeat this, and say what happened.
+      selectTask(null);
       persistSelection(null);
+      clearWorkRoute();
       showRestoreStatus('Work item "' + wid + '" is not in the live queue. ' +
                         "The link may be stale, so nothing is selected.");
       return;
     }
     if (known.thread_id && selectedWorkItemId === wid && !selectedConvThread) {
       selectTask(known.thread_id, wid);
+    }
+    // POLICY, stated explicitly because both reviewers asked. An EXPLICIT link
+    // may open a terminal item, because reviewing finished work is the point of
+    // sharing a link. That is inspection, NOT active-session restoration: it is
+    // never persisted as the active selection, so the next refresh restores
+    // real active work rather than reopening finished work. Automatic
+    // restoration (stored selection and fallback ranking) still excludes
+    // terminal items entirely.
+    if (!isActiveItem(known)) {
+      persistSelection(null);
+      showRestoreStatus("Opened " + activeStateOf(known).replace(/_/g, " ") +
+                        " work item for inspection. It is not active, so it " +
+                        "will not be restored on the next refresh.");
     }
     return;
   }
@@ -1623,6 +1646,38 @@ function restoreActiveSelection() {
   const target = storedItem || rankActiveWorkItems(items)[0] || null;
   if (!target) { persistSelection(null); return; }   // no active work: empty state is correct
   navigateToWorkItem(target.work_item_id);
+}
+
+// ONE parser for the work route, shared by boot and restoration so malformed
+// input is handled identically in both. decodeURIComponent() raises URIError on
+// malformed percent-encoding; an unguarded call at boot aborts wire() before
+// initJumpToLatest(), restoration and the refresh timers are installed, so a
+// single bad URL would disable the console instead of being reported.
+function parseWorkRoute(hash) {
+  const m = /[#&]work=([^&]+)/.exec(hash || "");
+  if (!m) return null;
+  let wid;
+  try {
+    wid = decodeURIComponent(m[1]);
+  } catch (e) {
+    return { malformed: true, work_item_id: null, message_id: null };
+  }
+  let msg = null;
+  const mm = /[#&]msg=([^&]+)/.exec(hash || "");
+  if (mm) {
+    try { msg = decodeURIComponent(mm[1]); } catch (e) { msg = null; }
+  }
+  return { malformed: false, work_item_id: wid, message_id: msg };
+}
+
+// Remove an invalid route so a reload does not repeat the same failure. Falls
+// back to assigning the hash when history is unavailable.
+function clearWorkRoute() {
+  try {
+    history.replaceState(null, "", location.pathname + location.search);
+  } catch (e) {
+    try { location.hash = ""; } catch (e2) { /* nothing further to do */ }
+  }
 }
 
 // Deterministic hash route: #work=<work_item_id>[&msg=<message_id>]. The
@@ -1767,15 +1822,21 @@ function highlightMessage(messageId) {
 
 // Apply a #work=...&msg=... route on load / hashchange (navigation only).
 function applyWorkHashRoute() {
-  const h = location.hash || "";
-  const m = /[#&]work=([^&]+)/.exec(h);
-  if (!m) return;
-  const wid = decodeURIComponent(m[1]);
-  const known = (lastWorkItems || []).find((it) => it.work_item_id === wid);
-  selectTask(known ? known.thread_id || null : null, wid);
+  const route = parseWorkRoute(location.hash);
+  if (!route) return;
+  if (route.malformed) {
+    // Never throw out of boot. Drop the unusable route and report it once the
+    // status element exists; restoration then proceeds normally.
+    clearWorkRoute();
+    showRestoreStatus("That link could not be read, so nothing is selected.");
+    return;
+  }
+  const known = (lastWorkItems || []).find((it) => it.work_item_id === route.work_item_id);
+  selectTask(known ? known.thread_id || null : null, route.work_item_id);
   showView("work");
-  const mm = /[#&]msg=([^&]+)/.exec(h);
-  if (mm) setTimeout(() => highlightMessage(decodeURIComponent(mm[1])), 200);
+  if (route.message_id) {
+    setTimeout(() => highlightMessage(route.message_id), 200);
+  }
 }
 
 async function refreshWorkItems() {

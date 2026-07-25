@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   dfb88391803f4fb4c91640e4e87ca8e361d72d8b
+HEAD (bytes under review):   e5d84c190fb44f73f2d8cd0bf86866c72dc334db
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -66,22 +66,22 @@ were then added to pin each corrected contract.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       155986  798ecb29c4f8675c98925059fbc16a43b6f56d9ebb93d2d7b79b12abfc07093b
+  apps/control-plane/static/app.js                       157400  145e5e1d22c3ab8e9bb55a50b8bb54710f02f83d02caad2c7929d7a62101ed8a
   apps/control-plane/static/index.html                    22153  336d1c97639ac69f8cbbac53f7919ffc1fb815da28c1c4f90175c5b55bc86179
   apps/control-plane/static/style.css                     52456  51d02fb9466c43a80f5d760a1e613dc0397acb0220fd3f91ffc4c3a1f5ece09f
-  tests/dom/session_ux_runtime.mjs                        14674  8ff97685eae84a31efe0112dc16749b866c828bdf5fcd1eb997020b7563dc980
-  tests/test_session_continuity_ux.py                     33907  21c181fb05da953a8f3cfb723eacc390bd92158db17f7023e083848d1c8f45e6
+  tests/dom/session_ux_runtime.mjs                        17729  12af6757da6a91cf5b626de08265ba6ab8c32d28620daa02d536179b3728378f
+  tests/test_session_continuity_ux.py                     36503  4a02430075067d4bc1ef5a5a0e2b91a8703d9f4b5d294f3f4b0e419f35af0536
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 584 ++++++++++++++++++++++++++-
+ apps/control-plane/static/app.js     | 610 ++++++++++++++++++++++++++-
  apps/control-plane/static/index.html |  42 +-
  apps/control-plane/static/style.css  | 101 +++++
- tests/dom/session_ux_runtime.mjs     | 340 ++++++++++++++++
- tests/test_session_continuity_ux.py  | 745 +++++++++++++++++++++++++++++++++++
+ tests/dom/session_ux_runtime.mjs     | 401 ++++++++++++++++++
+ tests/test_session_continuity_ux.py  | 796 +++++++++++++++++++++++++++++++++++
  tests/test_session_ux_runtime.py     |  40 ++
- 6 files changed, 1823 insertions(+), 29 deletions(-)
+ 6 files changed, 1961 insertions(+), 29 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -191,7 +191,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..dea7adb 100644
+index dd2d10c..605ddb8 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -307,7 +307,7 @@ index dd2d10c..dea7adb 100644
      "</div>";
  }
  
-@@ -1290,6 +1345,341 @@ function openAttention() {
+@@ -1290,6 +1345,348 @@ function openAttention() {
    }
  }
  
@@ -561,10 +561,12 @@ index dd2d10c..dea7adb 100644
 +  const items = lastWorkItems || [];
 +  const deep = parseWorkRoute(location.hash);
 +  if (deep && deep.malformed) {
-+    clearWorkRoute();
 +    selectTask(null);
 +    persistSelection(null);
-+    showRestoreStatus("That link could not be read, so nothing is selected.");
++    clearWorkRoute();
++    routeErrorReported = true;
++    showRestoreStatus("That link could not be read, so it was removed. " +
++                      "Nothing is selected.");
 +    return;
 +  }
 +  if (deep) {
@@ -620,7 +622,11 @@ index dd2d10c..dea7adb 100644
 +// initJumpToLatest(), restoration and the refresh timers are installed, so a
 +// single bad URL would disable the console instead of being reported.
 +function parseWorkRoute(hash) {
-+  const m = /[#&]work=([^&]+)/.exec(hash || "");
++  // NOTE the [^&]* rather than [^&]+: "#work=" carries an explicit but empty
++  // work id. That is an INVALID route, not the absence of one, and it must go
++  // through the same clear-and-report path instead of silently falling through
++  // to stored-selection restoration.
++  const m = /[#&]work=([^&]*)/.exec(hash || "");
 +  if (!m) return null;
 +  let wid;
 +  try {
@@ -628,6 +634,7 @@ index dd2d10c..dea7adb 100644
 +  } catch (e) {
 +    return { malformed: true, work_item_id: null, message_id: null };
 +  }
++  if (!wid) return { malformed: true, work_item_id: null, message_id: null };
 +  let msg = null;
 +  const mm = /[#&]msg=([^&]+)/.exec(hash || "");
 +  if (mm) {
@@ -649,7 +656,7 @@ index dd2d10c..dea7adb 100644
  // Deterministic hash route: #work=<work_item_id>[&msg=<message_id>]. The
  // highlight message id is derived from the work item id itself (a message work
  // item id IS "message:" + message_id) -- no message search, no ambiguity.
-@@ -1298,9 +1688,124 @@ function navigateToWorkItem(workItemId) {
+@@ -1298,9 +1695,135 @@ function navigateToWorkItem(workItemId) {
      ? workItemId.slice("message:".length) : "";
    location.hash = "#work=" + encodeURIComponent(workItemId) +
      (msgId ? "&msg=" + encodeURIComponent(msgId) : "");
@@ -704,16 +711,23 @@ index dd2d10c..dea7adb 100644
 +  return document.scrollingElement || document.documentElement;
 +}
 +
-+// Scroll events do not bubble from the document element, so a page-level
-+// scroller must be observed on window instead.
-+function scrollEventTargetFor(el) {
-+  return (el === document.scrollingElement || el === document.documentElement ||
-+          el === document.body) ? window : el;
-+}
 +
 +function operatorMovedAwayFromLatest(el) {
 +  if (!el) return false;
 +  return (el.scrollHeight - el.scrollTop - el.clientHeight) > 120;
++}
++
++// True when THIS page load already reported an unusable route. The boot success
++// path must not wipe that message: clearing the hash necessarily makes the bad
++// route invisible to the restoration that follows, so without this flag the
++// operator would see the explanation replaced by a silently restored selection.
++let routeErrorReported = false;
++
++// Clear only a TRANSIENT status. A reported route error is not transient: it
++// explains something the operator's link did, and it stays until they navigate.
++function clearTransientRestoreStatus() {
++  if (routeErrorReported) return;
++  showRestoreStatus("");
 +}
 +
 +// Restoration status is surfaced, never swallowed. `retry` shows the control
@@ -748,11 +762,15 @@ index dd2d10c..dea7adb 100644
 +  const pill = document.getElementById("jump-to-latest");
 +  if (!pill) return;
 +  pill.addEventListener("click", jumpToLatestMessage);
-+  // Resolved lazily on each event: the real scroller depends on layout, which
-+  // changes when the Work view opens and when the conversation grows.
-+  scrollEventTargetFor(conversationScrollEl()).addEventListener("scroll", () => {
++  // ONE capturing listener on window. Scroll events do not bubble, but they do
++  // reach window during the CAPTURE phase from any target, so this observes
++  // whichever element is scrolling without having to re-bind. Binding to the
++  // scroller resolved at init would go stale as soon as layout changed the
++  // scrolling ancestor -- which is exactly why the scroller is resolved lazily
++  // inside the handler.
++  window.addEventListener("scroll", () => {
 +    if (!operatorMovedAwayFromLatest(conversationScrollEl())) pill.hidden = true;
-+  });
++  }, true);
 +  const anchor = conversationAnchorEl();
 +  if (!anchor) return;
 +  try {
@@ -775,7 +793,7 @@ index dd2d10c..dea7adb 100644
  }
  
  function highlightMessage(messageId) {
-@@ -1317,14 +1822,21 @@ function highlightMessage(messageId) {
+@@ -1317,14 +1840,29 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -787,10 +805,18 @@ index dd2d10c..dea7adb 100644
 +  const route = parseWorkRoute(location.hash);
 +  if (!route) return;
 +  if (route.malformed) {
-+    // Never throw out of boot. Drop the unusable route and report it once the
-+    // status element exists; restoration then proceeds normally.
++    // Never throw out of boot. Clear the route AND the selection unconditionally
++    // -- clearWorkRoute() removes the hash, so the restoration that follows can
++    // no longer see this route, and leaving a selection behind would let an
++    // unusable link keep a destination bound.
++    selectTask(null);
++    persistSelection(null);
 +    clearWorkRoute();
-+    showRestoreStatus("That link could not be read, so nothing is selected.");
++    // Say what actually happens next. Restoration DOES continue, so claiming
++    // "nothing is selected" would be false a moment later.
++    routeErrorReported = true;
++    showRestoreStatus("That link could not be read, so it was removed. " +
++                      "Restoring your active work instead.");
 +    return;
 +  }
 +  const known = (lastWorkItems || []).find((it) => it.work_item_id === route.work_item_id);
@@ -804,7 +830,7 @@ index dd2d10c..dea7adb 100644
  }
  
  async function refreshWorkItems() {
-@@ -1837,7 +2349,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2375,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -814,7 +840,7 @@ index dd2d10c..dea7adb 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +2648,23 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +2674,23 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -838,7 +864,7 @@ index dd2d10c..dea7adb 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2786,9 +3316,12 @@ function toggleToolLog() {
+@@ -2786,9 +3342,12 @@ function toggleToolLog() {
  function selectTask(threadId, workItemId) {
    selectedConvThread = threadId || null;
    selectedWorkItemId = workItemId || null;
@@ -851,7 +877,7 @@ index dd2d10c..dea7adb 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2886,6 +3419,10 @@ function wire() {
+@@ -2886,6 +3445,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -862,7 +888,7 @@ index dd2d10c..dea7adb 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +3534,19 @@ function wire() {
+@@ -2997,6 +3560,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -871,7 +897,7 @@ index dd2d10c..dea7adb 100644
 +  // never strands the operator on an empty panel while active work exists.
 +  initJumpToLatest();
 +  refreshWorkItems().then(() => {
-+    showRestoreStatus("");
++    clearTransientRestoreStatus();
 +    restoreActiveSelection();
 +  }).catch(() => {
 +    // Continuity that fails silently is worse than continuity that reports the
@@ -1070,10 +1096,10 @@ index ac13c95..44a614a 100644
 +}
 diff --git a/tests/dom/session_ux_runtime.mjs b/tests/dom/session_ux_runtime.mjs
 new file mode 100644
-index 0000000..b427d50
+index 0000000..02bb316
 --- /dev/null
 +++ b/tests/dom/session_ux_runtime.mjs
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,401 @@
 +/*
 + * Runtime coverage for the session-continuity UX logic.
 + *
@@ -1334,6 +1360,67 @@ index 0000000..b427d50
 +}
 +
 +// --------------------------------------------------------------------------
++// 2b. BOOT ORDERING. applyWorkHashRoute() runs before the queue loads and
++//     clears the bad hash, so restoreActiveSelection() can no longer see it.
++//     The reported explanation must therefore survive, and the malformed route
++//     must not leave a selection bound. This is the exact interaction the
++//     previous harness missed by calling applyWorkHashRoute() in isolation.
++// --------------------------------------------------------------------------
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
++
++  // Pretend a previous session stored a selection, as a real reload would.
++  evalIn(ctx, 'localStorage.setItem("cw_selected_work_item_v1", "message:msg-prior");' +
++              'lastWorkItems = [{ work_item_id: "message:msg-prior", thread_id: "thr-prior",' +
++              ' presentation_state: "needs_operator" }];');
++
++  ctx.applyWorkHashRoute();
++  ok(evalIn(ctx, "selectedWorkItemId") === null,
++     "a malformed route clears the active selection at boot");
++  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === null,
++     "a malformed route clears the persisted selection at boot");
++  ok(ctx.location.hash === "", "the malformed route is removed from the URL");
++  const reported = reg["restore-status"].textContent;
++  ok(reported.indexOf("could not be read") !== -1,
++     "the malformed route is explained to the operator");
++  ok(reg["restore-status"].hidden === false, "the explanation is visible");
++
++  // Now the boot success path runs, exactly as wire() does.
++  ctx.clearTransientRestoreStatus();
++  ok(reg["restore-status"].hidden === false,
++     "the route explanation SURVIVES the boot success path (was erased before)");
++  ok(reg["restore-status"].textContent.indexOf("could not be read") !== -1,
++     "the surviving message is still the route explanation");
++
++  // And the message must not contradict what restoration then does.
++  ctx.restoreActiveSelection();
++  const restored = evalIn(ctx, "selectedWorkItemId");
++  ok(reported.indexOf("nothing is selected") === -1 || restored === null,
++     "the boot message must not claim nothing is selected while restoration binds one");
++}
++
++// 2c. An EMPTY work id is an invalid route, not the absence of one.
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=", ["conv-scroll", "conversation"]);
++  const p = ctx.parseWorkRoute("#work=");
++  ok(p !== null, "an empty work id is recognised as a route");
++  ok(p.malformed === true, "an empty work id is classified invalid, not absent");
++}
++
++// 2d. A transient status is still clearable when no route error occurred.
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
++  ctx.showRestoreStatus("transient");
++  ok(reg["restore-status"].hidden === false, "a transient status shows");
++  ctx.clearTransientRestoreStatus();
++  ok(reg["restore-status"].hidden === true,
++     "a transient status clears when no route error was reported");
++}
++
++// --------------------------------------------------------------------------
 +// 3. Ranking: every ranked bucket reachable, unknown last, deterministic ties.
 +// --------------------------------------------------------------------------
 +{
@@ -1416,10 +1503,10 @@ index 0000000..b427d50
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..fe4eb0d
+index 0000000..3321b95
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,745 @@
+@@ -0,0 +1,796 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -1719,6 +1806,51 @@ index 0000000..fe4eb0d
 +        self.assertIn("msg = null", after)
 +
 +
++class RouteErrorPersistenceTest(unittest.TestCase):
++    """Clearing the hash makes the bad route invisible to the restoration that
++    follows, so the explanation must not be wiped by the success path."""
++
++    def test_a_reported_route_error_is_not_transient(self):
++        self.assertIn("let routeErrorReported = false;", APP)
++        self.assertIn("function clearTransientRestoreStatus", APP)
++        m = re.search(r"function clearTransientRestoreStatus[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("if (routeErrorReported) return;", m.group(0))
++
++    def test_boot_uses_the_transient_clear(self):
++        i = APP.index("function wire()")
++        j = APP.index("function handleOperatorAction")
++        self.assertIn("clearTransientRestoreStatus();", APP[i:j])
++        self.assertNotIn('showRestoreStatus("");', APP[i:j])
++
++    def test_malformed_boot_route_clears_the_selection(self):
++        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
++        branch = m.group(0).split("route.malformed")[1][:600]
++        self.assertIn("selectTask(null);", branch)
++        self.assertIn("persistSelection(null);", branch)
++        self.assertIn("routeErrorReported = true;", branch)
++
++    def test_the_boot_message_does_not_contradict_restoration(self):
++        """Restoration DOES continue after a malformed boot route, so the
++        message must not claim nothing is selected."""
++        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
++        branch = m.group(0).split("route.malformed")[1]
++        branch = branch[:branch.index("return;")]
++        # Assert on the OPERATOR-FACING string, not the surrounding commentary,
++        # which legitimately quotes the phrase being avoided.
++        call = branch[branch.index("showRestoreStatus("):]
++        self.assertNotIn("nothing is selected", call)
++        self.assertIn("Restoring your active work instead", call)
++
++
++class EmptyRouteTest(unittest.TestCase):
++
++    def test_empty_work_id_is_invalid_not_absent(self):
++        m = re.search(RE_PARSE, APP)
++        body = m.group(0)
++        self.assertIn("[^&]*", body, "an empty work id must still match")
++        self.assertIn("if (!wid) return { malformed: true", body)
++
++
 +class StaleRouteClearingTest(unittest.TestCase):
 +    """'Clear it and say so' has to be literally true."""
 +
@@ -1885,11 +2017,17 @@ index 0000000..fe4eb0d
 +        self.assertIn("conversationAnchorEl()", body)
 +        self.assertIn("conversationScrollEl()", body)
 +
-+    def test_page_level_scroll_is_observed_on_window(self):
-+        """Scroll events do not bubble from the document element."""
-+        self.assertIn("function scrollEventTargetFor", APP)
-+        m = re.search(r"function scrollEventTargetFor[\s\S]{0,4000}?\n\}", APP)
-+        self.assertIn("window", m.group(0))
++    def test_scroll_is_observed_by_capture_on_window(self):
++        """Scroll does not bubble, but it DOES reach window in the capture
++        phase from any target. Binding to the scroller resolved at init went
++        stale as soon as layout changed the scrolling ancestor, which is the
++        very reason the scroller is resolved lazily inside the handler."""
++        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn('window.addEventListener("scroll"', body)
++        self.assertIn("}, true);", body)
++        self.assertNotIn("scrollEventTargetFor", APP,
++                         "the superseded helper must not linger as dead code")
 +
 +
 +class ObservableFailureTest(unittest.TestCase):

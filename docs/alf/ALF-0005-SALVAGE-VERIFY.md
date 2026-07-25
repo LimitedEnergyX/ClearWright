@@ -4,26 +4,26 @@
 
 repository        ClearWright
 branch            operator/alf-dispatch-preallocation-salvage
-commit            d8f150be56b53dd96491f434063ab02a26b13d3e
+commit            00cf2ea72e5327d1acd3dd6b7cfbe3ccfe49bfaf
 parent            7d97a707fc8662f1f167199cf7aeb821b5441dd9
-tree              84735803c31855708e2ef3236daa68aaaf33da02
+tree              2652d279d48354d14c5494ce7dff34501cf0306d
 work item         message:msg-20260725T025421940761
 CTA packet        alf-stab-cta-20260725 (IN_PROGRESS, BRANCH_CODE, OPERATOR-0001)
 CTA lease expires 2026-07-26T02:57:18Z
 dispatch lane     internal_technical
 data sensitivity  internal_technical
-round             round 4 (final operator-authorized correction under msg-20260725T132437192979)
-full suite        1200 tests OK, 1 pre-existing skip
+round             round 5 (final authorized round under msg-20260725T134126713904)
+full suite        1202 tests OK, 1 pre-existing skip
 ASCII status      0 character(s) replaced in the diff below
 line endings      all changed files LF-only (crlf counts below)
 tripwire status   no forbidden ClearWright path or config marker present
 
 changed files (4):
 
-  tests/test_preallocation_production.py      27810 bytes  crlf=0 nonascii=0  sha256 3b857d48d8450a477396f1bea28b9fbe41249d13433e724678c40fd6980fb37b
-  tools/clearwright_dispatch_preflight.py     11458 bytes  crlf=0 nonascii=0  sha256 e4271cdafae25e562aa9a29b7349ce5f0f13d9a3360aa11cefe9681330439c6d
+  tests/test_preallocation_production.py      30400 bytes  crlf=0 nonascii=0  sha256 0c6de583fdb6ec3d37bb3e67b0a8b8cc53095a7fd24827c5bacd1db7057aaa2d
+  tools/clearwright_dispatch_preflight.py     12698 bytes  crlf=0 nonascii=0  sha256 9c9ca34c7436f538176911bd83baa425225febf84d4799c8534cf8b8c1f92c22
   tools/clearwright_review_council.py        101910 bytes  crlf=0 nonascii=51  sha256 8052fb595536c139feb1c4bb273a3a40cd94328202c0b32e4353b8f1be52841b
-  tools/clearwright_use_cw.py                 93353 bytes  crlf=0 nonascii=60  sha256 f66fced99a6f615fe9e3c4d9bc01f5ca4faa39caad5166f8a280781cce59b3d1
+  tools/clearwright_use_cw.py                 92300 bytes  crlf=0 nonascii=60  sha256 eec18e5bd49859c6d51de3921f0c8773795e3b22343273837ec5143281b56166
 
 ## Scope of THIS patch
 
@@ -139,15 +139,15 @@ reviewer_unavailable.
    deployment? Phase 2 filesystem hardening (an attacker with filesystem write
    access to the queue root) is EXCLUDED by planning packet section 8.
 
-## Committed diff (7d97a70..d8f150b)
+## Committed diff (7d97a70..00cf2ea)
 
 ```diff
 diff --git a/tests/test_preallocation_production.py b/tests/test_preallocation_production.py
 new file mode 100644
-index 0000000..bfe6dc6
+index 0000000..ecc4851
 --- /dev/null
 +++ b/tests/test_preallocation_production.py
-@@ -0,0 +1,578 @@
+@@ -0,0 +1,631 @@
 +"""ALF-0005 tests: authoritative pre-allocation dispatch eligibility.
 +
 +Covers production signal derivation, refusal BEFORE council-id/reviewer-attempt
@@ -397,17 +397,15 @@ index 0000000..bfe6dc6
 +        self.assertEqual(self._council_count(), 0)
 +
 +    def test_non_confusable_hit_category_is_also_refused(self):
-+        """A "hit" of ANY finding category is a tripwire refusal, because
-+        egress_guard.authorize() raises EgressBlocked("tripwire_hit") for a hit
-+        verdict over the FULL outbound bytes with NO branching on category and
-+        before the sensitive-tier branch, so it applies on every lane. That is a
-+        PROVEN guard block. Unknown verdicts do NOT take this path; they are
-+        classifier_unresolved under a separate fail-closed policy.
-+        over-refusal, because egress_guard.authorize() raises
-+        EgressBlocked("tripwire_hit") for any non-clear verdict over the FULL
-+        outbound bytes with NO branching on finding category, and before the
-+        sensitive-tier branch, so it applies on every lane. This pins that
-+        behaviour for a category other than unicode_confusable."""
++        """A "hit" of ANY finding category is a tripwire refusal. That MIRRORS an
++        existing unconditional refusal: egress_guard.authorize() raises
++        EgressBlocked("tripwire_hit") on a hit verdict over the FULL outbound
++        bytes, with no branching on finding category and before the
++        sensitive-tier branch, so it applies on every lane.
++
++        Unknown verdicts do NOT take this path. They are classifier_unresolved
++        under a separate, intentional new fail-closed policy, which is never
++        described as a mirrored tripwire refusal."""
 +        import clearwright_egress_guard as eg
 +        orig = eg.classify
 +        eg.classify = lambda text, *a, **kw: {
@@ -715,6 +713,61 @@ index 0000000..bfe6dc6
 +        self.assertEqual(recs[0]["attempt"], 0)
 +        self.assertEqual(recs[0]["dispatch_lane"], "internal_technical")
 +
++    def test_non_code_profile_blocker_end_to_end(self):
++        """Round-5 item 3: a non-code review profile on the internal_technical
++        lane refuses before allocation on the PRODUCTION path."""
++        mid = "msg-20260725T000000000001"
++        env = {"envelope_version": 1, "task_kind": "governed",
++               "data_sensitivity": "internal_technical",
++               "review_profile": "editorial", "verification_required": True,
++               "request": "r", "approved_scope": "s", "intended_actions": [],
++               "excluded_actions": [], "operator_authority_source": "o"}
++        # _review_profile reads the AUDIT block, not the top-level envelope
++        ucw._persist_envelope(self.root, mid, env,
++                              {"classification": "governed",
++                               "data_sensitivity": "internal_technical",
++                               "review_profile": "editorial"})
++        self.assertEqual(ucw._review_profile(self.root, "message:" + mid),
++                         "editorial")
++        args = ucw.build_parser().parse_args(
++            ["council", self.root, "--thread-id", "thr-its2",
++             "--work-item-id", "message:" + mid,
++             "--plan-file", self._plan(), "--json"])
++        buf = io.StringIO()
++        with redirect_stdout(buf):
++            args.func(args)
++        payload = json.loads(buf.getvalue().strip().splitlines()[-1])
++        self.assertEqual(payload.get("normalized_reason"), "policy_denial")
++        self.assertIsNone(payload.get("council_id"))
++        self.assertEqual(payload.get("attempts"), {})
++        self.assertEqual(self._councils(), 0)
++        recs = self._refusals()
++        self.assertEqual(len(recs), 1)
++        self.assertEqual(recs[0]["normalized_reason"], "policy_denial")
++        self.assertEqual(recs[0]["attempt"], 0)
++        self.assertNotIn("council_id", recs[0])
++
++    def test_missing_composition_blocker_end_to_end(self):
++        """Round-5 item 3: a missing lineage graph or candidate refuses before
++        allocation on the PRODUCTION path with composition_or_hash_mismatch."""
++        orig = ucw._assemble_lineage
++        ucw._assemble_lineage = lambda args: ([], None, [])
++        try:
++            payload = self._run()
++        finally:
++            ucw._assemble_lineage = orig
++        self.assertEqual(payload.get("normalized_reason"),
++                         "composition_or_hash_mismatch")
++        self.assertIsNone(payload.get("council_id"))
++        self.assertEqual(payload.get("attempts"), {})
++        self.assertEqual(self._councils(), 0)
++        recs = self._refusals()
++        self.assertEqual(len(recs), 1)
++        self.assertEqual(recs[0]["normalized_reason"],
++                         "composition_or_hash_mismatch")
++        self.assertEqual(recs[0]["attempt"], 0)
++        self.assertNotIn("council_id", recs[0])
++
 +    def test_refusal_record_is_content_free(self):
 +        self._run()
 +        rec = self._refusals()[0]
@@ -727,10 +780,29 @@ index 0000000..bfe6dc6
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/tools/clearwright_dispatch_preflight.py b/tools/clearwright_dispatch_preflight.py
-index 848ff9b..231f444 100644
+index 848ff9b..8273df9 100644
 --- a/tools/clearwright_dispatch_preflight.py
 +++ b/tools/clearwright_dispatch_preflight.py
-@@ -24,7 +24,8 @@ NORMALIZED_FAILURE_CLASSES = (
+@@ -10,11 +10,13 @@ These are ADDITIVE, fail-closed-preserving helpers used by the council engine:
+      secrets or raw provider bodies - only one of NORMALIZED_FAILURE_CLASSES.
+ 
+   B. dispatch_eligibility(): a DETERMINISTIC pre-allocation check over signals
+-     that are known before any adapter call. It can only REFUSE earlier and more
+-     informatively than the downstream egress guard - it never authorizes a
+-     dispatch the guard would block, so no fail-closed control is weakened. When
+-     it refuses, the caller records the normalized reason and consumes NO council
+-     id or reviewer attempt.
++     that are known before any adapter call. It never authorizes a dispatch the
++     guard would block, so no fail-closed control is weakened. For MIRRORED
++     signals it refuses earlier than the guard and can never newly deny; the
++     separate classifier_unresolved policy is an intentional NEW fail-closed
++     denial accepted by the operator (see production_signals). When it refuses,
++     the caller records the normalized reason and consumes NO council id or
++     reviewer attempt.
+ 
+ Pure module: no imports from the council engine (avoids a cycle); the engine
+ imports these.
+@@ -24,7 +26,8 @@ NORMALIZED_FAILURE_CLASSES = (
      "policy_denial", "repo_not_approved", "provenance_unresolved",
      "sensitive_content_prohibited", "tripwire_refusal",
      "composition_or_hash_mismatch", "provider_unavailable", "auth_failure",
@@ -740,7 +812,7 @@ index 848ff9b..231f444 100644
  )
  
  # Ordered (specific -> general) keyword rules over the safe signal text. Each rule
-@@ -103,6 +104,9 @@ _ELIGIBILITY_CHECKS = (
+@@ -103,6 +106,9 @@ _ELIGIBILITY_CHECKS = (
      ("sensitive_prohibited", False, "sensitive_content_prohibited"),
      ("composition_bound", True, "composition_or_hash_mismatch"),
      ("exact_bytes_ok", True, "composition_or_hash_mismatch"),
@@ -750,7 +822,7 @@ index 848ff9b..231f444 100644
      ("tripwire_clear", True, "tripwire_refusal"),
      ("provider_ready", True, "provider_unavailable"),
      ("auth_ok", True, "auth_failure"),
-@@ -122,6 +126,87 @@ def dispatch_eligibility(signals):
+@@ -122,6 +128,108 @@ def dispatch_eligibility(signals):
      return (True, None)
  
  
@@ -760,10 +832,12 @@ index 848ff9b..231f444 100644
 +    """Derive AUTHORITATIVE pre-allocation signals from production preflight
 +    outputs. Callers pass already-computed facts; this function invents nothing.
 +
-+    SAFETY INVARIANT: every signal here mirrors an EXISTING UNCONDITIONAL,
-+    DETERMINISTIC refusal that the engine or the egress guard already performs,
-+    so this check can only refuse EARLIER - never refuse something that would
-+    otherwise have dispatched successfully:
++    TWO CLASSES OF SIGNAL, deliberately not conflated:
++
++    (A) MIRRORED signals. Each of these mirrors an EXISTING UNCONDITIONAL,
++        DETERMINISTIC refusal that the engine or the egress guard already
++        performs, so refusing on them can only refuse EARLIER and can never deny
++        a packet that would otherwise have dispatched:
 +
 +      - lane_authorized      mirrors run_round's internal_technical refusals of
 +                             artifacts and of any non-code review profile;
@@ -772,17 +846,33 @@ index 848ff9b..231f444 100644
 +      - provenance_resolved  mirrors run_round's refusal of a RAW node without
 +                             STANDARD provenance on that lane;
 +      - tripwire_clear       mirrors the guard's unconditional tripwire_hit block
-+                             (enforced on EVERY lane). See the one-directional
-+                             note below.
++                             for a "hit" verdict. authorize() computes
++                             final_scan() over the FULL outbound bytes and raises
++                             EgressBlocked("tripwire_hit") on a hit with NO
++                             branching on finding category and BEFORE the
++                             sensitive-tier branch, and classify() shares
++                             final_scan()'s _scan_text detector core.
++
++    (B) A NEW FAIL-CLOSED POLICY, explicitly accepted by the operator and NOT a
++        mirrored refusal:
++
 +      - classifier_resolved  the classifier returned a verdict this gate
-+                             UNDERSTANDS. The classifier contract is treated as
-+                             exactly two known verdicts, "clear" and "hit".
-+                             Anything else -- unknown, malformed, empty, absent,
-+                             or a verdict added in future -- sets this False and
-+                             refuses with the DISTINCT reason
-+                             classifier_unresolved. An unrecognised verdict is
-+                             NEVER treated as authorization, and is never
-+                             mislabelled as a tripwire hit.
++                             UNDERSTANDS. Exactly two verdicts are known,
++                             "clear" and "hit". Anything else -- unresolved,
++                             malformed, missing, non-string, non-dict, an
++                             exception, or a verdict added in future -- sets this
++                             False and refuses with the DISTINCT reason
++                             classifier_unresolved.
++
++        This CAN newly refuse: the gate does not claim the send-time guard would
++        also have blocked an unrecognised verdict. It is an intentional new
++        pre-allocation denial, chosen because an unknown verdict must never be
++        treated as authorization. It is deliberately NOT described as a mirrored
++        tripwire refusal, and it reports its own reason so that a classifier
++        contract change cannot hide behind a proven-looking one.
++
++    Accordingly the can-only-refuse-earlier property is scoped to class (A) and
++    is NOT claimed for class (B).
 +
 +    STRICT FACTS: every boolean fact must be an exact bool and artifact_count an
 +    exact non-negative int. There is NO permissive coercion, so a truthy
@@ -797,13 +887,16 @@ index 848ff9b..231f444 100644
 +    the start-time preflight, and a genuinely absent provider still surfaces as a
 +    normal reviewer_unavailable outcome.
 +
-+    TRIPWIRE SCOPE (one-directional, by construction): the caller can only scan
-+    the packet CONTEXT, because the complete outbound byte set is not assembled
-+    until after a council exists. The context is a SUBSET of those bytes, so a
-+    hit on the context PROVES a hit at send (no false refusal), while a clear
-+    context does NOT prove the outbound bytes are clear. This gate therefore
-+    catches the common case early and never over-refuses; the egress guard
-+    remains the complete and authoritative check over the exact outbound bytes.
++    TRIPWIRE SCOPE, narrowed to what is actually proven: the caller can only
++    scan the packet CONTEXT it loaded, because the complete outbound byte set is
++    not assembled until after a council exists. This module therefore claims only
++    that a "hit" on that loaded content implies the guard would block at send,
++    which follows from the shared detector core and the unconditional raise
++    above. It does NOT claim that the scanned bytes are byte-identical to, or
++    provably contained in, the final outbound packet: that relationship is the
++    intended construction but is not verified here or by the current tests. The
++    egress guard remains the complete and authoritative check over the exact
++    outbound bytes at send.
 +
 +    The internal_technical-only signals are OMITTED on other lanes. An absent
 +    signal is treated as eligible by dispatch_eligibility, so a lane that does
@@ -882,10 +975,10 @@ index 021c211..b2f8547 100644
      council = {
          "council_id": council_id,
 diff --git a/tools/clearwright_use_cw.py b/tools/clearwright_use_cw.py
-index 21ef38c..de9a0f8 100644
+index 21ef38c..4bbd420 100644
 --- a/tools/clearwright_use_cw.py
 +++ b/tools/clearwright_use_cw.py
-@@ -560,6 +560,112 @@ def _council_body(args, phase, root, stage):
+@@ -560,6 +560,97 @@ def _council_body(args, phase, root, stage):
              return _emit({"ok": False, "command": "council",
                            "error": "lineage_assembly_failed",
                            "reason": exc.reason}, EXIT_HARD_GATE, args.json)
@@ -916,49 +1009,34 @@ index 21ef38c..de9a0f8 100644
 +        except Exception:
 +            # absent/unreadable context is handled by the existing check below
 +            _pre_ctx, _pre_ctx_loaded = "", False
-+        # Tripwire scope is ONE-DIRECTIONAL by construction: only the context is
-+        # available before a council exists, and it is a SUBSET of the outbound
-+        # bytes. A hit here PROVES a hit at send (never a false refusal); a clear
-+        # context does NOT prove the outbound bytes are clear. The egress guard
-+        # remains the complete authoritative check over the exact bytes.
-+        #
 +        # TWO DISTINCT JUSTIFICATIONS, deliberately not conflated:
 +        #
-+        # (a) "hit" -> tripwire_refusal is PROVEN, not assumed.
++        # (a) "hit" -> tripwire_refusal MIRRORS an existing unconditional refusal.
 +        #     clearwright_egress_guard.authorize() computes final_scan() over the
-+        #     FULL outbound bytes and raises EgressBlocked("tripwire_hit")
-+        #     whenever the verdict is "hit", with NO branching on the finding
-+        #     CATEGORY and BEFORE the sensitive-tier branch, so it applies on
-+        #     every lane. classify() and final_scan() share the identical
-+        #     _scan_text detector core and policy. A context "hit" therefore
-+        #     implies an unconditional block at send, so refusing here for ANY hit
-+        #     category cannot over-refuse.
++        #     FULL outbound bytes and raises EgressBlocked("tripwire_hit") on a
++        #     hit verdict, with NO branching on finding CATEGORY and BEFORE the
++        #     sensitive-tier branch, so it applies on every lane; classify() and
++        #     final_scan() share the identical _scan_text detector core and
++        #     policy. Refusing here for a hit therefore cannot newly deny.
 +        #
-+        # (b) any OTHER verdict -> classifier_unresolved is a deliberate
-+        #     FAIL-CLOSED POLICY, not a proven guard block. The gate does not
-+        #     claim to know the classifier's complete verdict domain; it treats
-+        #     exactly two verdicts as known and refuses everything else with its
-+        #     own distinct reason. That is why an unrecognised verdict is never
-+        #     reported as a tripwire hit: mislabelling it would hide a classifier
-+        #     contract change behind a proven-looking reason.
++        # (b) any OTHER verdict -> classifier_unresolved is an INTENTIONAL NEW
++        #     FAIL-CLOSED PRE-ALLOCATION POLICY, explicitly accepted by the
++        #     operator. It is NOT a mirrored tripwire refusal and is deliberately
++        #     not described as one. It CAN newly refuse, because the gate does
++        #     not claim the send-time guard would also have blocked an
++        #     unrecognised verdict. That is the point: an unknown verdict must
++        #     never be treated as authorization, and reporting its own distinct
++        #     reason keeps a classifier contract change from hiding behind a
++        #     proven-looking one.
 +        #
-+        # SUBSET PROPERTY (scope of the claim): the bytes scanned here are the
-+        # SAME text later bound into the outbound composition -- stamp_context()
-+        # records sha256 of exactly this context and run_round refuses a stale or
-+        # missing stamp, so the dispatched packet provably contains these bytes.
-+        # The claim is therefore limited and honest: a hit here implies a hit at
-+        # send. It does NOT claim the converse, because the outbound bytes also
-+        # include scaffold and derived components not available before a council
-+        # exists. The guard remains the complete check over the exact bytes.
-+        # THREE-WAY classifier contract, so no verdict is ever treated as
-+        # authorization by default:
-+        #   "clear"  -> continue through the existing eligible dispatch path;
-+        #   "hit"    -> refuse before allocation with tripwire_refusal;
-+        #   anything else (unknown, malformed, empty, absent, a future verdict)
-+        #            -> refuse before allocation with the DISTINCT reason
-+        #               classifier_unresolved, never mislabelled as a tripwire.
-+        # An exception during classification takes the same unresolved path, so a
-+        # scanner failure and an unrecognised verdict both fail closed.
++        # SCOPE OF THE SCANNED BYTES, narrowed to what is proven: only the
++        # context loaded here can be scanned, because the complete outbound byte
++        # set is not assembled until after a council exists. Nothing below binds
++        # or compares these bytes to the context later stamped by stamp_context,
++        # so no identity or containment relationship with the final outbound
++        # packet is claimed. That relationship is the intended construction, not
++        # a verified invariant. The egress guard remains the complete and
++        # authoritative check over the exact outbound bytes at send.
 +        _tripwire_clear = True
 +        _classifier_resolved = True
 +        if _pre_ctx_loaded:

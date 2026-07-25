@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   e5d84c190fb44f73f2d8cd0bf86866c72dc334db
+HEAD (bytes under review):   f516843424e99e616b414b9aa4b45a5dff55e540
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -66,22 +66,22 @@ were then added to pin each corrected contract.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       157400  145e5e1d22c3ab8e9bb55a50b8bb54710f02f83d02caad2c7929d7a62101ed8a
+  apps/control-plane/static/app.js                       158366  01185b6f4212866a3234d77f67d4ea6d3c95b9777722f0ab5254a78815a7050e
   apps/control-plane/static/index.html                    22153  336d1c97639ac69f8cbbac53f7919ffc1fb815da28c1c4f90175c5b55bc86179
   apps/control-plane/static/style.css                     52456  51d02fb9466c43a80f5d760a1e613dc0397acb0220fd3f91ffc4c3a1f5ece09f
-  tests/dom/session_ux_runtime.mjs                        17729  12af6757da6a91cf5b626de08265ba6ab8c32d28620daa02d536179b3728378f
-  tests/test_session_continuity_ux.py                     36503  4a02430075067d4bc1ef5a5a0e2b91a8703d9f4b5d294f3f4b0e419f35af0536
+  tests/dom/session_ux_runtime.mjs                        22146  e2317ced596d3d4f6b8265bafcbce7a3767fad9603b8342c40be350a0e7d9ad6
+  tests/test_session_continuity_ux.py                     39262  761ab994a93e759530ff2059ecdd07499c8b8746f5ca3ab0f0821bd7620c59d1
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 610 ++++++++++++++++++++++++++-
+ apps/control-plane/static/app.js     | 632 +++++++++++++++++++++++++-
  apps/control-plane/static/index.html |  42 +-
  apps/control-plane/static/style.css  | 101 +++++
- tests/dom/session_ux_runtime.mjs     | 401 ++++++++++++++++++
- tests/test_session_continuity_ux.py  | 796 +++++++++++++++++++++++++++++++++++
+ tests/dom/session_ux_runtime.mjs     | 487 ++++++++++++++++++++
+ tests/test_session_continuity_ux.py  | 850 +++++++++++++++++++++++++++++++++++
  tests/test_session_ux_runtime.py     |  40 ++
- 6 files changed, 1961 insertions(+), 29 deletions(-)
+ 6 files changed, 2123 insertions(+), 29 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -162,6 +162,29 @@ review asked, correctly, how the claims above can be checked.
     
     def in_default_view(item):
 
+  tools/clearwright_work.py lines 290-310  -- the value domain of runner_state, the second field the labels read
+    def runner_state(claimed, claim_at, active_runner, in_council, awaiting_operator,
+                     has_gate, status, now_dt):
+        """Honest runner state (section 4). Claimed is NOT running. Degrades to
+        claimed_idle/stale_or_no_heartbeat/unknown when positive evidence is absent
+        -- ClearWright has no heartbeat channel, so this is derived, never asserted."""
+        if not claimed:
+            return "unowned"
+        if active_runner:
+            return "active_runner"
+        if in_council:
+            return "waiting_on_council"
+        if has_gate or status == "operator_required" or awaiting_operator:
+            return "waiting_on_operator"
+        claim_age = _age_seconds(claim_at, claim_at, now_dt)
+        if claim_age <= RUNNING_WINDOW:
+            return "claimed_idle"
+        if claim_age > STALE_WINDOW:
+            return "stale_or_no_heartbeat"
+        return "claimed_idle"
+    
+    
+
 Consequences, stated so they can be checked against the quoted source:
   * The server refuses a thread_id/work_item_id pair that is not durably
     bound. It can only apply when BOTH are supplied, which is exactly why
@@ -191,7 +214,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..605ddb8 100644
+index dd2d10c..8cbc81c 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -307,7 +330,7 @@ index dd2d10c..605ddb8 100644
      "</div>";
  }
  
-@@ -1290,6 +1345,348 @@ function openAttention() {
+@@ -1290,17 +1345,498 @@ function openAttention() {
    }
  }
  
@@ -570,41 +593,12 @@ index dd2d10c..605ddb8 100644
 +    return;
 +  }
 +  if (deep) {
-+    // An explicit deep link always wins. It is applied on load BEFORE the work
-+    // queue has been fetched, so the durable thread id could not be resolved at
-+    // that point; bind it now that the queue is known. Without this the
-+    // conversation stays empty and the composer shows no thread.
-+    const wid = deep.work_item_id;
-+    const known = items.find((it) => it.work_item_id === wid);
-+    if (!known) {
-+      // A stale or unavailable deep link must not leave a selected work item
-+      // with no queue-backed identity. Clear the selection UNCONDITIONALLY --
-+      // announcing "nothing is selected" while some other prior selection
-+      // survived would be a false statement -- drop the route so a reload does
-+      // not repeat this, and say what happened.
-+      selectTask(null);
-+      persistSelection(null);
-+      clearWorkRoute();
-+      showRestoreStatus('Work item "' + wid + '" is not in the live queue. ' +
-+                        "The link may be stale, so nothing is selected.");
-+      return;
-+    }
-+    if (known.thread_id && selectedWorkItemId === wid && !selectedConvThread) {
-+      selectTask(known.thread_id, wid);
-+    }
-+    // POLICY, stated explicitly because both reviewers asked. An EXPLICIT link
-+    // may open a terminal item, because reviewing finished work is the point of
-+    // sharing a link. That is inspection, NOT active-session restoration: it is
-+    // never persisted as the active selection, so the next refresh restores
-+    // real active work rather than reopening finished work. Automatic
-+    // restoration (stored selection and fallback ranking) still excludes
-+    // terminal items entirely.
-+    if (!isActiveItem(known)) {
-+      persistSelection(null);
-+      showRestoreStatus("Opened " + activeStateOf(known).replace(/_/g, " ") +
-+                        " work item for inspection. It is not active, so it " +
-+                        "will not be restored on the next refresh.");
-+    }
++    // An explicit deep link always wins. It is applied at boot BEFORE the queue
++    // is fetched, so the durable thread could not be resolved then; the queue is
++    // known now. Route handling goes through the SAME single policy as the
++    // hashchange path -- validate against the live queue, clear an unknown
++    // route, never persist a terminal item -- so the two cannot drift.
++    bindRouteSelection(deep.work_item_id);
 +    return;
 +  }
 +  const stored = readPersistedSelection();
@@ -653,10 +647,53 @@ index dd2d10c..605ddb8 100644
 +  }
 +}
 +
++// ONE place where a route becomes a selection, so queue validation and the
++// terminal-item policy cannot diverge between the boot path and the hashchange
++// path. Returns true when a selection was bound, false when the route was
++// rejected, and null when the queue is not loaded yet (boot), in which case
++// restoreActiveSelection() validates once it is.
++function bindRouteSelection(wid) {
++  const items = lastWorkItems || [];
++  if (!items.length) return null;
++  const known = items.find((it) => it.work_item_id === wid);
++  if (!known) {
++    // Queue-unbacked: clear unconditionally, drop the route so a reload does
++    // not repeat it, and say so.
++    selectTask(null);
++    persistSelection(null);
++    clearWorkRoute();
++    routeErrorReported = true;
++    showRestoreStatus('Work item "' + wid + '" is not in the live queue. ' +
++                      "The link may be stale, so nothing is selected.");
++    return false;
++  }
++  selectTask(known.thread_id || null, wid);
++  // A route that resolves is a successful navigation: any earlier route
++  // explanation is now obsolete and must not outlive it.
++  routeErrorReported = false;
++  // POLICY, applied on EVERY route path. An EXPLICIT link may open a terminal
++  // item, because reviewing finished work is the point of sharing a link. That
++  // is inspection, NOT active-session restoration: it is never persisted, so
++  // the next refresh restores real active work instead of reopening finished
++  // work. Automatic restoration still excludes terminal items entirely.
++  if (!isActiveItem(known)) {
++    persistSelection(null);
++    showRestoreStatus("Opened " + (activeStateOf(known) || "inactive").replace(/_/g, " ") +
++                      " work item for inspection. It is not active, so it " +
++                      "will not be restored on the next refresh.");
++  } else {
++    clearTransientRestoreStatus();
++  }
++  return true;
++}
++
  // Deterministic hash route: #work=<work_item_id>[&msg=<message_id>]. The
  // highlight message id is derived from the work item id itself (a message work
  // item id IS "message:" + message_id) -- no message search, no ambiguity.
-@@ -1298,9 +1695,135 @@ function navigateToWorkItem(workItemId) {
+ function navigateToWorkItem(workItemId) {
++  // Deliberate navigation: an earlier malformed-link explanation is obsolete.
++  routeErrorReported = false;
+   const msgId = workItemId && workItemId.indexOf("message:") === 0
      ? workItemId.slice("message:".length) : "";
    location.hash = "#work=" + encodeURIComponent(workItemId) +
      (msgId ? "&msg=" + encodeURIComponent(msgId) : "");
@@ -793,7 +830,7 @@ index dd2d10c..605ddb8 100644
  }
  
  function highlightMessage(messageId) {
-@@ -1317,14 +1840,29 @@ function highlightMessage(messageId) {
+@@ -1317,14 +1853,38 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -816,11 +853,20 @@ index dd2d10c..605ddb8 100644
 +    // "nothing is selected" would be false a moment later.
 +    routeErrorReported = true;
 +    showRestoreStatus("That link could not be read, so it was removed. " +
-+                      "Restoring your active work instead.");
++                      "Showing your highest-priority active work instead.");
 +    return;
 +  }
-+  const known = (lastWorkItems || []).find((it) => it.work_item_id === route.work_item_id);
-+  selectTask(known ? known.thread_id || null : null, route.work_item_id);
++  // Validate here too. This function is also the hashchange path, so without
++  // it a post-boot link could select and persist an unknown or terminal item
++  // with no restoration pass following to correct it.
++  const bound = bindRouteSelection(route.work_item_id);
++  if (bound === false) return;
++  if (bound === null) {
++    // Queue not loaded yet (boot). Bind provisionally; restoreActiveSelection()
++    // validates against the live queue as soon as it arrives.
++    const known = (lastWorkItems || []).find((it) => it.work_item_id === route.work_item_id);
++    selectTask(known ? known.thread_id || null : null, route.work_item_id);
++  }
    showView("work");
 -  const mm = /[#&]msg=([^&]+)/.exec(h);
 -  if (mm) setTimeout(() => highlightMessage(decodeURIComponent(mm[1])), 200);
@@ -830,7 +876,7 @@ index dd2d10c..605ddb8 100644
  }
  
  async function refreshWorkItems() {
-@@ -1837,7 +2375,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2397,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -840,7 +886,7 @@ index dd2d10c..605ddb8 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +2674,23 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +2696,23 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -864,7 +910,7 @@ index dd2d10c..605ddb8 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2786,9 +3342,12 @@ function toggleToolLog() {
+@@ -2786,9 +3364,12 @@ function toggleToolLog() {
  function selectTask(threadId, workItemId) {
    selectedConvThread = threadId || null;
    selectedWorkItemId = workItemId || null;
@@ -877,7 +923,7 @@ index dd2d10c..605ddb8 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2886,6 +3445,10 @@ function wire() {
+@@ -2886,6 +3467,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -888,7 +934,7 @@ index dd2d10c..605ddb8 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +3560,19 @@ function wire() {
+@@ -2997,6 +3582,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -1096,10 +1142,10 @@ index ac13c95..44a614a 100644
 +}
 diff --git a/tests/dom/session_ux_runtime.mjs b/tests/dom/session_ux_runtime.mjs
 new file mode 100644
-index 0000000..02bb316
+index 0000000..daa8342
 --- /dev/null
 +++ b/tests/dom/session_ux_runtime.mjs
-@@ -0,0 +1,401 @@
+@@ -0,0 +1,487 @@
 +/*
 + * Runtime coverage for the session-continuity UX logic.
 + *
@@ -1421,6 +1467,92 @@ index 0000000..02bb316
 +}
 +
 +// --------------------------------------------------------------------------
++// 2e. HASHCHANGE, not just boot. applyWorkHashRoute() is also the hashchange
++//     path, so route validation and the terminal policy must hold there too.
++//     Previously both lived only in restoreActiveSelection(), so a post-boot
++//     link could bind and PERSIST an unknown or terminal item with no
++//     restoration pass following to correct it.
++// --------------------------------------------------------------------------
++{
++  // Unknown item, queue already loaded (the hashchange case).
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=message%3Amsg-ghost", ["conv-scroll", "conversation"]);
++  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-real", thread_id: "thr-real",' +
++              ' presentation_state: "needs_operator" }];');
++  ctx.applyWorkHashRoute();
++  ok(evalIn(ctx, "selectedWorkItemId") === null,
++     "a hashchange to an unknown item leaves no queue-unbacked selection");
++  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === null,
++     "a hashchange to an unknown item persists nothing");
++  ok(reg["restore-status"].textContent.indexOf("not in the live queue") !== -1,
++     "the unknown hashchange route is explained");
++}
++
++{
++  // Terminal item, queue already loaded: openable, but never persisted.
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=message%3Amsg-done", ["conv-scroll", "conversation"]);
++  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-done", thread_id: "thr-done",' +
++              ' presentation_state: "recently_completed" }];');
++  ctx.applyWorkHashRoute();
++  ok(evalIn(ctx, "selectedWorkItemId") === "message:msg-done",
++     "an explicit link may OPEN a terminal item for inspection");
++  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === null,
++     "a terminal item is never persisted as the active selection");
++  ok(reg["restore-status"].textContent.indexOf("inspection") !== -1,
++     "the inspection-only status is explained");
++}
++
++{
++  // Active item, queue already loaded: bound and persisted normally.
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=message%3Amsg-live", ["conv-scroll", "conversation"]);
++  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
++              ' presentation_state: "needs_operator" }];');
++  ctx.applyWorkHashRoute();
++  eq([evalIn(ctx, "selectedWorkItemId"), evalIn(ctx, "selectedConvThread")],
++     ["message:msg-live", "thr-live"],
++     "an active route binds the item and its durable thread");
++  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === "message:msg-live",
++     "an active route IS persisted");
++}
++
++// 2f. The route-error latch must not outlive the error.
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
++  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
++              ' presentation_state: "needs_operator" }];');
++  ctx.applyWorkHashRoute();                       // reports a malformed route
++  ok(evalIn(ctx, "routeErrorReported") === true, "a malformed route latches the explanation");
++  ctx.clearTransientRestoreStatus();
++  ok(reg["restore-status"].hidden === false, "and it survives the boot success path");
++
++  // A later VALID route is a successful navigation: the stale explanation goes.
++  ctx.location.hash = "#work=message%3Amsg-live";
++  ctx.applyWorkHashRoute();
++  ok(evalIn(ctx, "routeErrorReported") === false,
++     "a successful route resets the latch (was one-way before)");
++  ctx.showRestoreStatus("transient");
++  ctx.clearTransientRestoreStatus();
++  ok(reg["restore-status"].hidden === true,
++     "transient statuses are clearable again after recovery");
++}
++
++{
++  // Deliberate operator navigation also supersedes a stale explanation.
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
++  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
++              ' presentation_state: "needs_operator" }];');
++  ctx.applyWorkHashRoute();
++  ok(evalIn(ctx, "routeErrorReported") === true, "latched after a malformed route");
++  ctx.navigateToWorkItem("message:msg-live");
++  ok(evalIn(ctx, "routeErrorReported") === false,
++     "explicit navigation clears the stale route explanation");
++}
++
++// --------------------------------------------------------------------------
 +// 3. Ranking: every ranked bucket reachable, unknown last, deterministic ties.
 +// --------------------------------------------------------------------------
 +{
@@ -1503,10 +1635,10 @@ index 0000000..02bb316
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..3321b95
+index 0000000..38d65a2
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,796 @@
+@@ -0,0 +1,850 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -1839,7 +1971,57 @@ index 0000000..3321b95
 +        # which legitimately quotes the phrase being avoided.
 +        call = branch[branch.index("showRestoreStatus("):]
 +        self.assertNotIn("nothing is selected", call)
-+        self.assertIn("Restoring your active work instead", call)
++        self.assertIn("highest-priority active work", call,
++                      "the message must not promise the operator's previous item: "
++                      "the persisted selection is cleared before restoration runs")
++
++
++class UnifiedRoutePolicyTest(unittest.TestCase):
++    """Validation and the terminal policy must hold on EVERY route path.
++
++    applyWorkHashRoute() is also the hashchange handler. With the policy living
++    only in restoreActiveSelection(), a post-boot link could bind and persist an
++    unknown or terminal item with no restoration pass following to correct it.
++    """
++
++    def test_one_shared_policy_function_exists(self):
++        self.assertIn("function bindRouteSelection", APP)
++
++    def test_the_hashchange_path_validates(self):
++        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("bindRouteSelection(route.work_item_id)", m.group(0))
++
++    def test_restoration_uses_the_same_policy_not_a_copy(self):
++        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("bindRouteSelection(deep.work_item_id)", body)
++        # The duplicated policy must be gone, or the two can drift again.
++        self.assertNotIn("will not be restored on the next refresh", body)
++
++    def test_the_policy_persists_nothing_terminal(self):
++        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("if (!isActiveItem(known))", body)
++        self.assertIn("persistSelection(null)", body.split("if (!isActiveItem(known))")[1][:300])
++
++    def test_an_unknown_route_is_cleared_on_every_path(self):
++        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
++        branch = m.group(0).split("if (!known)")[1][:500]
++        for expected in ("selectTask(null);", "persistSelection(null);", "clearWorkRoute();"):
++            self.assertIn(expected, branch)
++
++
++class RouteErrorLatchTest(unittest.TestCase):
++    """Both reviewers flagged the one-way latch: a reported route error must
++    not suppress every later transient status for the page lifetime."""
++
++    def test_a_successful_route_resets_the_latch(self):
++        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("routeErrorReported = false;", m.group(0))
++
++    def test_explicit_navigation_resets_the_latch(self):
++        m = re.search(r"function navigateToWorkItem[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("routeErrorReported = false;", m.group(0))
 +
 +
 +class EmptyRouteTest(unittest.TestCase):
@@ -1858,14 +2040,16 @@ index 0000000..3321b95
 +        self.assertIn("function clearWorkRoute", APP)
 +        m = re.search(r"function clearWorkRoute[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("replaceState", m.group(0))
-+        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
-+        self.assertIn("clearWorkRoute()", r.group(0))
++        for fn in ("restoreActiveSelection", "bindRouteSelection"):
++            m2 = re.search(r"function " + fn + r"[\s\S]{0,4000}?\n\}", APP)
++            self.assertIn("clearWorkRoute()", m2.group(0),
++                          fn + " must drop an unusable route")
 +
 +    def test_selection_is_cleared_unconditionally(self):
 +        """A conditional clear could announce 'nothing is selected' while a
 +        different prior selection survived."""
-+        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
-+        unknown = r.group(0).split("if (!known)")[1][:400]
++        r = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
++        unknown = r.group(0).split("if (!known)")[1][:500]
 +        self.assertIn("selectTask(null);", unknown)
 +        self.assertNotIn("selectedWorkItemId === wid", unknown)
 +
@@ -1880,7 +2064,7 @@ index 0000000..3321b95
 +    """
 +
 +    def test_terminal_deep_link_is_not_persisted_as_active(self):
-+        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        r = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
 +        body = r.group(0)
 +        self.assertIn("if (!isActiveItem(known))", body)
 +        tail = body.split("if (!isActiveItem(known))")[1][:400]
@@ -1888,7 +2072,7 @@ index 0000000..3321b95
 +        self.assertIn("showRestoreStatus", tail)
 +
 +    def test_the_policy_is_documented_where_it_is_enforced(self):
-+        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        r = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("POLICY", r.group(0))
 +
 +    def test_automatic_restoration_still_excludes_terminal_items(self):
@@ -1965,14 +2149,16 @@ index 0000000..3321b95
 +    queue-backed identity."""
 +
 +    def test_unknown_deep_link_clears_the_selection(self):
-+        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        """The policy now lives in bindRouteSelection(), shared by the boot and
++        hashchange paths, so it is asserted where it is implemented."""
++        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn("if (!known)", body)
 +        self.assertIn("selectTask(null)", body)
 +        self.assertIn("persistSelection(null)", body)
 +
 +    def test_unknown_deep_link_is_reported_not_silent(self):
-+        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("showRestoreStatus", m.group(0))
 +
 +

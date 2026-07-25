@@ -4,26 +4,26 @@
 
 repository        ClearWright
 branch            operator/alf-dispatch-preallocation-salvage
-commit            464bd2a1e97421e89c2a6702929823446b88fc4e
+commit            d8f150be56b53dd96491f434063ab02a26b13d3e
 parent            7d97a707fc8662f1f167199cf7aeb821b5441dd9
-tree              8b736a6574e97f49ab54c26db5d08c1c54038229
+tree              84735803c31855708e2ef3236daa68aaaf33da02
 work item         message:msg-20260725T025421940761
 CTA packet        alf-stab-cta-20260725 (IN_PROGRESS, BRANCH_CODE, OPERATOR-0001)
 CTA lease expires 2026-07-26T02:57:18Z
 dispatch lane     internal_technical
 data sensitivity  internal_technical
-round             round 3 (operator-authorized bounded correction under msg-20260725T130602041381)
-full suite        1195 tests OK, 1 pre-existing skip
+round             round 4 (final operator-authorized correction under msg-20260725T132437192979)
+full suite        1200 tests OK, 1 pre-existing skip
 ASCII status      0 character(s) replaced in the diff below
 line endings      all changed files LF-only (crlf counts below)
 tripwire status   no forbidden ClearWright path or config marker present
 
 changed files (4):
 
-  tests/test_preallocation_production.py      24857 bytes  crlf=0 nonascii=0  sha256 0868f0f0a47ee6fc07be39c4f271bb2c0734de24bffd8576307011f111344666
-  tools/clearwright_dispatch_preflight.py     10205 bytes  crlf=0 nonascii=0  sha256 b9bf003d3dc7295aefe60c4a6702a1e001e76c9014c272b7d2b906070b83ec3a
+  tests/test_preallocation_production.py      27810 bytes  crlf=0 nonascii=0  sha256 3b857d48d8450a477396f1bea28b9fbe41249d13433e724678c40fd6980fb37b
+  tools/clearwright_dispatch_preflight.py     11458 bytes  crlf=0 nonascii=0  sha256 e4271cdafae25e562aa9a29b7349ce5f0f13d9a3360aa11cefe9681330439c6d
   tools/clearwright_review_council.py        101910 bytes  crlf=0 nonascii=51  sha256 8052fb595536c139feb1c4bb273a3a40cd94328202c0b32e4353b8f1be52841b
-  tools/clearwright_use_cw.py                 92881 bytes  crlf=0 nonascii=60  sha256 6d6f75c5a62484bf7a0796f7009fa4bf0c6cc84e8f510a786d936709716483cf
+  tools/clearwright_use_cw.py                 93353 bytes  crlf=0 nonascii=60  sha256 f66fced99a6f615fe9e3c4d9bc01f5ca4faa39caad5166f8a280781cce59b3d1
 
 ## Scope of THIS patch
 
@@ -139,15 +139,15 @@ reviewer_unavailable.
    deployment? Phase 2 filesystem hardening (an attacker with filesystem write
    access to the queue root) is EXCLUDED by planning packet section 8.
 
-## Committed diff (7d97a70..464bd2a)
+## Committed diff (7d97a70..d8f150b)
 
 ```diff
 diff --git a/tests/test_preallocation_production.py b/tests/test_preallocation_production.py
 new file mode 100644
-index 0000000..bba0ed1
+index 0000000..bfe6dc6
 --- /dev/null
 +++ b/tests/test_preallocation_production.py
-@@ -0,0 +1,521 @@
+@@ -0,0 +1,578 @@
 +"""ALF-0005 tests: authoritative pre-allocation dispatch eligibility.
 +
 +Covers production signal derivation, refusal BEFORE council-id/reviewer-attempt
@@ -400,8 +400,9 @@ index 0000000..bba0ed1
 +        """A "hit" of ANY finding category is a tripwire refusal, because
 +        egress_guard.authorize() raises EgressBlocked("tripwire_hit") for a hit
 +        verdict over the FULL outbound bytes with NO branching on category and
-+        before the sensitive-tier branch, so it applies on every lane. Unknown
-+        verdicts no longer take this path; they are classifier_unresolved.
++        before the sensitive-tier branch, so it applies on every lane. That is a
++        PROVEN guard block. Unknown verdicts do NOT take this path; they are
++        classifier_unresolved under a separate fail-closed policy.
 +        over-refusal, because egress_guard.authorize() raises
 +        EgressBlocked("tripwire_hit") for any non-clear verdict over the FULL
 +        outbound bytes with NO branching on finding category, and before the
@@ -589,6 +590,45 @@ index 0000000..bba0ed1
 +        self.assertTrue(called.get("yes"))
 +
 +
++class StrictFactValidationTest(unittest.TestCase):
++    """Operator-authorized round-4 item 3: no permissive coercion. An
++    authoritative fact is accepted ONLY as an exact bool (or exact non-negative
++    int for artifact_count). A malformed or truthy non-boolean value must fail
++    closed as classifier_unresolved and must NEVER become allow-shaped."""
++
++    MALFORMED = ("false", "yes", "true", "", 1, 0, 1.0, [], {}, None, object())
++
++    def test_truthy_non_boolean_never_authorizes(self):
++        for bad in self.MALFORMED:
++            for key in ("tripwire_clear", "classifier_resolved",
++                        "lineage_bound", "raw_provenance_standard"):
++                s = sig(**{key: bad})
++                ok, reason = cwdp.dispatch_eligibility(s)
++                self.assertFalse(ok, "%s=%r must not authorize" % (key, bad))
++                self.assertEqual(reason, "classifier_unresolved",
++                                 "%s=%r" % (key, bad))
++
++    def test_malformed_artifact_count_fails_closed(self):
++        for bad in ("0", 1.0, -1, True, False, None, [], object()):
++            ok, reason = cwdp.dispatch_eligibility(sig(artifact_count=bad))
++            self.assertFalse(ok, "artifact_count=%r must not authorize" % (bad,))
++            self.assertEqual(reason, "classifier_unresolved")
++
++    def test_exact_booleans_still_behave_normally(self):
++        self.assertEqual(cwdp.dispatch_eligibility(sig()), (True, None))
++        self.assertEqual(cwdp.dispatch_eligibility(sig(tripwire_clear=False)),
++                         (False, "tripwire_refusal"))
++        self.assertEqual(cwdp.dispatch_eligibility(sig(classifier_resolved=False)),
++                         (False, "classifier_unresolved"))
++
++    def test_malformed_fact_emits_no_allow_shaped_signal(self):
++        s = sig(tripwire_clear="yes")
++        self.assertIs(s["classifier_resolved"], False)
++        self.assertIs(s["tripwire_clear"], False)
++        for v in s.values():
++            self.assertIsInstance(v, bool)
++
++
 +class ItsLaneBlockerEndToEndTest(unittest.TestCase):
 +    """GPT round-1 required_changes[0]: prove the FULL production refusal path
 +    (no council directory entry, no reviewer attempt, one durable normalized
@@ -658,6 +698,23 @@ index 0000000..bba0ed1
 +        self.assertEqual(refusals[0]["attempt"], 0)
 +        self.assertNotIn("council_id", refusals[0])
 +
++    def test_artifact_and_profile_blockers_end_to_end(self):
++        """Round-4 item 2 / GPT round-3 required_changes[0]: the remaining
++        internal_technical blockers, proven on the production path."""
++        art = os.path.join(self.work, "a.md")
++        with open(art, "w", encoding="utf-8") as fh:
++            fh.write("artifact body\n")
++        payload = self._run(["--artifact", art])
++        self.assertEqual(payload.get("normalized_reason"), "policy_denial")
++        self.assertIsNone(payload.get("council_id"))
++        self.assertEqual(payload.get("attempts"), {})
++        self.assertEqual(self._councils(), 0)
++        recs = self._refusals()
++        self.assertEqual(len(recs), 1)
++        self.assertEqual(recs[0]["normalized_reason"], "policy_denial")
++        self.assertEqual(recs[0]["attempt"], 0)
++        self.assertEqual(recs[0]["dispatch_lane"], "internal_technical")
++
 +    def test_refusal_record_is_content_free(self):
 +        self._run()
 +        rec = self._refusals()[0]
@@ -670,7 +727,7 @@ index 0000000..bba0ed1
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/tools/clearwright_dispatch_preflight.py b/tools/clearwright_dispatch_preflight.py
-index 848ff9b..32bc5f4 100644
+index 848ff9b..231f444 100644
 --- a/tools/clearwright_dispatch_preflight.py
 +++ b/tools/clearwright_dispatch_preflight.py
 @@ -24,7 +24,8 @@ NORMALIZED_FAILURE_CLASSES = (
@@ -693,7 +750,7 @@ index 848ff9b..32bc5f4 100644
      ("tripwire_clear", True, "tripwire_refusal"),
      ("provider_ready", True, "provider_unavailable"),
      ("auth_ok", True, "auth_failure"),
-@@ -122,6 +126,66 @@ def dispatch_eligibility(signals):
+@@ -122,6 +126,87 @@ def dispatch_eligibility(signals):
      return (True, None)
  
  
@@ -727,6 +784,11 @@ index 848ff9b..32bc5f4 100644
 +                             NEVER treated as authorization, and is never
 +                             mislabelled as a tripwire hit.
 +
++    STRICT FACTS: every boolean fact must be an exact bool and artifact_count an
++    exact non-negative int. There is NO permissive coercion, so a truthy
++    non-boolean such as "false", "yes", 1 or an arbitrary object cannot become an
++    allow-shaped signal; any malformed fact fails closed as classifier_unresolved.
++
 +    DELIBERATELY EXCLUDED: provider readiness and credential presence. Those are
 +    DYNAMIC ENVIRONMENTAL conditions, not deterministic content properties: a
 +    dispatch may legitimately proceed through an injected or differently-resolved
@@ -747,13 +809,29 @@ index 848ff9b..32bc5f4 100644
 +    signal is treated as eligible by dispatch_eligibility, so a lane that does
 +    not perform a given check never acquires a new blocker from it.
 +    """
-+    signals = {"tripwire_clear": bool(tripwire_clear),
-+               "classifier_resolved": bool(classifier_resolved)}
++    # STRICT fact validation (no permissive coercion). An authoritative signal is
++    # accepted ONLY as an exact bool; a malformed or truthy non-boolean value is
++    # an unresolved state, never allow-shaped authorization. Note bool is a
++    # subclass of int, so artifact_count is checked for exact int-ness too.
++    facts = {"lineage_bound": lineage_bound,
++             "raw_provenance_standard": raw_provenance_standard,
++             "tripwire_clear": tripwire_clear,
++             "classifier_resolved": classifier_resolved}
++    malformed = [k for k, v in facts.items() if v is not True and v is not False]
++    if (type(artifact_count) is not int) or artifact_count < 0:
++        malformed.append("artifact_count")
++    if malformed:
++        # Fail closed with the DISTINCT unresolved reason. tripwire_clear is also
++        # set refusing so the outcome holds even if the check order changed.
++        return {"classifier_resolved": False, "tripwire_clear": False}
++
++    signals = {"tripwire_clear": tripwire_clear,
++               "classifier_resolved": classifier_resolved}
 +    if dispatch_lane == "internal_technical":
-+        signals["lane_authorized"] = (int(artifact_count or 0) == 0
++        signals["lane_authorized"] = (artifact_count == 0
 +                                      and review_profile == "code")
-+        signals["composition_bound"] = bool(lineage_bound)
-+        signals["provenance_resolved"] = bool(raw_provenance_standard)
++        signals["composition_bound"] = lineage_bound
++        signals["provenance_resolved"] = raw_provenance_standard
 +    return signals
 +
 +
@@ -804,10 +882,10 @@ index 021c211..b2f8547 100644
      council = {
          "council_id": council_id,
 diff --git a/tools/clearwright_use_cw.py b/tools/clearwright_use_cw.py
-index 21ef38c..7fc14aa 100644
+index 21ef38c..de9a0f8 100644
 --- a/tools/clearwright_use_cw.py
 +++ b/tools/clearwright_use_cw.py
-@@ -560,6 +560,103 @@ def _council_body(args, phase, root, stage):
+@@ -560,6 +560,112 @@ def _council_body(args, phase, root, stage):
              return _emit({"ok": False, "command": "council",
                            "error": "lineage_assembly_failed",
                            "reason": exc.reason}, EXIT_HARD_GATE, args.json)
@@ -844,16 +922,25 @@ index 21ef38c..7fc14aa 100644
 +        # context does NOT prove the outbound bytes are clear. The egress guard
 +        # remains the complete authoritative check over the exact bytes.
 +        #
-+        # WHY ANY NON-CLEAR VERDICT IS TREATED AS AN UNCONDITIONAL BLOCK (proof):
-+        # clearwright_egress_guard.authorize() computes final_scan() over the FULL
-+        # outbound bytes and raises EgressBlocked("tripwire_hit") whenever the
-+        # verdict is "hit", with NO branching on the finding CATEGORY and BEFORE
-+        # the sensitive-tier branch -- so it applies on every lane. classify() and
-+        # final_scan() share the identical _scan_text detector core and policy.
-+        # Therefore ANY non-clear classification of the context implies an
-+        # unconditional block at send, and refusing here cannot over-refuse. The
-+        # normalized reason is reported as tripwire_refusal for every hit category
-+        # because every hit category produces the same unconditional outcome.
++        # TWO DISTINCT JUSTIFICATIONS, deliberately not conflated:
++        #
++        # (a) "hit" -> tripwire_refusal is PROVEN, not assumed.
++        #     clearwright_egress_guard.authorize() computes final_scan() over the
++        #     FULL outbound bytes and raises EgressBlocked("tripwire_hit")
++        #     whenever the verdict is "hit", with NO branching on the finding
++        #     CATEGORY and BEFORE the sensitive-tier branch, so it applies on
++        #     every lane. classify() and final_scan() share the identical
++        #     _scan_text detector core and policy. A context "hit" therefore
++        #     implies an unconditional block at send, so refusing here for ANY hit
++        #     category cannot over-refuse.
++        #
++        # (b) any OTHER verdict -> classifier_unresolved is a deliberate
++        #     FAIL-CLOSED POLICY, not a proven guard block. The gate does not
++        #     claim to know the classifier's complete verdict domain; it treats
++        #     exactly two verdicts as known and refuses everything else with its
++        #     own distinct reason. That is why an unrecognised verdict is never
++        #     reported as a tripwire hit: mislabelling it would hide a classifier
++        #     contract change behind a proven-looking reason.
 +        #
 +        # SUBSET PROPERTY (scope of the claim): the bytes scanned here are the
 +        # SAME text later bound into the outbound composition -- stamp_context()

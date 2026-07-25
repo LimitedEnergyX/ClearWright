@@ -4,26 +4,26 @@
 
 repository        ClearWright
 branch            operator/alf-dispatch-preallocation-salvage
-commit            ad83361a3244e3b81a1f21337ff5cc2f71c224fe
+commit            464bd2a1e97421e89c2a6702929823446b88fc4e
 parent            7d97a707fc8662f1f167199cf7aeb821b5441dd9
-tree              f05b76c421becedd94e3fa63c855ad673897904c
+tree              8b736a6574e97f49ab54c26db5d08c1c54038229
 work item         message:msg-20260725T025421940761
 CTA packet        alf-stab-cta-20260725 (IN_PROGRESS, BRANCH_CODE, OPERATOR-0001)
 CTA lease expires 2026-07-26T02:57:18Z
 dispatch lane     internal_technical
 data sensitivity  internal_technical
-round             round 2 (bounded correction round; convergence limit reached after this round)
-full suite        1184 at 794350f; the round-2 correction adds 6 tests verified by focused and neighborhood suites, with the full suite re-run before merge tests OK, 1 pre-existing skip
+round             round 3 (operator-authorized bounded correction under msg-20260725T130602041381)
+full suite        1195 tests OK, 1 pre-existing skip
 ASCII status      0 character(s) replaced in the diff below
 line endings      all changed files LF-only (crlf counts below)
 tripwire status   no forbidden ClearWright path or config marker present
 
 changed files (4):
 
-  tests/test_preallocation_production.py      18990 bytes  crlf=0 nonascii=0  sha256 890eeb3e35cedd95762179f6cfacd004cea8ec3db1709c8c5a4c9d6e145f740b
-  tools/clearwright_dispatch_preflight.py      9186 bytes  crlf=0 nonascii=0  sha256 6885114b46ab4ce7b63abb0beb30ee7ef18bdde65aafeb5d17bd96e09a56c251
+  tests/test_preallocation_production.py      24857 bytes  crlf=0 nonascii=0  sha256 0868f0f0a47ee6fc07be39c4f271bb2c0734de24bffd8576307011f111344666
+  tools/clearwright_dispatch_preflight.py     10205 bytes  crlf=0 nonascii=0  sha256 b9bf003d3dc7295aefe60c4a6702a1e001e76c9014c272b7d2b906070b83ec3a
   tools/clearwright_review_council.py        101910 bytes  crlf=0 nonascii=51  sha256 8052fb595536c139feb1c4bb273a3a40cd94328202c0b32e4353b8f1be52841b
-  tools/clearwright_use_cw.py                 92026 bytes  crlf=0 nonascii=60  sha256 d90dab0c7eb519e4486be0828e34221bc7248b3e65b5c6122b246ae4483b8073
+  tools/clearwright_use_cw.py                 92881 bytes  crlf=0 nonascii=60  sha256 6d6f75c5a62484bf7a0796f7009fa4bf0c6cc84e8f510a786d936709716483cf
 
 ## Scope of THIS patch
 
@@ -139,15 +139,15 @@ reviewer_unavailable.
    deployment? Phase 2 filesystem hardening (an attacker with filesystem write
    access to the queue root) is EXCLUDED by planning packet section 8.
 
-## Committed diff (7d97a70..ad83361)
+## Committed diff (7d97a70..464bd2a)
 
 ```diff
 diff --git a/tests/test_preallocation_production.py b/tests/test_preallocation_production.py
 new file mode 100644
-index 0000000..60ff10b
+index 0000000..bba0ed1
 --- /dev/null
 +++ b/tests/test_preallocation_production.py
-@@ -0,0 +1,418 @@
+@@ -0,0 +1,521 @@
 +"""ALF-0005 tests: authoritative pre-allocation dispatch eligibility.
 +
 +Covers production signal derivation, refusal BEFORE council-id/reviewer-attempt
@@ -392,12 +392,16 @@ index 0000000..60ff10b
 +        finally:
 +            eg.classify = orig
 +        payload = json.loads(out.strip().splitlines()[-1])
-+        self.assertEqual(payload.get("normalized_reason"), "tripwire_refusal")
++        # a scanner EXCEPTION is an unresolved classifier, not a tripwire hit
++        self.assertEqual(payload.get("normalized_reason"), "classifier_unresolved")
 +        self.assertEqual(self._council_count(), 0)
 +
 +    def test_non_confusable_hit_category_is_also_refused(self):
-+        """Codex round-1 blocking finding: the gate collapses ANY non-clear
-+        classify() verdict into tripwire_refusal. That is SOUND, not
++        """A "hit" of ANY finding category is a tripwire refusal, because
++        egress_guard.authorize() raises EgressBlocked("tripwire_hit") for a hit
++        verdict over the FULL outbound bytes with NO branching on category and
++        before the sensitive-tier branch, so it applies on every lane. Unknown
++        verdicts no longer take this path; they are classifier_unresolved.
 +        over-refusal, because egress_guard.authorize() raises
 +        EgressBlocked("tripwire_hit") for any non-clear verdict over the FULL
 +        outbound bytes with NO branching on finding category, and before the
@@ -433,14 +437,18 @@ index 0000000..60ff10b
 +            seen.append("exception")
 +            raise RuntimeError("scanner exploded")
 +
-+        for fn in (_verdict, _raise):
++        # Under the three-way contract these report DIFFERENT normalized
++        # reasons: a structured "hit" is a tripwire refusal, while an exception
++        # is an unresolved classifier. Both refuse; neither dispatches.
++        for fn, expected in ((_verdict, "tripwire_refusal"),
++                             (_raise, "classifier_unresolved")):
 +            eg.classify = fn
 +            try:
 +                code, out = self._run(self._plan("ordinary ascii packet\n"))
 +            finally:
 +                eg.classify = orig
 +            payload = json.loads(out.strip().splitlines()[-1])
-+            self.assertEqual(payload.get("normalized_reason"), "tripwire_refusal")
++            self.assertEqual(payload.get("normalized_reason"), expected)
 +            self.assertEqual(self._council_count(), 0)
 +        self.assertEqual(seen, ["verdict", "exception"])
 +
@@ -467,6 +475,101 @@ index 0000000..60ff10b
 +        self.assertEqual(captured["data_sensitivity"], expected)
 +        self.assertEqual(cwrc.resolve_lane(captured["data_sensitivity"])[1],
 +                         cwrc.resolve_lane(expected)[1])
++
++    def test_classifier_verdict_matrix_is_exhaustive(self):
++        """Operator-authorized round-3 correction. The classifier contract is
++        exactly two KNOWN verdicts; everything else fails closed with a DISTINCT
++        reason and is never treated as authorization.
++
++        clear -> eligible | hit -> tripwire_refusal | anything else ->
++        classifier_unresolved. Every refusal consumes zero council ids."""
++        import clearwright_egress_guard as eg
++
++        def verdict(v):
++            return lambda text, *a, **kw: {"findings": {}, "verdict": v,
++                                           "policy_version": "t",
++                                           "policy_sha256": "x",
++                                           "input_sha256": "y"}
++
++        cases = [
++            ("hit", verdict("hit"), "tripwire_refusal"),
++            ("unknown", verdict("degraded"), "classifier_unresolved"),
++            ("empty", verdict(""), "classifier_unresolved"),
++            ("none", verdict(None), "classifier_unresolved"),
++            ("future", verdict("quarantined"), "classifier_unresolved"),
++            ("malformed-no-verdict-key",
++             lambda text, *a, **kw: {"findings": {}}, "classifier_unresolved"),
++            ("malformed-not-a-dict",
++             lambda text, *a, **kw: None, "classifier_unresolved"),
++            ("malformed-nonstring-verdict",
++             verdict(1), "classifier_unresolved"),
++            ("exception",
++             lambda text, *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
++             "classifier_unresolved"),
++        ]
++        orig = eg.classify
++        for label, fn, expected in cases:
++            eg.classify = fn
++            try:
++                code, out = self._run(self._plan("ascii packet\n"))
++            finally:
++                eg.classify = orig
++            payload = json.loads(out.strip().splitlines()[-1])
++            self.assertEqual(payload.get("normalized_reason"), expected,
++                             "case %s" % label)
++            self.assertEqual(payload.get("error"), "dispatch_ineligible",
++                             "case %s" % label)
++            self.assertIsNone(payload.get("council_id"), "case %s" % label)
++            self.assertEqual(payload.get("attempts"), {}, "case %s" % label)
++            self.assertEqual(self._council_count(), 0, "case %s" % label)
++
++    def test_every_refusal_reason_is_a_known_normalized_class(self):
++        self.assertIn("classifier_unresolved", cwdp.NORMALIZED_FAILURE_CLASSES)
++        self.assertIn("tripwire_refusal", cwdp.NORMALIZED_FAILURE_CLASSES)
++
++    def test_unresolved_classifier_is_not_reported_as_a_tripwire(self):
++        """An unrecognised verdict must report its OWN reason: mislabelling it a
++        tripwire hit would hide a classifier contract change."""
++        sig = cwdp.production_signals(
++            dispatch_lane="user", review_profile="code", artifact_count=0,
++            lineage_bound=True, raw_provenance_standard=True,
++            tripwire_clear=True, classifier_resolved=False)
++        self.assertEqual(cwdp.dispatch_eligibility(sig),
++                         (False, "classifier_unresolved"))
++        # and it wins over a simultaneous tripwire failure, by check ordering
++        sig2 = cwdp.production_signals(
++            dispatch_lane="user", review_profile="code", artifact_count=0,
++            lineage_bound=True, raw_provenance_standard=True,
++            tripwire_clear=False, classifier_resolved=False)
++        self.assertEqual(cwdp.dispatch_eligibility(sig2),
++                         (False, "classifier_unresolved"))
++
++    def test_clear_verdict_still_reaches_dispatch_unchanged(self):
++        """The eligible path must be untouched by the three-way branch."""
++        sig = cwdp.production_signals(
++            dispatch_lane="user", review_profile="code", artifact_count=0,
++            lineage_bound=True, raw_provenance_standard=True,
++            tripwire_clear=True, classifier_resolved=True)
++        self.assertEqual(cwdp.dispatch_eligibility(sig), (True, None))
++
++    def test_caller_input_cannot_convert_a_refusal_into_authorization(self):
++        """No caller-controlled value may turn any refusal into an allow."""
++        for planted in ({}, {"classifier_resolved": True},
++                        {"tripwire_clear": True}, {"lane_authorized": True},
++                        {"classifier_resolved": "yes"}, {"tripwire_clear": 1}):
++            for real in (cwdp.production_signals(
++                             dispatch_lane="user", review_profile="code",
++                             artifact_count=0, lineage_bound=True,
++                             raw_provenance_standard=True, tripwire_clear=True,
++                             classifier_resolved=False),
++                         cwdp.production_signals(
++                             dispatch_lane="user", review_profile="code",
++                             artifact_count=0, lineage_bound=True,
++                             raw_provenance_standard=True, tripwire_clear=False,
++                             classifier_resolved=True)):
++                merged = dict(planted)
++                merged.update(real)          # authoritative facts win
++                self.assertFalse(cwdp.dispatch_eligibility(merged)[0])
 +
 +    def test_eligible_packet_still_reaches_council_creation(self):
 +        """The gate must not block a packet that would dispatch today."""
@@ -567,15 +670,36 @@ index 0000000..60ff10b
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/tools/clearwright_dispatch_preflight.py b/tools/clearwright_dispatch_preflight.py
-index 848ff9b..7fc8ebd 100644
+index 848ff9b..32bc5f4 100644
 --- a/tools/clearwright_dispatch_preflight.py
 +++ b/tools/clearwright_dispatch_preflight.py
-@@ -122,6 +122,55 @@ def dispatch_eligibility(signals):
+@@ -24,7 +24,8 @@ NORMALIZED_FAILURE_CLASSES = (
+     "policy_denial", "repo_not_approved", "provenance_unresolved",
+     "sensitive_content_prohibited", "tripwire_refusal",
+     "composition_or_hash_mismatch", "provider_unavailable", "auth_failure",
+-    "rate_limit", "timeout", "malformed_response", "adapter_failure", "unknown",
++    "rate_limit", "timeout", "malformed_response", "adapter_failure",
++    "classifier_unresolved", "unknown",
+ )
+ 
+ # Ordered (specific -> general) keyword rules over the safe signal text. Each rule
+@@ -103,6 +104,9 @@ _ELIGIBILITY_CHECKS = (
+     ("sensitive_prohibited", False, "sensitive_content_prohibited"),
+     ("composition_bound", True, "composition_or_hash_mismatch"),
+     ("exact_bytes_ok", True, "composition_or_hash_mismatch"),
++    # ordered BEFORE tripwire_clear: an unresolved classifier must report its own
++    # distinct reason and must never be reported as a tripwire hit.
++    ("classifier_resolved", True, "classifier_unresolved"),
+     ("tripwire_clear", True, "tripwire_refusal"),
+     ("provider_ready", True, "provider_unavailable"),
+     ("auth_ok", True, "auth_failure"),
+@@ -122,6 +126,66 @@ def dispatch_eligibility(signals):
      return (True, None)
  
  
 +def production_signals(*, dispatch_lane, review_profile, artifact_count,
-+                       lineage_bound, raw_provenance_standard, tripwire_clear):
++                       lineage_bound, raw_provenance_standard, tripwire_clear,
++                       classifier_resolved=True):
 +    """Derive AUTHORITATIVE pre-allocation signals from production preflight
 +    outputs. Callers pass already-computed facts; this function invents nothing.
 +
@@ -593,6 +717,15 @@ index 848ff9b..7fc8ebd 100644
 +      - tripwire_clear       mirrors the guard's unconditional tripwire_hit block
 +                             (enforced on EVERY lane). See the one-directional
 +                             note below.
++      - classifier_resolved  the classifier returned a verdict this gate
++                             UNDERSTANDS. The classifier contract is treated as
++                             exactly two known verdicts, "clear" and "hit".
++                             Anything else -- unknown, malformed, empty, absent,
++                             or a verdict added in future -- sets this False and
++                             refuses with the DISTINCT reason
++                             classifier_unresolved. An unrecognised verdict is
++                             NEVER treated as authorization, and is never
++                             mislabelled as a tripwire hit.
 +
 +    DELIBERATELY EXCLUDED: provider readiness and credential presence. Those are
 +    DYNAMIC ENVIRONMENTAL conditions, not deterministic content properties: a
@@ -614,7 +747,8 @@ index 848ff9b..7fc8ebd 100644
 +    signal is treated as eligible by dispatch_eligibility, so a lane that does
 +    not perform a given check never acquires a new blocker from it.
 +    """
-+    signals = {"tripwire_clear": bool(tripwire_clear)}
++    signals = {"tripwire_clear": bool(tripwire_clear),
++               "classifier_resolved": bool(classifier_resolved)}
 +    if dispatch_lane == "internal_technical":
 +        signals["lane_authorized"] = (int(artifact_count or 0) == 0
 +                                      and review_profile == "code")
@@ -670,10 +804,10 @@ index 021c211..b2f8547 100644
      council = {
          "council_id": council_id,
 diff --git a/tools/clearwright_use_cw.py b/tools/clearwright_use_cw.py
-index 21ef38c..788f395 100644
+index 21ef38c..7fc14aa 100644
 --- a/tools/clearwright_use_cw.py
 +++ b/tools/clearwright_use_cw.py
-@@ -560,6 +560,87 @@ def _council_body(args, phase, root, stage):
+@@ -560,6 +560,103 @@ def _council_body(args, phase, root, stage):
              return _emit({"ok": False, "command": "council",
                            "error": "lineage_assembly_failed",
                            "reason": exc.reason}, EXIT_HARD_GATE, args.json)
@@ -729,13 +863,28 @@ index 21ef38c..788f395 100644
 +        # send. It does NOT claim the converse, because the outbound bytes also
 +        # include scaffold and derived components not available before a council
 +        # exists. The guard remains the complete check over the exact bytes.
++        # THREE-WAY classifier contract, so no verdict is ever treated as
++        # authorization by default:
++        #   "clear"  -> continue through the existing eligible dispatch path;
++        #   "hit"    -> refuse before allocation with tripwire_refusal;
++        #   anything else (unknown, malformed, empty, absent, a future verdict)
++        #            -> refuse before allocation with the DISTINCT reason
++        #               classifier_unresolved, never mislabelled as a tripwire.
++        # An exception during classification takes the same unresolved path, so a
++        # scanner failure and an unrecognised verdict both fail closed.
 +        _tripwire_clear = True
++        _classifier_resolved = True
 +        if _pre_ctx_loaded:
 +            try:
-+                _tripwire_clear = _egress.classify(_pre_ctx)["verdict"] == "clear"
++                _verdict = (_egress.classify(_pre_ctx) or {}).get("verdict")
 +            except Exception:
-+                # ANY classification failure fails closed, not just EgressBlocked.
++                _verdict = None
++            if _verdict == "clear":
++                _tripwire_clear = True
++            elif _verdict == "hit":
 +                _tripwire_clear = False
++            else:
++                _classifier_resolved = False
 +        _raw_provenance_ok = all(
 +            (_r.get("provenance") or {}).get("class") in _egress._STANDARD_PROVENANCE
 +            for _r in (lineage_records or [])
@@ -746,7 +895,8 @@ index 21ef38c..788f395 100644
 +                            + len(getattr(args, "artifact_id", None) or [])),
 +            lineage_bound=bool(lineage_records) and _cand is not None,
 +            raw_provenance_standard=_raw_provenance_ok,
-+            tripwire_clear=_tripwire_clear))
++            tripwire_clear=_tripwire_clear,
++            classifier_resolved=_classifier_resolved))
 +        if not _elig_ok:
 +            cwrc.log_invocation(root, cwdp.refused_dispatch_record(
 +                phase=phase, dispatch_lane=_lane, normalized_reason=_elig_reason,

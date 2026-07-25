@@ -206,9 +206,12 @@
         <div class="ledger-table-wrap">
           <table class="ledger" aria-label="History ledger">
             <thead>
-              <tr><th>Time</th><th>Type</th><th>Work item</th><th>Actor</th><th>Event</th><th>Status</th></tr>
+              <!-- Item 4: message, work item and thread are DISTINCT
+                   identifier types and get their own columns. A thr-...
+                   value must never appear under "Work item". -->
+              <tr><th>Time</th><th>Type</th><th>Message</th><th>Work item</th><th>Thread</th><th>Actor</th><th>Event</th><th>Status</th></tr>
             </thead>
-            <tbody id="ledger-body"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
+            <tbody id="ledger-body"><tr><td colspan="8" class="muted">Loading...</td></tr></tbody>
           </table>
         </div>
         <div class="ledger-detail" id="ledger-detail" hidden>

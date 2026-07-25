@@ -16,6 +16,10 @@ import os
 import re
 import unittest
 
+# Single backslash, built from its code point so the source stays
+# ASCII-safe and the regex literals below assemble unambiguously.
+BS = chr(92)
+
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       "..", "apps", "control-plane", "static")
 
@@ -31,6 +35,7 @@ CSS = _read("style.css")
 
 
 
+RE_CARD = r"function queueCard[\s\S]{0,8000}?\n}"
 RE_PARSE = r"function parseWorkRoute[\s\S]{0,4000}?\n\}"
 
 
@@ -110,8 +115,18 @@ class FallbackRankingTest(unittest.TestCase):
         self.assertIsNotNone(m)
         order = re.findall(r'"([a-z_]+)"', m.group(1))
         self.assertEqual(order, [
-            "waiting_for_operator", "operator_message_posted",
-            "paused", "executor_active", "in_council", "blocked", "claimed"])
+            "waiting_for_operator", "paused", "executor_active",
+            "in_council", "claimed", "blocked"])
+
+    def test_operator_message_posted_is_removed_as_unreachable(self):
+        """Proven against the real server value domain: last_activity_event is
+        emitted only as created|completion|verification|council|gate|progress|
+        claim|response|evidence, so no item can ever reach this rank."""
+        m = re.search(r"ACTIVE_RANK = " + BS + r"[(.*?)" + BS + r"]", APP, re.S)
+        self.assertNotIn("operator_message_posted", m.group(1))
+        self.assertNotIn('=== "operator_message"', APP,
+                         "the dead event alias must be gone, not just unranked")
+        self.assertNotIn('ev === "message"', APP)
 
     def test_wake_pending_is_deferred_not_simulated(self):
         """No durable field can establish wake_pending before the wake bridge.
@@ -333,6 +348,268 @@ class RouteErrorPersistenceTest(unittest.TestCase):
         self.assertIn("highest-priority active work", call,
                       "the message must not promise the operator's previous item: "
                       "the persisted selection is cleared before restoration runs")
+
+
+class CanonicalIdentityTest(unittest.TestCase):
+    """Correction item 1.
+
+    Investigation result: the apparently duplicated tiles are NOT phantoms.
+    /api/work-items returns genuinely distinct canonical work items whose titles
+    collide because the title is derived from the origin message text, and three
+    of them share one thread. Every work_item_id is a real "message:msg-..."
+    value. Collapsing them would HIDE durable governed work, so they are
+    disambiguated and the shared-thread condition is surfaced instead.
+    """
+
+    def test_queue_identity_is_derived_from_the_canonical_work_item_id(self):
+        m = re.search(RE_CARD, APP)
+        self.assertIsNotNone(m, "queueCard not found")
+        body = m.group(0)
+        self.assertIn("it.work_item_id", body)
+        self.assertIn("originMessageId(wid)", body)
+
+    def test_a_thread_id_is_never_rendered_as_a_work_item(self):
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        # The work-item row must read work_item_id, never fall back to a thread.
+        self.assertNotIn("it.work_item_id || it.thread_id", body)
+        self.assertIn("Work item", body)
+        self.assertIn("Thread", body)
+
+    def test_shared_thread_raises_an_integrity_warning(self):
+        self.assertIn("function threadWorkItemIndex", APP)
+        self.assertIn("function sharesThreadWithOtherWorkItems", APP)
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        self.assertIn("q-integrity", body)
+        self.assertIn("sharesThreadWithOtherWorkItems", body)
+
+    def test_conflicting_records_are_flagged_not_hidden(self):
+        """No filtering may drop a durable work item to tidy the view."""
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        for banned in ("filter(", "dedupe", "unique("):
+            self.assertNotIn(banned, body,
+                             "tiles must not be removed; the records are real")
+        self.assertIn("q-ambiguous", body)
+        self.assertIn(".q-integrity", CSS)
+
+
+class QueueTileIdentityTest(unittest.TestCase):
+    """Correction item 2: identify the durable object without opening it."""
+
+    def test_tile_shows_work_item_thread_and_origin_ids(self):
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        for label in ("Work item", "Thread", "Origin message"):
+            self.assertIn(label, body)
+
+    def test_tile_offers_copy_for_each_identifier(self):
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        self.assertEqual(body.count("copyIdButton("), 3,
+                         "work item, thread and origin message each need Copy")
+        self.assertIn('copyIdButton(wid, "work-item ID")', body)
+        self.assertIn('copyIdButton(tid, "thread ID")', body)
+
+    def test_copy_controls_carry_the_full_id_not_the_abbreviation(self):
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        self.assertIn("copyIdButton(wid", body)
+        self.assertNotIn("copyIdButton(abbrevId", body)
+
+    def test_copying_does_not_also_open_the_item(self):
+        self.assertIn("function eventTargetsInnerControl", APP)
+        # One definition plus exactly two guarded entry points: click and key.
+        self.assertEqual(APP.count("if (eventTargetsInnerControl(e)) return;"), 2,
+                         "both the click and keyboard paths must be guarded")
+
+
+class IdentifierTerminologyTest(unittest.TestCase):
+    """Correction item 3: each identifier type is named and explained."""
+
+    def test_matching_suffix_is_explained_rather_than_hidden(self):
+        self.assertIn("function sharesSuffix", APP)
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        self.assertIn("sharesSuffix(wid, tid)", body)
+        self.assertIn("matching suffix", body)
+
+    def test_the_explanation_says_they_remain_different_identifiers(self):
+        m = re.search(RE_CARD, APP)
+        self.assertIn("different identifiers", m.group(0))
+
+    def test_identifiers_are_not_case_transformed_on_tiles(self):
+        i = CSS.index(".q-idv")
+        self.assertIn("text-transform: none", CSS[i:i + 200])
+
+
+class HistoryColumnsTest(unittest.TestCase):
+    """Correction item 4.
+
+    The server already returns work_item_id and thread_id as distinct fields
+    (zero ledger rows carry a thread id in the work-item field). The CLIENT
+    collapsed them with `work_item_id || thread_id || packet_id`, so the 148
+    rows with no work-item binding printed a thr-... under a heading that said
+    "Work item" -- a false identity claim.
+    """
+
+    def test_history_has_distinct_identifier_columns(self):
+        i = HTML.index('<table class="ledger"')
+        head = HTML[i:i + 700]
+        for col in ("<th>Message</th>", "<th>Work item</th>", "<th>Thread</th>",
+                    "<th>Actor</th>", "<th>Event</th>", "<th>Status</th>"):
+            self.assertIn(col, head)
+
+    def test_the_substitution_fallback_is_gone(self):
+        self.assertNotIn("row.work_item_id || row.thread_id", APP)
+
+    def test_a_missing_binding_is_stated_honestly(self):
+        self.assertIn("no work item", APP)
+        self.assertIn("ledger-none", APP)
+        self.assertIn(".ledger-none", CSS)
+
+    def test_message_id_column_is_only_populated_for_messages(self):
+        self.assertIn("function ledgerMessageId", APP)
+        m = re.search(r"function ledgerMessageId[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n" + BS + r"}", APP)
+        body = m.group(0)
+        self.assertIn('row.type === "message"', body)
+        self.assertIn('return ""', body)
+
+    def test_colspan_matches_the_new_column_count(self):
+        self.assertIn('colspan="8"', HTML)
+        self.assertIn('colspan="8"', APP)
+        self.assertNotIn('colspan="6"', APP)
+
+
+class DestinationAgreementTest(unittest.TestCase):
+    """Correction item 5: URL, selection, thread and composer must agree."""
+
+    def test_a_disagreement_check_exists(self):
+        self.assertIn("function destinationDisagreement", APP)
+
+    def test_it_compares_route_selection_and_thread(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        self.assertIsNotNone(m, "destinationDisagreement not found")
+        body = m.group(0)
+        self.assertIn("selectedWorkItemId", body)
+        self.assertIn("thread_id", body)
+        self.assertIn("parseWorkRoute(location.hash)", body)
+
+    def test_no_body_is_built_when_they_disagree(self):
+        i = APP.index("const disagreement = destinationDisagreement(preTarget)")
+        j = APP.index("const body = Object.assign")
+        self.assertLess(i, j, "the check must precede request construction")
+        window = APP[i:i + 400]
+        self.assertIn("showError", window)
+        self.assertIn("return;", window)
+
+    def test_the_operator_is_told_why(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        body = m.group(0)
+        for phrase in ("disagree", "does not match", "different work item"):
+            self.assertIn(phrase, body)
+
+
+class LoadedEmptyQueueTest(unittest.TestCase):
+    """Round-5 finding: a successful empty load is authoritative."""
+
+    def test_a_loaded_flag_exists_and_is_set_on_success(self):
+        self.assertIn("let workItemsLoaded = false;", APP)
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        self.assertIn("workItemsLoaded = true;", m.group(0))
+
+    def test_validation_no_longer_infers_from_length(self):
+        m = re.search(r"function bindRouteSelection[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("if (!workItemsLoaded) return null;", body)
+        self.assertNotIn("if (!items.length) return null;", body)
+
+
+class PhaseVersusExecutorTest(unittest.TestCase):
+    """Correction item 10: two different facts, two different fields."""
+
+    def test_phase_and_executor_are_separate_functions(self):
+        for fn in ("lifecyclePhaseOf", "lifecyclePhaseLabel",
+                   "executorRunnerState", "executorStateLabel"):
+            self.assertIn("function " + fn, APP)
+
+    def test_phase_comes_from_status_only(self):
+        m = re.search(r"function lifecyclePhaseOf[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("it.status", body)
+        self.assertNotIn("runner_state", body)
+
+    def test_executor_comes_from_runner_state_only(self):
+        m = re.search(r"function executorRunnerState[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("it.runner_state", body)
+        self.assertNotIn("last_activity_event", body)
+
+    def test_labels_cover_exactly_the_server_domain(self):
+        m = re.search(r"const EXECUTOR_LABELS = {(.*?)};", APP, re.S)
+        keys = set(re.findall(r"(\w+):", m.group(1)))
+        self.assertEqual(keys, {"active_runner", "waiting_on_council",
+                                "waiting_on_operator", "claimed_idle",
+                                "stale_or_no_heartbeat", "unowned", "unknown"})
+
+    def test_active_requires_positive_runner_evidence(self):
+        m = re.search(r"const EXECUTOR_LABELS = {(.*?)};", APP, re.S)
+        self.assertIn('active_runner: "ACTIVE"', m.group(1))
+        self.assertNotIn('claimed_idle: "ACTIVE"', m.group(1))
+
+    def test_the_tile_labels_both_separately(self):
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        self.assertIn("Phase ", body)
+        self.assertIn("Executor ", body)
+
+
+class ComposerSubmissionFeedbackTest(unittest.TestCase):
+    """Correction item 13: submission must be visible and non-duplicable."""
+
+    def test_the_button_reports_the_in_flight_state(self):
+        self.assertIn('sendBtn.textContent = "Sending...";', APP)
+        self.assertIn('sendBtn.setAttribute("aria-busy", "true");', APP)
+
+    def test_the_button_is_disabled_while_in_flight(self):
+        i = APP.index('sendBtn.textContent = "Sending...";')
+        self.assertIn("sendBtn.disabled = true;", APP[i - 200:i])
+
+    def test_the_label_is_captured_not_hardcoded_on_restore(self):
+        self.assertIn("const idleLabel = sendBtn.textContent;", APP)
+        self.assertIn("sendBtn.textContent = idleLabel;", APP)
+
+    def test_state_is_restored_in_finally_so_it_cannot_strand(self):
+        i = APP.index("sendBtn.textContent = idleLabel;")
+        window = APP[max(0, i - 400):i]
+        self.assertIn("} finally {", window)
+
+    def test_duplicate_submission_is_blocked_for_every_entry_point(self):
+        """Click, Enter and Ctrl+Enter all funnel through send()."""
+        i = APP.index("async function send() {")
+        self.assertIn("if (sending) return;", APP[i:i + 200],
+                      "re-entry must be blocked at the top of send()")
+        # Ctrl+Enter routes to the same guarded function, not a parallel path.
+        self.assertIn("send();", APP[APP.index('e.key === "Enter" && (e.ctrlKey'):][:200])
+
+    def test_the_draft_is_kept_until_durable_success(self):
+        i = APP.index("clearDraft(draftKey());")
+        before = APP[max(0, i - 1400):i]
+        self.assertIn("stored.message !== canonical", before,
+                      "the draft may only clear after the durable re-read matches")
+
+    def test_failure_paths_preserve_the_draft(self):
+        for msg in ("The draft was kept", "draft was kept"):
+            self.assertIn(msg, APP)
+
+    def test_success_shows_the_durable_id_and_destination(self):
+        self.assertIn("showPostConfirmation(result);", APP)
+        m = re.search(r"function showPostConfirmation[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("message_id", body)
+        self.assertIn("thread_id", body)
+        self.assertIn("copyIdButton", body)
 
 
 class UnifiedRoutePolicyTest(unittest.TestCase):
@@ -740,12 +1017,18 @@ class TruthfulExecutionStateTest(unittest.TestCase):
     def test_operator_message_does_not_yield_a_running_state(self):
         m = re.search(r"function truthfulExecutionState[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
-        self.assertIn("operator_message_posted", body)
-        i_msg = body.index('ev === "operator_message"')
-        i_run = body.index('p === "running"')
-        self.assertLess(i_msg, i_run,
-                        "an operator message must be classified before any "
-                        "running check can claim the executor is active")
+        # The event-derived branch is GONE: last_activity_event can never be
+        # "message" or "operator_message", so that rank was unreachable.
+        self.assertNotIn("operator_message_posted", body)
+        self.assertNotIn("last_activity_event", body)
+        self.assertNotIn('"running"', body,
+                         "a presentation_state of running must not imply an "
+                         "executor state; ACTIVE comes from runner_state only")
+        # The old ordering assertion (operator-message branch before the
+        # running check) no longer applies: BOTH branches are gone. ACTIVE is
+        # now derived solely from runner_state === "active_runner", which the
+        # server sets only on positive evidence of recent non-claim activity.
+        self.assertIn('r === "active_runner"', body)
 
     def test_unsupported_states_are_not_simulated(self):
         labels = re.search(r"EXECUTION_STATE_LABELS = \{(.*?)\n\}", APP, re.S).group(1)

@@ -767,6 +767,29 @@ function createComposer(opts) {
     return name + ":" + (target.thread_id || "new") + ":" + (target.work_item_id || "");
   }
 
+  // Item 5: the URL, the selected tile, the bound thread and the composer
+  // destination must describe the SAME durable object before anything is sent.
+  // Any disagreement fails closed with a visible explanation rather than
+  // posting to a destination the operator did not read on screen.
+  function destinationDisagreement(target) {
+    if (!target || !target.work_item_id) return "";
+    if (target.work_item_id !== selectedWorkItemId) {
+      return "The composer destination and the selected work item disagree.";
+    }
+    const known = (lastWorkItems || []).find(
+      (i) => i.work_item_id === selectedWorkItemId);
+    if (known && known.thread_id && target.thread_id &&
+        known.thread_id !== target.thread_id) {
+      return "The composer thread does not match the selected work item's thread.";
+    }
+    const route = parseWorkRoute(location.hash);
+    if (route && !route.malformed && route.work_item_id &&
+        route.work_item_id !== selectedWorkItemId) {
+      return "The URL points at a different work item than the one selected.";
+    }
+    return "";
+  }
+
   function updateBanner() {
     if (!bannerEl) return;
     const target = getTarget();
@@ -858,6 +881,12 @@ function createComposer(opts) {
     }
     showError("");
     const preTarget = getTarget();
+    const disagreement = destinationDisagreement(preTarget);
+    if (disagreement) {
+      showError(disagreement + " Nothing was sent. Reselect the work item so " +
+                "the URL, the selection and the destination agree.");
+      return;
+    }
     if (preTarget && preTarget.unresolved) {
       showError("This work item has no durable thread yet, so the destination " +
                 "cannot be verified. The draft was kept; sending is blocked " +
@@ -866,8 +895,14 @@ function createComposer(opts) {
     }
     const draft = persistDraft();
     const target = preTarget;
+    // Item 13: the operator must never have to guess whether a send is running.
+    // `sending` already blocks re-entry from the button, Enter and Ctrl+Enter --
+    // they all call send() -- but that state was invisible.
     sending = true;
     sendBtn.disabled = true;
+    const idleLabel = sendBtn.textContent;
+    sendBtn.textContent = "Sending...";
+    sendBtn.setAttribute("aria-busy", "true");
     try {
       const body = Object.assign(
         { message: raw, idempotency_key: draft.idempotencyKey },
@@ -912,8 +947,12 @@ function createComposer(opts) {
       showPostConfirmation(result);
       if (onPosted) onPosted(result, stored);
     } finally {
+      // Always restored, on success, refusal, network error and verification
+      // failure alike, so the composer can never strand in a sending state.
       sending = false;
       sendBtn.disabled = false;
+      sendBtn.textContent = idleLabel;
+      sendBtn.removeAttribute("aria-busy");
     }
   }
 
@@ -1003,6 +1042,11 @@ const WORK_KIND_LABEL = {
 // --------------------------------------------------------------------------- //
 
 let lastWorkItems = [];
+// Distinguishes "the queue has not been fetched yet" from "the queue was
+// fetched successfully and is empty". Inferring this from lastWorkItems.length
+// conflated the two, so after a successful empty response an unknown explicit
+// route was retained as a provisional selection instead of being rejected.
+let workItemsLoaded = false;
 let lastQueueCouncils = [];
 let lastArchiveIndex = { archived: [], count: 0 };
 
@@ -1109,8 +1153,40 @@ function queueCard(it) {
   // Phase 1, item 7: a queue row is a real control -- role, tabindex and
   // aria-pressed -- so it is reachable and activatable from the keyboard
   // instead of being a plain div that only responds to a mouse click.
-  const execLabel = executionStateLabel(it);
+  const execLabel = executorStateLabel(it);
+  const phaseLabel = lifecyclePhaseLabel(it);
+  const wid = it.work_item_id || "";
+  const tid = it.thread_id || "";
+  const originId = originMessageId(wid);
+  // Item 1: multiple canonical work items on one thread is legal but reads as
+  // duplication. Surface it; never hide a durable record to tidy the view.
+  const ambiguous = sharesThreadWithOtherWorkItems(it, lastWorkItems);
+  const warn = ambiguous
+    ? '<div class="q-integrity" role="note">Shared thread: more than one work ' +
+      "item is bound to this thread. These are distinct durable records, not " +
+      "duplicates - compare the work-item IDs.</div>"
+    : "";
+  // Item 3: each identifier is LABELLED by type. A thread id is never presented
+  // as a work-item id, and the shared-suffix coincidence is explained in place.
+  const suffixNote = sharesSuffix(wid, tid)
+    ? ' <span class="q-idnote" title="The thread was created together with this' +
+      " item's origin message, so their numeric suffixes match. They remain" +
+      ' different identifiers.">matching suffix</span>'
+    : "";
+  const ids =
+    '<div class="q-ids">' +
+      '<span class="q-idrow"><span class="q-idk">Work item</span>' +
+        '<code class="mono q-idv" title="' + esc(wid) + '">' + esc(abbrevId(wid)) + "</code>" +
+        copyIdButton(wid, "work-item ID") + "</span>" +
+      (tid ? '<span class="q-idrow"><span class="q-idk">Thread</span>' +
+        '<code class="mono q-idv" title="' + esc(tid) + '">' + esc(abbrevId(tid)) + "</code>" +
+        copyIdButton(tid, "thread ID") + suffixNote + "</span>" : "") +
+      (originId ? '<span class="q-idrow"><span class="q-idk">Origin message</span>' +
+        '<code class="mono q-idv" title="' + esc(originId) + '">' + esc(abbrevId(originId)) +
+        "</code>" + copyIdButton(originId, "origin message ID") + "</span>" : "") +
+    "</div>";
   return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
+    (ambiguous ? " q-ambiguous" : "") +
     '" role="button" tabindex="0"' +
     ' aria-pressed="' + (selected ? "true" : "false") + '"' +
     ' aria-label="Open work item ' + esc(it.work_item_id || "") +
@@ -1119,8 +1195,14 @@ function queueCard(it) {
     '" data-work-item="' + esc(it.work_item_id || "") + '">' +
     '<div class="q-title">' + title + "</div>" +
     '<div class="q-meta">' + bits.join("") + opFlag +
-    (execLabel ? '<span class="q-exec mono">' + esc(execLabel) + "</span>" : "") +
-    "</div>" +
+    // Item 10: phase and executor state are DIFFERENT facts and are labelled
+    // separately, so "PHASE: VERIFICATION / EXECUTOR: IN COUNCIL" can never be
+    // misread as a single contradictory status.
+    (phaseLabel ? '<span class="q-phase mono" title="lifecycle phase">Phase ' +
+      esc(phaseLabel) + "</span>" : "") +
+    (execLabel ? '<span class="q-exec mono" title="executor state, derived from ' +
+      'runner_state only">Executor ' + esc(execLabel) + "</span>" : "") +
+    "</div>" + ids + warn +
     "</div>";
 }
 
@@ -1390,6 +1472,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Enter" && e.key !== " ") return;
   const row = e.target && e.target.closest && e.target.closest(".q-row[data-work-item]");
   if (!row) return;
+  if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
   e.preventDefault();
   const wid = row.getAttribute("data-work-item");
   if (wid) navigateToWorkItem(wid);
@@ -1418,26 +1501,129 @@ const EXECUTION_STATE_LABELS = {
 };
 
 // Evidence-backed only. `it` is the derived work item from /api/work-items.
+// LIFECYCLE PHASE: where the governed work item sits in its own lifecycle.
+// Derived from `status`, whose observed domain is open|planning|verification|
+// claimed|operator_required|done|closed|superseded|malformed. This says nothing
+// about whether any executor is running.
+const LIFECYCLE_PHASE_LABELS = {
+  open: "OPEN", planning: "PLANNING", verification: "VERIFICATION",
+  claimed: "CLAIMED", operator_required: "OPERATOR REQUIRED",
+  done: "DONE", closed: "CLOSED", superseded: "SUPERSEDED",
+  malformed: "MALFORMED"
+};
+
+function lifecyclePhaseOf(it) {
+  const st = String((it && it.status) || "");
+  return Object.prototype.hasOwnProperty.call(LIFECYCLE_PHASE_LABELS, st) ? st : "";
+}
+
+function lifecyclePhaseLabel(it) {
+  return LIFECYCLE_PHASE_LABELS[lifecyclePhaseOf(it)] || "";
+}
+
+// EXECUTOR STATE: what a runner is actually doing, derived ONLY from
+// runner_state, whose domain is unowned|active_runner|waiting_on_council|
+// waiting_on_operator|claimed_idle|stale_or_no_heartbeat|unknown.
+//
+// ACTIVE is reported only for "active_runner", which the server returns solely
+// on positive evidence of recent non-claim activity. A claim alone is never
+// running, and a posted message is never running: ClearWright has no heartbeat
+// channel, so anything stronger would be fabricated.
+const EXECUTOR_LABELS = {
+  active_runner: "ACTIVE", waiting_on_council: "IN COUNCIL",
+  waiting_on_operator: "WAITING FOR OPERATOR", claimed_idle: "CLAIMED",
+  stale_or_no_heartbeat: "NO HEARTBEAT", unowned: "UNCLAIMED",
+  unknown: "UNKNOWN"
+};
+
+function executorRunnerState(it) {
+  const r = String((it && it.runner_state) || "");
+  return Object.prototype.hasOwnProperty.call(EXECUTOR_LABELS, r) ? r : "";
+}
+
+function executorStateLabel(it) {
+  return EXECUTOR_LABELS[executorRunnerState(it)] || "";
+}
+
+// Ranking vocabulary, mapped from the SAME evidence as the executor label so
+// the queue order and the rendered state can never disagree. Terminal
+// presentation states win first because a finished item is not active work.
 function truthfulExecutionState(it) {
   if (!it) return "";
   const p = String(it.presentation_state || "");
-  const r = String(it.runner_state || "");
-  const ev = String(it.last_activity_event || "");
-  if (p === "recently_completed" || p === "complete") return "complete";
-  if (p === "blocked") return "blocked";
-  if (p === "needs_operator" || p === "waiting_on_operator") return "waiting_for_operator";
+  const r = executorRunnerState(it);
+  if (p === "recently_completed" || p === "historical" || p === "superseded") return "complete";
+  if (p === "needs_operator" || p === "waiting_on_operator" || r === "waiting_on_operator") {
+    return "waiting_for_operator";
+  }
   if (r === "waiting_on_council") return "in_council";
-  // An operator message is the LAST durable event: the operator acted, but no
-  // executor activity followed. Never call this running.
-  if (ev === "operator_message" || ev === "message") return "operator_message_posted";
-  if (p === "stale" || r === "stale_or_no_heartbeat") return "paused";
-  if (p === "running") return "executor_active";
-  if (it.claimed_by) return "claimed";
+  if (r === "stale_or_no_heartbeat" || p === "stale") return "paused";
+  if (r === "active_runner") return "executor_active";
+  if (p === "blocked") return "blocked";
+  if (r === "claimed_idle" || it.claimed_by) return "claimed";
   return "";
 }
 
 function executionStateLabel(it) {
   return EXECUTION_STATE_LABELS[truthfulExecutionState(it)] || "";
+}
+
+// --------------------------------------------------------------------------
+// DURABLE IDENTITY ON THE QUEUE (operator correction items 1, 2 and 3)
+// --------------------------------------------------------------------------
+// Investigation result, recorded because it changes what the correct fix is:
+// the apparently duplicated tiles are NOT phantoms and NOT client artifacts.
+// /api/work-items returns genuinely DISTINCT canonical work items whose titles
+// collide because the title is derived from the origin message text, and in one
+// case three separate message-scoped work items share a single thread. Every
+// work_item_id is a real "message:msg-..." value; no thread id is ever rendered
+// as a work item. Collapsing them would HIDE durable governed work, so the tiles
+// are disambiguated and the shared-thread condition is surfaced as an integrity
+// warning instead.
+
+// thread_id -> [work_item_id, ...] for every item the queue can see.
+function threadWorkItemIndex(items) {
+  const idx = {};
+  (items || []).forEach((it) => {
+    const t = it && it.thread_id;
+    if (!t) return;
+    if (!idx[t]) idx[t] = [];
+    if (idx[t].indexOf(it.work_item_id) === -1) idx[t].push(it.work_item_id);
+  });
+  return idx;
+}
+
+// True when this item's thread carries more than one canonical work item. That
+// is legal but ambiguous to read, so it is flagged rather than hidden.
+function sharesThreadWithOtherWorkItems(it, items) {
+  if (!it || !it.thread_id) return false;
+  const peers = threadWorkItemIndex(items)[it.thread_id] || [];
+  return peers.length > 1;
+}
+
+// A work item id derived from a message carries that message's id verbatim:
+// "message:" + message_id. When the thread was created with that same origin
+// message the numeric suffixes match, which reads like duplication but is not.
+function idSuffix(id) {
+  const m = /(\d{8}T\d{6,})/.exec(String(id || ""));
+  return m ? m[1] : "";
+}
+
+function sharesSuffix(workItemId, threadId) {
+  const a = idSuffix(workItemId);
+  return !!a && a === idSuffix(threadId);
+}
+
+function originMessageId(workItemId) {
+  const s = String(workItemId || "");
+  return s.indexOf("message:") === 0 ? s.slice("message:".length) : "";
+}
+
+// Abbreviated for display only. The FULL id is always what gets copied.
+function abbrevId(id, keep) {
+  const s = String(id || "");
+  const k = keep || 14;
+  return s.length <= k + 3 ? s : s.slice(0, k) + "\u2026" + s.slice(-4);
 }
 
 // --------------------------------------------------------------------------
@@ -1542,14 +1728,24 @@ function readPersistedSelection() {
 // fill makes the ranking contract inert and advertises a priority that never
 // applies, so it is deferred rather than simulated (Phase 1, item 6). When the
 // wake bridge lands it belongs between operator_message_posted and paused.
+// Every entry MUST be producible by executorStateOf(). Two buckets were removed
+// after being proven unreachable against the real server value domain:
+//   wake_pending            needs executor acknowledgement / wake telemetry,
+//                           which is the deferred Phase 2 wake bridge.
+//   operator_message_posted assumed last_activity_event could be "message" or
+//                           "operator_message". It cannot: last_activity() emits
+//                           exactly created|completion|verification|council|gate|
+//                           progress|claim|response|evidence, so that branch was
+//                           dead code and the rank could never be reached.
+// A rank nothing can produce silently mis-orders the queue, so it is removed
+// rather than left as decoration.
 const ACTIVE_RANK = [
   "waiting_for_operator",
-  "operator_message_posted",
   "paused",
   "executor_active",
   "in_council",
-  "blocked",
-  "claimed"
+  "claimed",
+  "blocked"
 ];
 
 // Terminal / non-active presentation states are never auto-selected.
@@ -1665,7 +1861,9 @@ function clearWorkRoute() {
 // restoreActiveSelection() validates once it is.
 function bindRouteSelection(wid) {
   const items = lastWorkItems || [];
-  if (!items.length) return null;
+  // Only a genuinely unfetched queue defers validation. A successful empty
+  // response is authoritative: the route cannot be backed by anything.
+  if (!workItemsLoaded) return null;
   const known = items.find((it) => it.work_item_id === wid);
   if (!known) {
     // Queue-unbacked: clear unconditionally, drop the route so a reload does
@@ -1703,7 +1901,10 @@ function bindRouteSelection(wid) {
 // item id IS "message:" + message_id) -- no message search, no ambiguity.
 function navigateToWorkItem(workItemId) {
   // Deliberate navigation: an earlier malformed-link explanation is obsolete.
+  // Clear the flag AND the visible text -- resetting only the flag left the
+  // stale message on screen whenever no hashchange followed.
   routeErrorReported = false;
+  showRestoreStatus("");
   const msgId = workItemId && workItemId.indexOf("message:") === 0
     ? workItemId.slice("message:".length) : "";
   location.hash = "#work=" + encodeURIComponent(workItemId) +
@@ -1891,6 +2092,7 @@ async function refreshWorkItems() {
   try {
     const data = await getJSON("/api/work-items");
     lastWorkItems = data.work_items || [];
+    workItemsLoaded = true;   // a SUCCESSFUL response, even when it is empty
     try {
       const cd = await getJSON("/api/review-councils");
       lastQueueCouncils = cd.review_councils || [];
@@ -1958,7 +2160,7 @@ async function loadHistory() {
   lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
   const body = document.getElementById("ledger-body");
   if (!lastLedgerRows.length) {
-    body.innerHTML = '<tr><td colspan="6" class="muted">No records match the filters.</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="muted">No records match the filters.</td></tr>';
     return;
   }
   body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
@@ -1966,10 +2168,29 @@ async function loadHistory() {
     '" data-ledger-index="' + i + '">' +
     "<td>" + esc(shortTime(row.at)) + "</td>" +
     "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
-    '<td class="mono">' + esc(row.work_item_id || row.thread_id || row.packet_id || "") + "</td>" +
+    // Item 4: message, work-item and thread are SEPARATE columns. The previous
+    // `work_item_id || thread_id || packet_id` fallback printed a thr-... value
+    // under a heading that said "Work item", which is a false identity claim for
+    // the 148 ledger rows that legitimately have no work-item binding.
+    '<td class="mono">' + esc(abbrevId(ledgerMessageId(row), 12)) + "</td>" +
+    '<td class="mono">' + (row.work_item_id
+      ? esc(abbrevId(row.work_item_id, 12))
+      : '<span class="muted ledger-none">no work item</span>') + "</td>" +
+    '<td class="mono">' + (row.thread_id
+      ? esc(abbrevId(row.thread_id, 12))
+      : '<span class="muted ledger-none">-</span>') + "</td>" +
     "<td>" + esc(row.actor || "") + "</td>" +
     '<td class="ledger-event">' + esc(row.event || "") + "</td>" +
     "<td>" + esc(row.status || "") + "</td></tr>").join("");
+}
+
+// The durable message id for a ledger row, when the row IS a message. Packet and
+// council rows have none, and inventing one would be a false identity claim.
+function ledgerMessageId(row) {
+  if (!row) return "";
+  const rec = row.record || {};
+  if (row.type === "message") return rec.message_id || "";
+  return "";
 }
 
 function openLedgerDetail(index) {
@@ -3361,6 +3582,14 @@ function toggleToolLog() {
   if (footer) footer.hidden = !footer.hidden;
 }
 
+// A queue tile is a control that CONTAINS controls. Without this, clicking Copy
+// would also open the item, which is the opposite of a copy-without-navigating
+// affordance.
+function eventTargetsInnerControl(e) {
+  const t = e && e.target;
+  return !!(t && t.closest && t.closest(".copy-id"));
+}
+
 function selectTask(threadId, workItemId) {
   selectedConvThread = threadId || null;
   selectedWorkItemId = workItemId || null;
@@ -3450,6 +3679,7 @@ function wire() {
 
   // Work queue: clicking a row selects that task everywhere.
   document.getElementById("queue-groups").addEventListener("click", (e) => {
+    if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
     const row = e.target.closest(".q-row");
     if (!row) return;
     const thread = row.getAttribute("data-thread");

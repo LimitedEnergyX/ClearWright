@@ -270,7 +270,7 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
 
   // Pretend a previous session stored a selection, as a real reload would.
   evalIn(ctx, 'localStorage.setItem("cw_selected_work_item_v1", "message:msg-prior");' +
-              'lastWorkItems = [{ work_item_id: "message:msg-prior", thread_id: "thr-prior",' +
+              'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-prior", thread_id: "thr-prior",' +
               ' presentation_state: "needs_operator" }];');
 
   ctx.applyWorkHashRoute();
@@ -329,7 +329,7 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
   // Unknown item, queue already loaded (the hashchange case).
   const reg = baseRegistry();
   const ctx = loadApp(reg, "#work=message%3Amsg-ghost", ["conv-scroll", "conversation"]);
-  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-real", thread_id: "thr-real",' +
+  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-real", thread_id: "thr-real",' +
               ' presentation_state: "needs_operator" }];');
   ctx.applyWorkHashRoute();
   ok(evalIn(ctx, "selectedWorkItemId") === null,
@@ -344,7 +344,7 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
   // Terminal item, queue already loaded: openable, but never persisted.
   const reg = baseRegistry();
   const ctx = loadApp(reg, "#work=message%3Amsg-done", ["conv-scroll", "conversation"]);
-  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-done", thread_id: "thr-done",' +
+  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-done", thread_id: "thr-done",' +
               ' presentation_state: "recently_completed" }];');
   ctx.applyWorkHashRoute();
   ok(evalIn(ctx, "selectedWorkItemId") === "message:msg-done",
@@ -359,7 +359,7 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
   // Active item, queue already loaded: bound and persisted normally.
   const reg = baseRegistry();
   const ctx = loadApp(reg, "#work=message%3Amsg-live", ["conv-scroll", "conversation"]);
-  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
+  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
               ' presentation_state: "needs_operator" }];');
   ctx.applyWorkHashRoute();
   eq([evalIn(ctx, "selectedWorkItemId"), evalIn(ctx, "selectedConvThread")],
@@ -373,7 +373,7 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
 {
   const reg = baseRegistry();
   const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
-  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
+  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
               ' presentation_state: "needs_operator" }];');
   ctx.applyWorkHashRoute();                       // reports a malformed route
   ok(evalIn(ctx, "routeErrorReported") === true, "a malformed route latches the explanation");
@@ -395,7 +395,7 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
   // Deliberate operator navigation also supersedes a stale explanation.
   const reg = baseRegistry();
   const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
-  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
+  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
               ' presentation_state: "needs_operator" }];');
   ctx.applyWorkHashRoute();
   ok(evalIn(ctx, "routeErrorReported") === true, "latched after a malformed route");
@@ -413,13 +413,24 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
 
   eq(ctx.activeStateOf({ presentation_state: "needs_operator" }), "waiting_for_operator",
      "needs_operator maps to waiting_for_operator");
-  eq(ctx.activeStateOf({ last_activity_event: "operator_message" }), "operator_message_posted",
-     "an operator message is reachable as its own rank (was unreachable)");
+  // Round-5 finding, now corrected: last_activity_event can never be
+  // "operator_message" or "message". The producing function emits exactly
+  // created|completion|verification|council|gate|progress|claim|response|
+  // evidence, so the old branch was dead code and its rank unreachable.
+  eq(ctx.activeStateOf({ last_activity_event: "operator_message" }), "",
+     "a fabricated event value produces no state");
+  ["created", "completion", "verification", "council", "gate", "progress",
+   "claim", "response", "evidence"].forEach((ev) => {
+    ok(ctx.activeStateOf({ last_activity_event: ev }) !== "operator_message_posted",
+       "no real event value can produce operator_message_posted (" + ev + ")");
+  });
   eq(ctx.activeStateOf({ presentation_state: "totally_new_state" }), "",
      "an unrecognised state is NOT guessed as in_council");
 
   ok(evalIn(ctx, 'ACTIVE_RANK.indexOf("wake_pending")') === -1,
      "wake_pending is not in the executable rank");
+  ok(evalIn(ctx, 'ACTIVE_RANK.indexOf("operator_message_posted")') === -1,
+     "the unreachable operator_message_posted rank is removed");
   ok(evalIn(ctx, "ACTIVE_RANK.length") > 0, "ACTIVE_RANK is readable and non-empty");
 
   // Unknown states must sort AFTER every known state.
@@ -449,13 +460,126 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
 }
 
 // --------------------------------------------------------------------------
+// 3b. LOADED-EMPTY is not NOT-LOADED. Round-5 finding: inferring queue
+//     availability from lastWorkItems.length meant a successful empty response
+//     looked identical to an unfetched queue, so an unknown explicit route was
+//     retained as a provisional selection instead of being rejected.
+// --------------------------------------------------------------------------
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "#work=message%3Amsg-ghost", ["conv-scroll", "conversation"]);
+  // Queue NOT yet fetched: validation defers, nothing is rejected.
+  ok(ctx.bindRouteSelection("message:msg-ghost") === null,
+     "an unfetched queue defers route validation");
+
+  // Queue fetched SUCCESSFULLY and empty: authoritative, so the route is bad.
+  evalIn(ctx, "workItemsLoaded = true; lastWorkItems = [];");
+  ok(ctx.bindRouteSelection("message:msg-ghost") === false,
+     "a successful EMPTY load rejects an unknown route (was retained before)");
+  ok(evalIn(ctx, "selectedWorkItemId") === null,
+     "nothing stays selected after a successful empty load");
+  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === null,
+     "nothing stays persisted after a successful empty load");
+  ok(reg["restore-status"].textContent.indexOf("not in the live queue") !== -1,
+     "the rejection is explained");
+}
+
+// --------------------------------------------------------------------------
+// 3c. PHASE and EXECUTOR STATE are separate facts from separate fields.
+// --------------------------------------------------------------------------
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
+
+  // Same item: phase VERIFICATION, executor IN COUNCIL. Not contradictory.
+  const it = { status: "verification", runner_state: "waiting_on_council" };
+  eq(ctx.lifecyclePhaseLabel(it), "VERIFICATION", "phase comes from status");
+  eq(ctx.executorStateLabel(it), "IN COUNCIL", "executor comes from runner_state");
+
+  // ACTIVE requires positive runner evidence, never a posted message.
+  eq(ctx.executorStateLabel({ runner_state: "active_runner" }), "ACTIVE",
+     "ACTIVE is reported only for active_runner");
+  eq(ctx.executorStateLabel({ status: "claimed", runner_state: "claimed_idle" }), "CLAIMED",
+     "a claim alone is CLAIMED, never ACTIVE");
+  eq(ctx.executorStateLabel({ last_activity_event: "progress" }), "",
+     "a posted message alone yields no executor state");
+  eq(ctx.executorStateLabel({ runner_state: "unowned" }), "UNCLAIMED",
+     "an unowned runner is UNCLAIMED");
+
+  // Only the real server domain is honoured.
+  eq(ctx.executorStateLabel({ runner_state: "totally_invented" }), "",
+     "an unknown runner_state is not labelled");
+  eq(ctx.lifecyclePhaseLabel({ status: "totally_invented" }), "",
+     "an unknown status is not labelled");
+}
+
+// --------------------------------------------------------------------------
+// 3d. CANONICAL IDENTITY. The duplicate tiles are distinct durable work items
+//     that share a thread, so they are disambiguated and flagged, never merged.
+// --------------------------------------------------------------------------
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
+  const items = [
+    { work_item_id: "message:msg-20260723T165821979878", thread_id: "thr-20260723T153047865278" },
+    { work_item_id: "message:msg-20260723T163351081476", thread_id: "thr-20260723T153047865278" },
+    { work_item_id: "message:msg-20260720T192858711719", thread_id: "thr-20260720T192858711719" },
+  ];
+  const idx = ctx.threadWorkItemIndex(items);
+  eq(idx["thr-20260723T153047865278"].length, 2,
+     "two canonical work items share one thread");
+  ok(ctx.sharesThreadWithOtherWorkItems(items[0], items) === true,
+     "a shared-thread item is flagged");
+  ok(ctx.sharesThreadWithOtherWorkItems(items[2], items) === false,
+     "a sole-owner item is not flagged");
+
+  // A thread id must never be mistaken for a work item id.
+  items.forEach((i) => {
+    ok(String(i.work_item_id).indexOf("message:") === 0,
+       "every canonical work item id is message-scoped");
+    ok(String(i.work_item_id).indexOf("thr-") !== 0,
+       "a thread id is never used as a work item id");
+  });
+
+  eq(ctx.originMessageId("message:msg-20260723T165821979878"), "msg-20260723T165821979878",
+     "the origin message id is derived from the canonical work item id");
+  eq(ctx.originMessageId("in_progress:session-ux-cta-20260725"), "",
+     "a non-message work item has no origin message id");
+
+  // The shared-suffix coincidence is detected so it can be explained.
+  ok(ctx.sharesSuffix("message:msg-20260720T192858711719", "thr-20260720T192858711719") === true,
+     "a matching suffix is detected");
+  ok(ctx.sharesSuffix("message:msg-20260723T165821979878", "thr-20260723T153047865278") === false,
+     "a differing suffix is not claimed to match");
+
+  // Abbreviation is display-only: it must never be mistaken for the real id.
+  const full = "message:msg-20260723T165821979878";
+  ok(ctx.abbrevId(full).length < full.length, "long ids are abbreviated for display");
+  ok(ctx.abbrevId("msg-1") === "msg-1", "short ids are shown whole");
+}
+
+// --------------------------------------------------------------------------
+// 3e. LEDGER identity: an absent binding is stated, never substituted.
+// --------------------------------------------------------------------------
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
+  eq(ctx.ledgerMessageId({ type: "message", record: { message_id: "msg-1" } }), "msg-1",
+     "a message row exposes its durable message id");
+  eq(ctx.ledgerMessageId({ type: "packet", record: { filename: "x.json" } }), "",
+     "a packet row has no message id and does not borrow one");
+  eq(ctx.ledgerMessageId({ type: "agent_event", record: {} }), "",
+     "an event row has no message id");
+}
+
+// --------------------------------------------------------------------------
 // 4. Composer target fails closed without a durable thread.
 // --------------------------------------------------------------------------
 {
   const reg = baseRegistry();
   const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
 
-  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-1", thread_id: "thr-1" }];' +
+  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-1", thread_id: "thr-1" }];' +
               'selectedWorkItemId = "message:msg-1"; selectedConvThread = null;');
   const bound = ctx.convComposerTarget();
   eq([bound.work_item_id, bound.thread_id, !!bound.unresolved],
@@ -463,7 +587,7 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
      "a known item binds work item and durable thread together");
 
   // Same selection, but the queue has no thread for it.
-  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-2", thread_id: null }];' +
+  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-2", thread_id: null }];' +
               'selectedWorkItemId = "message:msg-2"; selectedConvThread = null;');
   const unresolved = ctx.convComposerTarget();
   ok(unresolved.unresolved === true,

@@ -593,16 +593,25 @@ def _council_body(args, phase, root, stage):
         # context does NOT prove the outbound bytes are clear. The egress guard
         # remains the complete authoritative check over the exact bytes.
         #
-        # WHY ANY NON-CLEAR VERDICT IS TREATED AS AN UNCONDITIONAL BLOCK (proof):
-        # clearwright_egress_guard.authorize() computes final_scan() over the FULL
-        # outbound bytes and raises EgressBlocked("tripwire_hit") whenever the
-        # verdict is "hit", with NO branching on the finding CATEGORY and BEFORE
-        # the sensitive-tier branch -- so it applies on every lane. classify() and
-        # final_scan() share the identical _scan_text detector core and policy.
-        # Therefore ANY non-clear classification of the context implies an
-        # unconditional block at send, and refusing here cannot over-refuse. The
-        # normalized reason is reported as tripwire_refusal for every hit category
-        # because every hit category produces the same unconditional outcome.
+        # TWO DISTINCT JUSTIFICATIONS, deliberately not conflated:
+        #
+        # (a) "hit" -> tripwire_refusal is PROVEN, not assumed.
+        #     clearwright_egress_guard.authorize() computes final_scan() over the
+        #     FULL outbound bytes and raises EgressBlocked("tripwire_hit")
+        #     whenever the verdict is "hit", with NO branching on the finding
+        #     CATEGORY and BEFORE the sensitive-tier branch, so it applies on
+        #     every lane. classify() and final_scan() share the identical
+        #     _scan_text detector core and policy. A context "hit" therefore
+        #     implies an unconditional block at send, so refusing here for ANY hit
+        #     category cannot over-refuse.
+        #
+        # (b) any OTHER verdict -> classifier_unresolved is a deliberate
+        #     FAIL-CLOSED POLICY, not a proven guard block. The gate does not
+        #     claim to know the classifier's complete verdict domain; it treats
+        #     exactly two verdicts as known and refuses everything else with its
+        #     own distinct reason. That is why an unrecognised verdict is never
+        #     reported as a tripwire hit: mislabelling it would hide a classifier
+        #     contract change behind a proven-looking reason.
         #
         # SUBSET PROPERTY (scope of the claim): the bytes scanned here are the
         # SAME text later bound into the outbound composition -- stamp_context()

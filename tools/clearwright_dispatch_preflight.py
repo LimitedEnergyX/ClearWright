@@ -156,6 +156,11 @@ def production_signals(*, dispatch_lane, review_profile, artifact_count,
                              NEVER treated as authorization, and is never
                              mislabelled as a tripwire hit.
 
+    STRICT FACTS: every boolean fact must be an exact bool and artifact_count an
+    exact non-negative int. There is NO permissive coercion, so a truthy
+    non-boolean such as "false", "yes", 1 or an arbitrary object cannot become an
+    allow-shaped signal; any malformed fact fails closed as classifier_unresolved.
+
     DELIBERATELY EXCLUDED: provider readiness and credential presence. Those are
     DYNAMIC ENVIRONMENTAL conditions, not deterministic content properties: a
     dispatch may legitimately proceed through an injected or differently-resolved
@@ -176,13 +181,29 @@ def production_signals(*, dispatch_lane, review_profile, artifact_count,
     signal is treated as eligible by dispatch_eligibility, so a lane that does
     not perform a given check never acquires a new blocker from it.
     """
-    signals = {"tripwire_clear": bool(tripwire_clear),
-               "classifier_resolved": bool(classifier_resolved)}
+    # STRICT fact validation (no permissive coercion). An authoritative signal is
+    # accepted ONLY as an exact bool; a malformed or truthy non-boolean value is
+    # an unresolved state, never allow-shaped authorization. Note bool is a
+    # subclass of int, so artifact_count is checked for exact int-ness too.
+    facts = {"lineage_bound": lineage_bound,
+             "raw_provenance_standard": raw_provenance_standard,
+             "tripwire_clear": tripwire_clear,
+             "classifier_resolved": classifier_resolved}
+    malformed = [k for k, v in facts.items() if v is not True and v is not False]
+    if (type(artifact_count) is not int) or artifact_count < 0:
+        malformed.append("artifact_count")
+    if malformed:
+        # Fail closed with the DISTINCT unresolved reason. tripwire_clear is also
+        # set refusing so the outcome holds even if the check order changed.
+        return {"classifier_resolved": False, "tripwire_clear": False}
+
+    signals = {"tripwire_clear": tripwire_clear,
+               "classifier_resolved": classifier_resolved}
     if dispatch_lane == "internal_technical":
-        signals["lane_authorized"] = (int(artifact_count or 0) == 0
+        signals["lane_authorized"] = (artifact_count == 0
                                       and review_profile == "code")
-        signals["composition_bound"] = bool(lineage_bound)
-        signals["provenance_resolved"] = bool(raw_provenance_standard)
+        signals["composition_bound"] = lineage_bound
+        signals["provenance_resolved"] = raw_provenance_standard
     return signals
 
 

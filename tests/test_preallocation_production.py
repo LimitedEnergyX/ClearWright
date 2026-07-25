@@ -250,8 +250,9 @@ class PreAllocationRefusalIntegrationTest(unittest.TestCase):
         """A "hit" of ANY finding category is a tripwire refusal, because
         egress_guard.authorize() raises EgressBlocked("tripwire_hit") for a hit
         verdict over the FULL outbound bytes with NO branching on category and
-        before the sensitive-tier branch, so it applies on every lane. Unknown
-        verdicts no longer take this path; they are classifier_unresolved.
+        before the sensitive-tier branch, so it applies on every lane. That is a
+        PROVEN guard block. Unknown verdicts do NOT take this path; they are
+        classifier_unresolved under a separate fail-closed policy.
         over-refusal, because egress_guard.authorize() raises
         EgressBlocked("tripwire_hit") for any non-clear verdict over the FULL
         outbound bytes with NO branching on finding category, and before the
@@ -439,6 +440,45 @@ class PreAllocationRefusalIntegrationTest(unittest.TestCase):
         self.assertTrue(called.get("yes"))
 
 
+class StrictFactValidationTest(unittest.TestCase):
+    """Operator-authorized round-4 item 3: no permissive coercion. An
+    authoritative fact is accepted ONLY as an exact bool (or exact non-negative
+    int for artifact_count). A malformed or truthy non-boolean value must fail
+    closed as classifier_unresolved and must NEVER become allow-shaped."""
+
+    MALFORMED = ("false", "yes", "true", "", 1, 0, 1.0, [], {}, None, object())
+
+    def test_truthy_non_boolean_never_authorizes(self):
+        for bad in self.MALFORMED:
+            for key in ("tripwire_clear", "classifier_resolved",
+                        "lineage_bound", "raw_provenance_standard"):
+                s = sig(**{key: bad})
+                ok, reason = cwdp.dispatch_eligibility(s)
+                self.assertFalse(ok, "%s=%r must not authorize" % (key, bad))
+                self.assertEqual(reason, "classifier_unresolved",
+                                 "%s=%r" % (key, bad))
+
+    def test_malformed_artifact_count_fails_closed(self):
+        for bad in ("0", 1.0, -1, True, False, None, [], object()):
+            ok, reason = cwdp.dispatch_eligibility(sig(artifact_count=bad))
+            self.assertFalse(ok, "artifact_count=%r must not authorize" % (bad,))
+            self.assertEqual(reason, "classifier_unresolved")
+
+    def test_exact_booleans_still_behave_normally(self):
+        self.assertEqual(cwdp.dispatch_eligibility(sig()), (True, None))
+        self.assertEqual(cwdp.dispatch_eligibility(sig(tripwire_clear=False)),
+                         (False, "tripwire_refusal"))
+        self.assertEqual(cwdp.dispatch_eligibility(sig(classifier_resolved=False)),
+                         (False, "classifier_unresolved"))
+
+    def test_malformed_fact_emits_no_allow_shaped_signal(self):
+        s = sig(tripwire_clear="yes")
+        self.assertIs(s["classifier_resolved"], False)
+        self.assertIs(s["tripwire_clear"], False)
+        for v in s.values():
+            self.assertIsInstance(v, bool)
+
+
 class ItsLaneBlockerEndToEndTest(unittest.TestCase):
     """GPT round-1 required_changes[0]: prove the FULL production refusal path
     (no council directory entry, no reviewer attempt, one durable normalized
@@ -507,6 +547,23 @@ class ItsLaneBlockerEndToEndTest(unittest.TestCase):
         self.assertEqual(refusals[0]["normalized_reason"], "provenance_unresolved")
         self.assertEqual(refusals[0]["attempt"], 0)
         self.assertNotIn("council_id", refusals[0])
+
+    def test_artifact_and_profile_blockers_end_to_end(self):
+        """Round-4 item 2 / GPT round-3 required_changes[0]: the remaining
+        internal_technical blockers, proven on the production path."""
+        art = os.path.join(self.work, "a.md")
+        with open(art, "w", encoding="utf-8") as fh:
+            fh.write("artifact body\n")
+        payload = self._run(["--artifact", art])
+        self.assertEqual(payload.get("normalized_reason"), "policy_denial")
+        self.assertIsNone(payload.get("council_id"))
+        self.assertEqual(payload.get("attempts"), {})
+        self.assertEqual(self._councils(), 0)
+        recs = self._refusals()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["normalized_reason"], "policy_denial")
+        self.assertEqual(recs[0]["attempt"], 0)
+        self.assertEqual(recs[0]["dispatch_lane"], "internal_technical")
 
     def test_refusal_record_is_content_free(self):
         self._run()

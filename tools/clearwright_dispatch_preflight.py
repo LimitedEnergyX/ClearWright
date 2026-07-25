@@ -122,6 +122,55 @@ def dispatch_eligibility(signals):
     return (True, None)
 
 
+def production_signals(*, dispatch_lane, review_profile, artifact_count,
+                       lineage_bound, raw_provenance_standard, tripwire_clear):
+    """Derive AUTHORITATIVE pre-allocation signals from production preflight
+    outputs. Callers pass already-computed facts; this function invents nothing.
+
+    SAFETY INVARIANT: every signal here mirrors an EXISTING UNCONDITIONAL,
+    DETERMINISTIC refusal that the engine or the egress guard already performs,
+    so this check can only refuse EARLIER - never refuse something that would
+    otherwise have dispatched successfully:
+
+      - lane_authorized      mirrors run_round's internal_technical refusals of
+                             artifacts and of any non-code review profile;
+      - composition_bound    mirrors run_round's refusal of a missing lineage
+                             graph or candidate on that lane;
+      - provenance_resolved  mirrors run_round's refusal of a RAW node without
+                             STANDARD provenance on that lane;
+      - tripwire_clear       mirrors the guard's unconditional tripwire_hit block
+                             (enforced on EVERY lane). See the one-directional
+                             note below.
+
+    DELIBERATELY EXCLUDED: provider readiness and credential presence. Those are
+    DYNAMIC ENVIRONMENTAL conditions, not deterministic content properties: a
+    dispatch may legitimately proceed through an injected or differently-resolved
+    adapter, so refusing on them could newly deny a packet that would otherwise
+    dispatch. That would break the invariant above. Readiness is already gated by
+    the start-time preflight, and a genuinely absent provider still surfaces as a
+    normal reviewer_unavailable outcome.
+
+    TRIPWIRE SCOPE (one-directional, by construction): the caller can only scan
+    the packet CONTEXT, because the complete outbound byte set is not assembled
+    until after a council exists. The context is a SUBSET of those bytes, so a
+    hit on the context PROVES a hit at send (no false refusal), while a clear
+    context does NOT prove the outbound bytes are clear. This gate therefore
+    catches the common case early and never over-refuses; the egress guard
+    remains the complete and authoritative check over the exact outbound bytes.
+
+    The internal_technical-only signals are OMITTED on other lanes. An absent
+    signal is treated as eligible by dispatch_eligibility, so a lane that does
+    not perform a given check never acquires a new blocker from it.
+    """
+    signals = {"tripwire_clear": bool(tripwire_clear)}
+    if dispatch_lane == "internal_technical":
+        signals["lane_authorized"] = (int(artifact_count or 0) == 0
+                                      and review_profile == "code")
+        signals["composition_bound"] = bool(lineage_bound)
+        signals["provenance_resolved"] = bool(raw_provenance_standard)
+    return signals
+
+
 def refused_dispatch_record(*, phase, dispatch_lane, normalized_reason, detail=""):
     """A safe, durable record for a pre-allocation refusal - no council id and no
     reviewer attempt were consumed. Content-free beyond the normalized reason and

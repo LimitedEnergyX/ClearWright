@@ -560,6 +560,67 @@ def _council_body(args, phase, root, stage):
             return _emit({"ok": False, "command": "council",
                           "error": "lineage_assembly_failed",
                           "reason": exc.reason}, EXIT_HARD_GATE, args.json)
+        # ALF-0005: AUTHORITATIVE pre-allocation dispatch eligibility.
+        #
+        # Signals are computed HERE from production preflight outputs -- the
+        # lineage just assembled above, the lane resolved through the SAME single
+        # source of truth create_council uses, the registered artifacts, and the
+        # readiness preflight. Nothing caller-supplied is treated as
+        # authoritative: council["preallocation_signals"] is never read on this
+        # path, and the second check inside run_round can only ADD a refusal
+        # (dispatch_eligibility never authorizes), so a planted field cannot
+        # enable a dispatch. The egress guard still independently re-enforces
+        # every rule over the exact outbound bytes at send.
+        #
+        # A deterministic blocker refuses BEFORE create_council, so it consumes
+        # ZERO council ids and ZERO reviewer attempts, and its normalized reason
+        # is persisted to the durable invocation log.
+        import clearwright_dispatch_preflight as cwdp
+        _ds_class, _lane = cwrc.resolve_lane(_data_sensitivity(root, args.work_item_id))
+        # Track LOAD SUCCESS separately from the content's shape. Whether to scan
+        # must never depend on a TRANSFORMATION of the content: str.strip()
+        # removes Unicode whitespace and could erase tripwire-relevant characters,
+        # letting a context bypass the scan entirely.
+        try:
+            _pre_ctx = _load(args.prompt, args.context_file or args.plan_file)
+            _pre_ctx_loaded = True
+        except Exception:
+            # absent/unreadable context is handled by the existing check below
+            _pre_ctx, _pre_ctx_loaded = "", False
+        # Tripwire scope is ONE-DIRECTIONAL by construction: only the context is
+        # available before a council exists, and it is a SUBSET of the outbound
+        # bytes. A hit here PROVES a hit at send (never a false refusal); a clear
+        # context does NOT prove the outbound bytes are clear. The egress guard
+        # remains the complete authoritative check over the exact bytes.
+        _tripwire_clear = True
+        if _pre_ctx_loaded:
+            try:
+                _tripwire_clear = _egress.classify(_pre_ctx)["verdict"] == "clear"
+            except Exception:
+                # ANY classification failure fails closed, not just EgressBlocked.
+                _tripwire_clear = False
+        _raw_provenance_ok = all(
+            (_r.get("provenance") or {}).get("class") in _egress._STANDARD_PROVENANCE
+            for _r in (lineage_records or [])
+            if _r.get("classification") == _egress.CLASS_RAW)
+        _elig_ok, _elig_reason = cwdp.dispatch_eligibility(cwdp.production_signals(
+            dispatch_lane=_lane, review_profile=profile,
+            artifact_count=(len(getattr(args, "artifact", None) or [])
+                            + len(getattr(args, "artifact_id", None) or [])),
+            lineage_bound=bool(lineage_records) and _cand is not None,
+            raw_provenance_standard=_raw_provenance_ok,
+            tripwire_clear=_tripwire_clear))
+        if not _elig_ok:
+            cwrc.log_invocation(root, cwdp.refused_dispatch_record(
+                phase=phase, dispatch_lane=_lane, normalized_reason=_elig_reason,
+                detail="authoritative pre-allocation eligibility"))
+            return _emit({"ok": False, "command": "council",
+                          "error": "dispatch_ineligible", "outcome": "hard_gate",
+                          "hard_gate": True, "council_id": None, "attempts": {},
+                          "normalized_reason": _elig_reason,
+                          "reason": "deterministic dispatch blocker refused before "
+                                    "allocation: " + _elig_reason},
+                         EXIT_HARD_GATE, args.json)
         try:
             council = cwrc.create_council(
                 root, thread_id=args.thread_id, work_item_id=args.work_item_id,

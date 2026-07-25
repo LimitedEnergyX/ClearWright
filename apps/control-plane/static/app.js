@@ -1604,41 +1604,12 @@ function restoreActiveSelection() {
     return;
   }
   if (deep) {
-    // An explicit deep link always wins. It is applied on load BEFORE the work
-    // queue has been fetched, so the durable thread id could not be resolved at
-    // that point; bind it now that the queue is known. Without this the
-    // conversation stays empty and the composer shows no thread.
-    const wid = deep.work_item_id;
-    const known = items.find((it) => it.work_item_id === wid);
-    if (!known) {
-      // A stale or unavailable deep link must not leave a selected work item
-      // with no queue-backed identity. Clear the selection UNCONDITIONALLY --
-      // announcing "nothing is selected" while some other prior selection
-      // survived would be a false statement -- drop the route so a reload does
-      // not repeat this, and say what happened.
-      selectTask(null);
-      persistSelection(null);
-      clearWorkRoute();
-      showRestoreStatus('Work item "' + wid + '" is not in the live queue. ' +
-                        "The link may be stale, so nothing is selected.");
-      return;
-    }
-    if (known.thread_id && selectedWorkItemId === wid && !selectedConvThread) {
-      selectTask(known.thread_id, wid);
-    }
-    // POLICY, stated explicitly because both reviewers asked. An EXPLICIT link
-    // may open a terminal item, because reviewing finished work is the point of
-    // sharing a link. That is inspection, NOT active-session restoration: it is
-    // never persisted as the active selection, so the next refresh restores
-    // real active work rather than reopening finished work. Automatic
-    // restoration (stored selection and fallback ranking) still excludes
-    // terminal items entirely.
-    if (!isActiveItem(known)) {
-      persistSelection(null);
-      showRestoreStatus("Opened " + activeStateOf(known).replace(/_/g, " ") +
-                        " work item for inspection. It is not active, so it " +
-                        "will not be restored on the next refresh.");
-    }
+    // An explicit deep link always wins. It is applied at boot BEFORE the queue
+    // is fetched, so the durable thread could not be resolved then; the queue is
+    // known now. Route handling goes through the SAME single policy as the
+    // hashchange path -- validate against the live queue, clear an unknown
+    // route, never persist a terminal item -- so the two cannot drift.
+    bindRouteSelection(deep.work_item_id);
     return;
   }
   const stored = readPersistedSelection();
@@ -1687,10 +1658,52 @@ function clearWorkRoute() {
   }
 }
 
+// ONE place where a route becomes a selection, so queue validation and the
+// terminal-item policy cannot diverge between the boot path and the hashchange
+// path. Returns true when a selection was bound, false when the route was
+// rejected, and null when the queue is not loaded yet (boot), in which case
+// restoreActiveSelection() validates once it is.
+function bindRouteSelection(wid) {
+  const items = lastWorkItems || [];
+  if (!items.length) return null;
+  const known = items.find((it) => it.work_item_id === wid);
+  if (!known) {
+    // Queue-unbacked: clear unconditionally, drop the route so a reload does
+    // not repeat it, and say so.
+    selectTask(null);
+    persistSelection(null);
+    clearWorkRoute();
+    routeErrorReported = true;
+    showRestoreStatus('Work item "' + wid + '" is not in the live queue. ' +
+                      "The link may be stale, so nothing is selected.");
+    return false;
+  }
+  selectTask(known.thread_id || null, wid);
+  // A route that resolves is a successful navigation: any earlier route
+  // explanation is now obsolete and must not outlive it.
+  routeErrorReported = false;
+  // POLICY, applied on EVERY route path. An EXPLICIT link may open a terminal
+  // item, because reviewing finished work is the point of sharing a link. That
+  // is inspection, NOT active-session restoration: it is never persisted, so
+  // the next refresh restores real active work instead of reopening finished
+  // work. Automatic restoration still excludes terminal items entirely.
+  if (!isActiveItem(known)) {
+    persistSelection(null);
+    showRestoreStatus("Opened " + (activeStateOf(known) || "inactive").replace(/_/g, " ") +
+                      " work item for inspection. It is not active, so it " +
+                      "will not be restored on the next refresh.");
+  } else {
+    clearTransientRestoreStatus();
+  }
+  return true;
+}
+
 // Deterministic hash route: #work=<work_item_id>[&msg=<message_id>]. The
 // highlight message id is derived from the work item id itself (a message work
 // item id IS "message:" + message_id) -- no message search, no ambiguity.
 function navigateToWorkItem(workItemId) {
+  // Deliberate navigation: an earlier malformed-link explanation is obsolete.
+  routeErrorReported = false;
   const msgId = workItemId && workItemId.indexOf("message:") === 0
     ? workItemId.slice("message:".length) : "";
   location.hash = "#work=" + encodeURIComponent(workItemId) +
@@ -1854,11 +1867,20 @@ function applyWorkHashRoute() {
     // "nothing is selected" would be false a moment later.
     routeErrorReported = true;
     showRestoreStatus("That link could not be read, so it was removed. " +
-                      "Restoring your active work instead.");
+                      "Showing your highest-priority active work instead.");
     return;
   }
-  const known = (lastWorkItems || []).find((it) => it.work_item_id === route.work_item_id);
-  selectTask(known ? known.thread_id || null : null, route.work_item_id);
+  // Validate here too. This function is also the hashchange path, so without
+  // it a post-boot link could select and persist an unknown or terminal item
+  // with no restoration pass following to correct it.
+  const bound = bindRouteSelection(route.work_item_id);
+  if (bound === false) return;
+  if (bound === null) {
+    // Queue not loaded yet (boot). Bind provisionally; restoreActiveSelection()
+    // validates against the live queue as soon as it arrives.
+    const known = (lastWorkItems || []).find((it) => it.work_item_id === route.work_item_id);
+    selectTask(known ? known.thread_id || null : null, route.work_item_id);
+  }
   showView("work");
   if (route.message_id) {
     setTimeout(() => highlightMessage(route.message_id), 200);

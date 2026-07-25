@@ -319,6 +319,92 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
 }
 
 // --------------------------------------------------------------------------
+// 2e. HASHCHANGE, not just boot. applyWorkHashRoute() is also the hashchange
+//     path, so route validation and the terminal policy must hold there too.
+//     Previously both lived only in restoreActiveSelection(), so a post-boot
+//     link could bind and PERSIST an unknown or terminal item with no
+//     restoration pass following to correct it.
+// --------------------------------------------------------------------------
+{
+  // Unknown item, queue already loaded (the hashchange case).
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "#work=message%3Amsg-ghost", ["conv-scroll", "conversation"]);
+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-real", thread_id: "thr-real",' +
+              ' presentation_state: "needs_operator" }];');
+  ctx.applyWorkHashRoute();
+  ok(evalIn(ctx, "selectedWorkItemId") === null,
+     "a hashchange to an unknown item leaves no queue-unbacked selection");
+  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === null,
+     "a hashchange to an unknown item persists nothing");
+  ok(reg["restore-status"].textContent.indexOf("not in the live queue") !== -1,
+     "the unknown hashchange route is explained");
+}
+
+{
+  // Terminal item, queue already loaded: openable, but never persisted.
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "#work=message%3Amsg-done", ["conv-scroll", "conversation"]);
+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-done", thread_id: "thr-done",' +
+              ' presentation_state: "recently_completed" }];');
+  ctx.applyWorkHashRoute();
+  ok(evalIn(ctx, "selectedWorkItemId") === "message:msg-done",
+     "an explicit link may OPEN a terminal item for inspection");
+  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === null,
+     "a terminal item is never persisted as the active selection");
+  ok(reg["restore-status"].textContent.indexOf("inspection") !== -1,
+     "the inspection-only status is explained");
+}
+
+{
+  // Active item, queue already loaded: bound and persisted normally.
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "#work=message%3Amsg-live", ["conv-scroll", "conversation"]);
+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
+              ' presentation_state: "needs_operator" }];');
+  ctx.applyWorkHashRoute();
+  eq([evalIn(ctx, "selectedWorkItemId"), evalIn(ctx, "selectedConvThread")],
+     ["message:msg-live", "thr-live"],
+     "an active route binds the item and its durable thread");
+  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === "message:msg-live",
+     "an active route IS persisted");
+}
+
+// 2f. The route-error latch must not outlive the error.
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
+              ' presentation_state: "needs_operator" }];');
+  ctx.applyWorkHashRoute();                       // reports a malformed route
+  ok(evalIn(ctx, "routeErrorReported") === true, "a malformed route latches the explanation");
+  ctx.clearTransientRestoreStatus();
+  ok(reg["restore-status"].hidden === false, "and it survives the boot success path");
+
+  // A later VALID route is a successful navigation: the stale explanation goes.
+  ctx.location.hash = "#work=message%3Amsg-live";
+  ctx.applyWorkHashRoute();
+  ok(evalIn(ctx, "routeErrorReported") === false,
+     "a successful route resets the latch (was one-way before)");
+  ctx.showRestoreStatus("transient");
+  ctx.clearTransientRestoreStatus();
+  ok(reg["restore-status"].hidden === true,
+     "transient statuses are clearable again after recovery");
+}
+
+{
+  // Deliberate operator navigation also supersedes a stale explanation.
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
+              ' presentation_state: "needs_operator" }];');
+  ctx.applyWorkHashRoute();
+  ok(evalIn(ctx, "routeErrorReported") === true, "latched after a malformed route");
+  ctx.navigateToWorkItem("message:msg-live");
+  ok(evalIn(ctx, "routeErrorReported") === false,
+     "explicit navigation clears the stale route explanation");
+}
+
+// --------------------------------------------------------------------------
 // 3. Ranking: every ranked bucket reachable, unknown last, deterministic ties.
 // --------------------------------------------------------------------------
 {

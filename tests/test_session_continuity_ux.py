@@ -330,7 +330,57 @@ class RouteErrorPersistenceTest(unittest.TestCase):
         # which legitimately quotes the phrase being avoided.
         call = branch[branch.index("showRestoreStatus("):]
         self.assertNotIn("nothing is selected", call)
-        self.assertIn("Restoring your active work instead", call)
+        self.assertIn("highest-priority active work", call,
+                      "the message must not promise the operator's previous item: "
+                      "the persisted selection is cleared before restoration runs")
+
+
+class UnifiedRoutePolicyTest(unittest.TestCase):
+    """Validation and the terminal policy must hold on EVERY route path.
+
+    applyWorkHashRoute() is also the hashchange handler. With the policy living
+    only in restoreActiveSelection(), a post-boot link could bind and persist an
+    unknown or terminal item with no restoration pass following to correct it.
+    """
+
+    def test_one_shared_policy_function_exists(self):
+        self.assertIn("function bindRouteSelection", APP)
+
+    def test_the_hashchange_path_validates(self):
+        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("bindRouteSelection(route.work_item_id)", m.group(0))
+
+    def test_restoration_uses_the_same_policy_not_a_copy(self):
+        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("bindRouteSelection(deep.work_item_id)", body)
+        # The duplicated policy must be gone, or the two can drift again.
+        self.assertNotIn("will not be restored on the next refresh", body)
+
+    def test_the_policy_persists_nothing_terminal(self):
+        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("if (!isActiveItem(known))", body)
+        self.assertIn("persistSelection(null)", body.split("if (!isActiveItem(known))")[1][:300])
+
+    def test_an_unknown_route_is_cleared_on_every_path(self):
+        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
+        branch = m.group(0).split("if (!known)")[1][:500]
+        for expected in ("selectTask(null);", "persistSelection(null);", "clearWorkRoute();"):
+            self.assertIn(expected, branch)
+
+
+class RouteErrorLatchTest(unittest.TestCase):
+    """Both reviewers flagged the one-way latch: a reported route error must
+    not suppress every later transient status for the page lifetime."""
+
+    def test_a_successful_route_resets_the_latch(self):
+        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("routeErrorReported = false;", m.group(0))
+
+    def test_explicit_navigation_resets_the_latch(self):
+        m = re.search(r"function navigateToWorkItem[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("routeErrorReported = false;", m.group(0))
 
 
 class EmptyRouteTest(unittest.TestCase):
@@ -349,14 +399,16 @@ class StaleRouteClearingTest(unittest.TestCase):
         self.assertIn("function clearWorkRoute", APP)
         m = re.search(r"function clearWorkRoute[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("replaceState", m.group(0))
-        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
-        self.assertIn("clearWorkRoute()", r.group(0))
+        for fn in ("restoreActiveSelection", "bindRouteSelection"):
+            m2 = re.search(r"function " + fn + r"[\s\S]{0,4000}?\n\}", APP)
+            self.assertIn("clearWorkRoute()", m2.group(0),
+                          fn + " must drop an unusable route")
 
     def test_selection_is_cleared_unconditionally(self):
         """A conditional clear could announce 'nothing is selected' while a
         different prior selection survived."""
-        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
-        unknown = r.group(0).split("if (!known)")[1][:400]
+        r = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
+        unknown = r.group(0).split("if (!known)")[1][:500]
         self.assertIn("selectTask(null);", unknown)
         self.assertNotIn("selectedWorkItemId === wid", unknown)
 
@@ -371,7 +423,7 @@ class DeepLinkPolicyTest(unittest.TestCase):
     """
 
     def test_terminal_deep_link_is_not_persisted_as_active(self):
-        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        r = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
         body = r.group(0)
         self.assertIn("if (!isActiveItem(known))", body)
         tail = body.split("if (!isActiveItem(known))")[1][:400]
@@ -379,7 +431,7 @@ class DeepLinkPolicyTest(unittest.TestCase):
         self.assertIn("showRestoreStatus", tail)
 
     def test_the_policy_is_documented_where_it_is_enforced(self):
-        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        r = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("POLICY", r.group(0))
 
     def test_automatic_restoration_still_excludes_terminal_items(self):
@@ -456,14 +508,16 @@ class StaleDeepLinkTest(unittest.TestCase):
     queue-backed identity."""
 
     def test_unknown_deep_link_clears_the_selection(self):
-        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        """The policy now lives in bindRouteSelection(), shared by the boot and
+        hashchange paths, so it is asserted where it is implemented."""
+        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn("if (!known)", body)
         self.assertIn("selectTask(null)", body)
         self.assertIn("persistSelection(null)", body)
 
     def test_unknown_deep_link_is_reported_not_silent(self):
-        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        m = re.search(r"function bindRouteSelection[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("showRestoreStatus", m.group(0))
 
 

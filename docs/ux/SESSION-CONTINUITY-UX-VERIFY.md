@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   789f0f4b244e056da41c2b323e6695eadee9c031
+HEAD (bytes under review):   dfb88391803f4fb4c91640e4e87ca8e361d72d8b
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -66,18 +66,114 @@ were then added to pin each corrected contract.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       153437  249b3d3773246de8f30078e791b9c855626720c0a31957bb4c28e8da2dc60a6b
+  apps/control-plane/static/app.js                       155986  798ecb29c4f8675c98925059fbc16a43b6f56d9ebb93d2d7b79b12abfc07093b
   apps/control-plane/static/index.html                    22153  336d1c97639ac69f8cbbac53f7919ffc1fb815da28c1c4f90175c5b55bc86179
   apps/control-plane/static/style.css                     52456  51d02fb9466c43a80f5d760a1e613dc0397acb0220fd3f91ffc4c3a1f5ece09f
-  tests/test_session_continuity_ux.py                     27802  fcd7ec9460bdf7c90c22e1ce6b6fe14f238c5ad9b24ed232e0f8f0e4bb05ab52
+  tests/dom/session_ux_runtime.mjs                        14674  8ff97685eae84a31efe0112dc16749b866c828bdf5fcd1eb997020b7563dc980
+  tests/test_session_continuity_ux.py                     33907  21c181fb05da953a8f3cfb723eacc390bd92158db17f7023e083848d1c8f45e6
+  tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 511 ++++++++++++++++++++++++++++-
- apps/control-plane/static/index.html |  42 ++-
- apps/control-plane/static/style.css  | 101 ++++++
- tests/test_session_continuity_ux.py  | 614 +++++++++++++++++++++++++++++++++++
- 4 files changed, 1245 insertions(+), 23 deletions(-)
+ apps/control-plane/static/app.js     | 584 ++++++++++++++++++++++++++-
+ apps/control-plane/static/index.html |  42 +-
+ apps/control-plane/static/style.css  | 101 +++++
+ tests/dom/session_ux_runtime.mjs     | 340 ++++++++++++++++
+ tests/test_session_continuity_ux.py  | 745 +++++++++++++++++++++++++++++++++++
+ tests/test_session_ux_runtime.py     |  40 ++
+ 6 files changed, 1823 insertions(+), 29 deletions(-)
+
+SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
+----------------------------------------------------------------------
+These files are NOT modified by this change. They are quoted because the
+review asked, correctly, how the claims above can be checked.
+
+  apps/control-plane/server.py lines 348-385  -- the pair-validation this UI change relies on for destination integrity
+        driver: it builds and writes through clearwright_message, the same code
+        path the CLI uses. On respond, a thread_id is required and the message
+        defaults to an outbound response.
+    
+        Target integrity: when both thread_id and work_item_id are supplied they
+        must already be bound together in the durable record (an existing message
+        in that thread carrying that work_item_id); a mismatched pair is refused
+        rather than silently creating a cross-target record.
+    
+        Idempotency: an optional idempotency_key makes a retried POST safe --
+        an exact repeat (same thread, key, target, and canonical content) returns
+        the ORIGINAL message id, never a duplicate; a reused key with different
+        content or target is refused as a conflict.
+    
+        Returns a result dict with an ``error_code`` the HTTP layer maps to the
+        matching status (413 too large, 409 idempotency conflict, 400 otherwise)."""
+        fields = payload if isinstance(payload, dict) else {}
+        thread_id = fields.get("thread_id")
+        work_item_id = fields.get("work_item_id")
+        if respond and not (thread_id and str(thread_id).strip()):
+            return {"ok": False, "error": "respond requires a thread_id"}
+        if thread_id and work_item_id:
+            bound = any(m.get("work_item_id") == work_item_id
+                        for m in cwm.read_messages(root, thread_id=thread_id))
+            if not bound:
+                return {"ok": False, "error": "thread_id and work_item_id are not "
+                        "bound together in the durable record",
+                        "error_code": "target_mismatch"}
+        direction = fields.get("direction") or ("outbound" if respond else cwm.DEFAULT_DIRECTION)
+        status = fields.get("status") or ("responded" if respond else cwm.DEFAULT_STATUS)
+        try:
+            message = cwm.build_message(
+                fields.get("actor"), fields.get("message"),
+                role=fields.get("role") or cwm.DEFAULT_ROLE,
+                packet_id=fields.get("packet_id"),
+                thread_id=thread_id,
+                direction=direction,
+                status=status,
+
+  tools/clearwright_work.py lines 311-342  -- the TOTAL, mutually-exclusive value domain of presentation_state
+    def presentation_state(signals, now=None):
+        """The ONE ordered, total, mutually-exclusive presentation-state function
+        (section 1). Pure: identical `signals` -> identical result, no writes.
+        `signals` keys: status, kind, needs_operator, blocked, awaiting_operator,
+        claimed, active_runner, last_activity_at, created_at."""
+        now_dt = _now_dt(now)
+        status = signals.get("status")
+        age = _age_seconds(signals.get("last_activity_at"),
+                           signals.get("created_at"), now_dt)
+        # 1-2: terminal states first, so a terminal item is never pulled into
+        # Current by needs_operator/blocked.
+        if status == "superseded":
+            return "superseded"
+        if status in ("done", "closed"):
+            return "recently_completed" if age <= RECENT_WINDOW else "historical"
+        # 3-8: non-terminal only.
+        if signals.get("needs_operator"):
+            return "needs_operator"
+        if signals.get("blocked"):
+            return "blocked"
+        if signals.get("awaiting_operator"):
+            return "waiting_on_operator"
+        if signals.get("claimed"):
+            if signals.get("active_runner"):
+                return "running"
+            return "waiting_on_claude" if age <= STALE_WINDOW else "stale"
+        if age > STALE_WINDOW:
+            return "stale"
+        return "waiting_on_claude"
+    
+    
+    def in_default_view(item):
+
+Consequences, stated so they can be checked against the quoted source:
+  * The server refuses a thread_id/work_item_id pair that is not durably
+    bound. It can only apply when BOTH are supplied, which is exactly why
+    a work_item_id with no thread is now refused in the UI instead of
+    being sent as an unverifiable target.
+  * presentation_state is a total, ordered, mutually-exclusive function
+    with nine possible values: superseded, recently_completed, historical
+    (terminal), and needs_operator, blocked, waiting_on_operator, running,
+    waiting_on_claude, stale. INACTIVE_STATES covers every terminal value.
+    waiting_on_claude has no dedicated rank: it resolves to claimed when a
+    claimant exists and otherwise to the empty string, which sorts last.
+    That is the intended unknown-state behaviour, not an omission.
 
 REVIEW QUESTIONS
 ----------------------------------------------------------------------
@@ -95,7 +191,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..bcf7a9b 100644
+index dd2d10c..dea7adb 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -211,7 +307,7 @@ index dd2d10c..bcf7a9b 100644
      "</div>";
  }
  
-@@ -1290,6 +1345,286 @@ function openAttention() {
+@@ -1290,6 +1345,341 @@ function openAttention() {
    }
  }
  
@@ -463,26 +559,49 @@ index dd2d10c..bcf7a9b 100644
 +// legitimate because there is genuinely no active work.
 +function restoreActiveSelection() {
 +  const items = lastWorkItems || [];
-+  const deep = /[#&]work=([^&]+)/.exec(location.hash || "");
++  const deep = parseWorkRoute(location.hash);
++  if (deep && deep.malformed) {
++    clearWorkRoute();
++    selectTask(null);
++    persistSelection(null);
++    showRestoreStatus("That link could not be read, so nothing is selected.");
++    return;
++  }
 +  if (deep) {
 +    // An explicit deep link always wins. It is applied on load BEFORE the work
 +    // queue has been fetched, so the durable thread id could not be resolved at
 +    // that point; bind it now that the queue is known. Without this the
 +    // conversation stays empty and the composer shows no thread.
-+    const wid = decodeURIComponent(deep[1]);
++    const wid = deep.work_item_id;
 +    const known = items.find((it) => it.work_item_id === wid);
 +    if (!known) {
-+      // A malformed, stale, or unavailable deep link must not leave a selected
-+      // work item with no queue-backed identity. Clear it, say so, and do not
-+      // persist it as the active selection.
-+      if (selectedWorkItemId === wid) selectTask(null);
++      // A stale or unavailable deep link must not leave a selected work item
++      // with no queue-backed identity. Clear the selection UNCONDITIONALLY --
++      // announcing "nothing is selected" while some other prior selection
++      // survived would be a false statement -- drop the route so a reload does
++      // not repeat this, and say what happened.
++      selectTask(null);
 +      persistSelection(null);
++      clearWorkRoute();
 +      showRestoreStatus('Work item "' + wid + '" is not in the live queue. ' +
 +                        "The link may be stale, so nothing is selected.");
 +      return;
 +    }
 +    if (known.thread_id && selectedWorkItemId === wid && !selectedConvThread) {
 +      selectTask(known.thread_id, wid);
++    }
++    // POLICY, stated explicitly because both reviewers asked. An EXPLICIT link
++    // may open a terminal item, because reviewing finished work is the point of
++    // sharing a link. That is inspection, NOT active-session restoration: it is
++    // never persisted as the active selection, so the next refresh restores
++    // real active work rather than reopening finished work. Automatic
++    // restoration (stored selection and fallback ranking) still excludes
++    // terminal items entirely.
++    if (!isActiveItem(known)) {
++      persistSelection(null);
++      showRestoreStatus("Opened " + activeStateOf(known).replace(/_/g, " ") +
++                        " work item for inspection. It is not active, so it " +
++                        "will not be restored on the next refresh.");
 +    }
 +    return;
 +  }
@@ -495,10 +614,42 @@ index dd2d10c..bcf7a9b 100644
 +  navigateToWorkItem(target.work_item_id);
 +}
 +
++// ONE parser for the work route, shared by boot and restoration so malformed
++// input is handled identically in both. decodeURIComponent() raises URIError on
++// malformed percent-encoding; an unguarded call at boot aborts wire() before
++// initJumpToLatest(), restoration and the refresh timers are installed, so a
++// single bad URL would disable the console instead of being reported.
++function parseWorkRoute(hash) {
++  const m = /[#&]work=([^&]+)/.exec(hash || "");
++  if (!m) return null;
++  let wid;
++  try {
++    wid = decodeURIComponent(m[1]);
++  } catch (e) {
++    return { malformed: true, work_item_id: null, message_id: null };
++  }
++  let msg = null;
++  const mm = /[#&]msg=([^&]+)/.exec(hash || "");
++  if (mm) {
++    try { msg = decodeURIComponent(mm[1]); } catch (e) { msg = null; }
++  }
++  return { malformed: false, work_item_id: wid, message_id: msg };
++}
++
++// Remove an invalid route so a reload does not repeat the same failure. Falls
++// back to assigning the hash when history is unavailable.
++function clearWorkRoute() {
++  try {
++    history.replaceState(null, "", location.pathname + location.search);
++  } catch (e) {
++    try { location.hash = ""; } catch (e2) { /* nothing further to do */ }
++  }
++}
++
  // Deterministic hash route: #work=<work_item_id>[&msg=<message_id>]. The
  // highlight message id is derived from the work item id itself (a message work
  // item id IS "message:" + message_id) -- no message search, no ambiguity.
-@@ -1298,9 +1633,124 @@ function navigateToWorkItem(workItemId) {
+@@ -1298,9 +1688,124 @@ function navigateToWorkItem(workItemId) {
      ? workItemId.slice("message:".length) : "";
    location.hash = "#work=" + encodeURIComponent(workItemId) +
      (msgId ? "&msg=" + encodeURIComponent(msgId) : "");
@@ -624,17 +775,36 @@ index dd2d10c..bcf7a9b 100644
  }
  
  function highlightMessage(messageId) {
-@@ -1321,7 +1771,8 @@ function applyWorkHashRoute() {
-   const m = /[#&]work=([^&]+)/.exec(h);
-   if (!m) return;
-   const wid = decodeURIComponent(m[1]);
+@@ -1317,14 +1822,21 @@ function highlightMessage(messageId) {
+ 
+ // Apply a #work=...&msg=... route on load / hashchange (navigation only).
+ function applyWorkHashRoute() {
+-  const h = location.hash || "";
+-  const m = /[#&]work=([^&]+)/.exec(h);
+-  if (!m) return;
+-  const wid = decodeURIComponent(m[1]);
 -  selectTask(null, wid);
-+  const known = (lastWorkItems || []).find((it) => it.work_item_id === wid);
-+  selectTask(known ? known.thread_id || null : null, wid);
++  const route = parseWorkRoute(location.hash);
++  if (!route) return;
++  if (route.malformed) {
++    // Never throw out of boot. Drop the unusable route and report it once the
++    // status element exists; restoration then proceeds normally.
++    clearWorkRoute();
++    showRestoreStatus("That link could not be read, so nothing is selected.");
++    return;
++  }
++  const known = (lastWorkItems || []).find((it) => it.work_item_id === route.work_item_id);
++  selectTask(known ? known.thread_id || null : null, route.work_item_id);
    showView("work");
-   const mm = /[#&]msg=([^&]+)/.exec(h);
-   if (mm) setTimeout(() => highlightMessage(decodeURIComponent(mm[1])), 200);
-@@ -1837,7 +2288,8 @@ function buildConversationTab(run) {
+-  const mm = /[#&]msg=([^&]+)/.exec(h);
+-  if (mm) setTimeout(() => highlightMessage(decodeURIComponent(mm[1])), 200);
++  if (route.message_id) {
++    setTimeout(() => highlightMessage(route.message_id), 200);
++  }
+ }
+ 
+ async function refreshWorkItems() {
+@@ -1837,7 +2349,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -644,7 +814,7 @@ index dd2d10c..bcf7a9b 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +2587,23 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +2648,23 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -668,7 +838,7 @@ index dd2d10c..bcf7a9b 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2786,9 +3255,12 @@ function toggleToolLog() {
+@@ -2786,9 +3316,12 @@ function toggleToolLog() {
  function selectTask(threadId, workItemId) {
    selectedConvThread = threadId || null;
    selectedWorkItemId = workItemId || null;
@@ -681,7 +851,7 @@ index dd2d10c..bcf7a9b 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2886,6 +3358,10 @@ function wire() {
+@@ -2886,6 +3419,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -692,7 +862,7 @@ index dd2d10c..bcf7a9b 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +3473,19 @@ function wire() {
+@@ -2997,6 +3534,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -898,12 +1068,358 @@ index ac13c95..44a614a 100644
 +  color: var(--warn, #d08a00);
 +  font-weight: 700;
 +}
+diff --git a/tests/dom/session_ux_runtime.mjs b/tests/dom/session_ux_runtime.mjs
+new file mode 100644
+index 0000000..b427d50
+--- /dev/null
++++ b/tests/dom/session_ux_runtime.mjs
+@@ -0,0 +1,340 @@
++/*
++ * Runtime coverage for the session-continuity UX logic.
++ *
++ * Both reviewers correctly observed that static assertions over app.js cannot
++ * catch the defects that actually occurred in this slice: a scroll listener
++ * bound to an element that never scrolls, a rank bucket nothing can produce,
++ * and a target shape the server cannot validate. This harness EXECUTES the real
++ * app.js against a controllable DOM stub and asserts behaviour.
++ *
++ * Deliberately dependency-free: no package.json, no npm install, no browser. It
++ * runs on the Node already present in CI.
++ *
++ * STATED LIMITATION, so this is not read as more than it is: the stub supplies
++ * scroll geometry rather than computing layout, so it proves the DECISION LOGIC
++ * given a geometry, not that a real browser produces that geometry. The
++ * geometry used below is the one observed in the running console (a
++ * non-scrolling #conv-detail inside a scrolling page), which is exactly the
++ * case that made the feature inert.
++ */
++import fs from "node:fs";
++import path from "node:path";
++import vm from "node:vm";
++import { fileURLToPath } from "node:url";
++
++const HERE = path.dirname(fileURLToPath(import.meta.url));
++const APP = path.join(HERE, "..", "..", "apps", "control-plane", "static", "app.js");
++
++let failures = 0;
++let checks = 0;
++
++function ok(cond, label) {
++  checks += 1;
++  if (!cond) {
++    failures += 1;
++    console.error("FAIL: " + label);
++  }
++}
++
++function eq(actual, expected, label) {
++  ok(JSON.stringify(actual) === JSON.stringify(expected),
++     label + "  (got " + JSON.stringify(actual) + ", want " + JSON.stringify(expected) + ")");
++}
++
++// --------------------------------------------------------------------------
++// Minimal DOM stub. Only what app.js touches at load plus the elements the
++// functions under test read. Elements report the geometry we give them.
++// --------------------------------------------------------------------------
++function makeEl(id, opts) {
++  const o = opts || {};
++  const el = {
++    id: id,
++    hidden: o.hidden === undefined ? false : o.hidden,
++    scrollTop: o.scrollTop || 0,
++    scrollHeight: o.scrollHeight || 0,
++    clientHeight: o.clientHeight || 0,
++    style: {},
++    _overflowY: o.overflowY || "visible",
++    parentElement: null,
++    children: [],
++    classList: {
++      _s: new Set(),
++      add(c) { this._s.add(c); },
++      remove(c) { this._s.delete(c); },
++      toggle(c, on) { if (on) this._s.add(c); else this._s.delete(c); },
++      contains(c) { return this._s.has(c); },
++    },
++    _attrs: {},
++    setAttribute(k, v) { this._attrs[k] = String(v); },
++    getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; },
++    hasAttribute(k) { return k in this._attrs; },
++    removeAttribute(k) { delete this._attrs[k]; },
++    addEventListener(type, fn) { (this._ev = this._ev || {})[type] = fn; },
++    removeEventListener() {},
++    appendChild(c) { this.children.push(c); c.parentElement = this; return c; },
++    removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; },
++    querySelector() { return null; },
++    querySelectorAll() { return []; },
++    contains() { return false; },
++    focus() {},
++    insertBefore(c) { this.children.push(c); return c; },
++    remove() {},
++    closest() { return null; },
++    matches() { return false; },
++    dataset: {},
++    value: "",
++    disabled: false,
++    tabIndex: 0,
++    inert: false,
++    checked: false,
++    options: [],
++    reportValidity() { return true; },
++    setCustomValidity() {},
++    click() { if (this._ev && this._ev.click) this._ev.click({}); },
++    scrollIntoView() {},
++    get textContent() { return this._text || ""; },
++    set textContent(v) { this._text = v; this.children = []; },
++    get innerHTML() { return this._html || ""; },
++    set innerHTML(v) { this._html = v; },
++  };
++  return el;
++}
++
++function buildContext(registry, hash, absent) {
++  const missing = new Set(absent || []);
++  const doc = {
++    _els: registry,
++    // Auto-vivify unknown ids so unrelated render paths cannot null-deref and
++    // mask the behaviour under test. Ids in `absent` stay genuinely missing so
++    // fallback chains (e.g. #conv-scroll -> #conv-detail) are exercised.
++    getElementById(id) {
++      if (missing.has(id)) return null;
++      if (!registry[id]) registry[id] = makeEl(id);
++      return registry[id];
++    },
++    createElement(tag) { return makeEl("<" + tag + ">"); },
++    createTextNode(t) { return { nodeValue: t }; },
++    querySelector() { return null; },
++    querySelectorAll() { return []; },
++    addEventListener() {},
++    body: makeEl("body"),
++    documentElement: makeEl("html"),
++    scrollingElement: registry.__page,
++  };
++  const ctx = {
++    console,
++    document: doc,
++    location: { hash: hash || "", pathname: "/", search: "", href: "http://x/" },
++    history: { replaceState(_a, _b, _c) { ctx.location.hash = ""; } },
++    localStorage: {
++      _m: {},
++      getItem(k) { return k in this._m ? this._m[k] : null; },
++      setItem(k, v) { this._m[k] = String(v); },
++      removeItem(k) { delete this._m[k]; },
++    },
++    getComputedStyle(el) { return { overflowY: el._overflowY || "visible", textTransform: "none" }; },
++    MutationObserver: function (fn) { this._fn = fn; this.observe = () => {}; this.disconnect = () => {}; },
++    HTMLElement: { prototype: { inert: true } },
++    setTimeout() { return 0; },
++    setInterval() { return 0; },
++    clearTimeout() {},
++    fetch() { return Promise.resolve({ ok: true, json: () => Promise.resolve({}) }); },
++    CSS: { escape: (s) => s },
++    Node: function () {},
++  };
++  ctx.window = ctx;
++  ctx.globalThis = ctx;
++  return ctx;
++}
++
++// app.js keeps its state in top-level let/const, which in a vm context lives in
++// the script's lexical scope rather than on the context object. Reading or
++// assigning ctx.<name> would silently address a DIFFERENT binding, so all state
++// access goes through the context's own scope.
++function evalIn(ctx, code) {
++  return vm.runInContext(code, ctx);
++}
++
++function loadApp(registry, hash, absent) {
++  let src = fs.readFileSync(APP, "utf8");
++  // Drop the boot invocation: this harness exercises the module's functions
++  // directly rather than starting the whole console.
++  src = src.replace(/\nwire\(\);\s*\nrefresh\(\);\s*$/, "\n");
++  if (/\nwire\(\);/.test(src)) {
++    throw new Error("boot invocation still present after stripping");
++  }
++  const ctx = buildContext(registry, hash, absent);
++  vm.createContext(ctx);
++  vm.runInContext(src, ctx, { filename: "app.js" });
++  return ctx;
++}
++
++function baseRegistry() {
++  // The geometry observed in the running console: #conv-detail does NOT scroll
++  // (overflow visible, scrollHeight === clientHeight); the page does.
++  const page = makeEl("__page", { scrollHeight: 2000, clientHeight: 800, scrollTop: 0 });
++  const conv = makeEl("conv-detail", { scrollHeight: 634, clientHeight: 634, overflowY: "visible" });
++  const reg = {
++    __page: page,
++    "conv-detail": conv,
++    "jump-to-latest": makeEl("jump-to-latest", { hidden: true }),
++    "restore-status": makeEl("restore-status", { hidden: true }),
++    "session-rail": makeEl("session-rail", { hidden: true }),
++    "composer-card": makeEl("composer-card"),
++    "conv-banner": makeEl("conv-banner"),
++    "operator-chat-input": makeEl("operator-chat-input"),
++  };
++  return reg;
++}
++
++// --------------------------------------------------------------------------
++// 1. The scroll target must be the element that ACTUALLY scrolls.
++//    This is the defect that made Jump to latest inert twice.
++// --------------------------------------------------------------------------
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
++  const scroller = ctx.conversationScrollEl();
++  ok(scroller !== reg["conv-detail"],
++     "conversationScrollEl must not return the non-scrolling conversation container");
++  ok(scroller === reg.__page,
++     "conversationScrollEl falls back to the page when no ancestor scrolls");
++
++  // With the page scrolled to the top, the operator IS away from the newest
++  // message; at the bottom they are not.
++  reg.__page.scrollTop = 0;
++  ok(ctx.operatorMovedAwayFromLatest(scroller) === true,
++     "scrolled to top counts as deliberately away from latest");
++  reg.__page.scrollTop = reg.__page.scrollHeight - reg.__page.clientHeight;
++  ok(ctx.operatorMovedAwayFromLatest(scroller) === false,
++     "at the bottom the operator is not away from latest");
++
++  // Had the old code been kept, this is what it would have reported.
++  ok(ctx.operatorMovedAwayFromLatest(reg["conv-detail"]) === false,
++     "the non-scrolling container can never report a scroll position");
++
++  // jumpToLatestMessage must move the real scroller and hide the control.
++  reg.__page.scrollTop = 0;
++  reg["jump-to-latest"].hidden = false;
++  ctx.jumpToLatestMessage();
++  ok(reg.__page.scrollTop === reg.__page.scrollHeight,
++     "jumpToLatestMessage scrolls the real scroller to the end");
++  ok(reg["jump-to-latest"].hidden === true,
++     "jumpToLatestMessage hides the control");
++}
++
++// --------------------------------------------------------------------------
++// 2. A malformed route must never throw. An exception here aborted boot.
++// --------------------------------------------------------------------------
++for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"]) {
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, bad, ["conv-scroll", "conversation"]);
++  let threw = null;
++  try {
++    ctx.applyWorkHashRoute();
++  } catch (e) {
++    threw = String(e);
++  }
++  ok(threw === null, "applyWorkHashRoute must not throw on " + bad + " (threw " + threw + ")");
++
++  const parsed = ctx.parseWorkRoute(bad);
++  ok(parsed !== null, "parseWorkRoute returns a result for " + bad);
++  if (bad !== "#work=abc&msg=%") {
++    ok(parsed.malformed === true, "parseWorkRoute flags " + bad + " as malformed");
++  } else {
++    // A malformed msg fragment must not discard an otherwise valid work id.
++    ok(parsed.malformed === false && parsed.work_item_id === "abc" && parsed.message_id === null,
++       "a bad msg fragment degrades to no highlight, keeping the valid work id");
++  }
++}
++
++// A well-formed route still parses correctly.
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=message%3Amsg-1&msg=msg-1", ["conv-scroll", "conversation"]);
++  const p = ctx.parseWorkRoute("#work=message%3Amsg-1&msg=msg-1");
++  eq([p.malformed, p.work_item_id, p.message_id], [false, "message:msg-1", "msg-1"],
++     "a valid route decodes both ids");
++}
++
++// --------------------------------------------------------------------------
++// 3. Ranking: every ranked bucket reachable, unknown last, deterministic ties.
++// --------------------------------------------------------------------------
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
++
++  eq(ctx.activeStateOf({ presentation_state: "needs_operator" }), "waiting_for_operator",
++     "needs_operator maps to waiting_for_operator");
++  eq(ctx.activeStateOf({ last_activity_event: "operator_message" }), "operator_message_posted",
++     "an operator message is reachable as its own rank (was unreachable)");
++  eq(ctx.activeStateOf({ presentation_state: "totally_new_state" }), "",
++     "an unrecognised state is NOT guessed as in_council");
++
++  ok(evalIn(ctx, 'ACTIVE_RANK.indexOf("wake_pending")') === -1,
++     "wake_pending is not in the executable rank");
++  ok(evalIn(ctx, "ACTIVE_RANK.length") > 0, "ACTIVE_RANK is readable and non-empty");
++
++  // Unknown states must sort AFTER every known state.
++  const items = [
++    { work_item_id: "w-unknown", presentation_state: "brand_new" },
++    { work_item_id: "w-blocked", presentation_state: "blocked" },
++    { work_item_id: "w-operator", presentation_state: "needs_operator" },
++  ];
++  const ranked = ctx.rankActiveWorkItems(items).map((i) => i.work_item_id);
++  eq(ranked, ["w-operator", "w-blocked", "w-unknown"],
++     "unknown states sort last, operator-waiting first");
++
++  // Deterministic tie-break when rank and timestamp are equal.
++  const tied = [
++    { work_item_id: "w-b", presentation_state: "blocked", last_activity_at: "" },
++    { work_item_id: "w-a", presentation_state: "blocked", last_activity_at: "" },
++  ];
++  eq(ctx.rankActiveWorkItems(tied).map((i) => i.work_item_id), ["w-a", "w-b"],
++     "equal rank and timestamp resolve deterministically by work_item_id");
++  eq(ctx.rankActiveWorkItems(tied.slice().reverse()).map((i) => i.work_item_id), ["w-a", "w-b"],
++     "the tie-break does not depend on input order");
++
++  // Terminal items are never auto-ranked.
++  const terminal = [{ work_item_id: "w-done", presentation_state: "complete" }];
++  eq(ctx.rankActiveWorkItems(terminal).length, 0,
++     "terminal items are excluded from automatic restoration");
++}
++
++// --------------------------------------------------------------------------
++// 4. Composer target fails closed without a durable thread.
++// --------------------------------------------------------------------------
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
++
++  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-1", thread_id: "thr-1" }];' +
++              'selectedWorkItemId = "message:msg-1"; selectedConvThread = null;');
++  const bound = ctx.convComposerTarget();
++  eq([bound.work_item_id, bound.thread_id, !!bound.unresolved],
++     ["message:msg-1", "thr-1", false],
++     "a known item binds work item and durable thread together");
++
++  // Same selection, but the queue has no thread for it.
++  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-2", thread_id: null }];' +
++              'selectedWorkItemId = "message:msg-2"; selectedConvThread = null;');
++  const unresolved = ctx.convComposerTarget();
++  ok(unresolved.unresolved === true,
++     "a selection with no durable thread reports unresolved");
++  ok(unresolved.thread_id === null,
++     "the unresolved target carries no thread");
++  ok(!(unresolved.work_item_id && unresolved.thread_id),
++     "a work_item_id is never paired with a fabricated thread");
++
++  // An item absent from the queue entirely is also unresolved, never sendable.
++  evalIn(ctx, 'lastWorkItems = []; selectedWorkItemId = "message:msg-missing";' +
++              "selectedConvThread = null;");
++  ok(ctx.convComposerTarget().unresolved === true,
++     "an item missing from the queue is unresolved, not sendable");
++}
++
++// --------------------------------------------------------------------------
++// Result
++// --------------------------------------------------------------------------
++console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " runtime checks");
++process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..512148d
+index 0000000..fe4eb0d
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,614 @@
+@@ -0,0 +1,745 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -935,6 +1451,9 @@ index 0000000..512148d
 +HTML = _read("index.html")
 +CSS = _read("style.css")
 +
++
++
++RE_PARSE = r"function parseWorkRoute[\s\S]{0,4000}?\n\}"
 +
 +
 +def _block_of(html, elem_id):
@@ -974,8 +1493,18 @@ index 0000000..512148d
 +        self.assertIn("catch", m2.group(0))
 +
 +    def test_restore_runs_at_boot_after_the_queue_loads(self):
++        """Scoped to wire(), because the retry path contains a textually
++        similar call and would satisfy a whole-file assertion without proving
++        anything about boot."""
 +        self.assertIn("restoreActiveSelection", APP)
-+        self.assertRegex(APP, r"refreshWorkItems\(\)\s*\.then\(\s*restoreActiveSelection")
++        i = APP.index("function wire()")
++        j = APP.index("function handleOperatorAction")
++        boot = APP[i:j]
++        self.assertIn("refreshWorkItems()", boot)
++        self.assertIn("restoreActiveSelection()", boot)
++        self.assertIn("initJumpToLatest();", boot)
++        # Restoration must follow a SUCCESSFUL load, not run unconditionally.
++        self.assertIn("refreshWorkItems().then(", boot)
 +
 +    def test_explicit_deep_link_wins_over_stored_selection(self):
 +        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
@@ -1151,6 +1680,124 @@ index 0000000..512148d
 +        """
 +        self.assertIn("isConfirmedTarget: () => !!selectedConvThread", APP)
 +        self.assertNotIn("selectedConvThread || selectedWorkItemId", APP)
++
++
++class RouteParsingTest(unittest.TestCase):
++    """decodeURIComponent raises URIError on malformed percent-encoding.
++
++    Unguarded at boot, that exception propagates out of wire() BEFORE
++    restoration, status reporting and the refresh timers are installed, so one
++    bad URL would disable the console instead of being reported.
++    """
++
++    def test_one_guarded_parser_is_shared(self):
++        self.assertIn("function parseWorkRoute", APP)
++        m = re.search(RE_PARSE, APP)
++        body = m.group(0)
++        self.assertIn("try {", body)
++        self.assertIn("catch", body)
++        self.assertIn("malformed: true", body)
++
++    def test_no_unguarded_decode_remains_on_the_route_paths(self):
++        for fn in ("applyWorkHashRoute", "restoreActiveSelection"):
++            m = re.search(r"function " + fn + r"[\s\S]{0,4000}?\n\}", APP)
++            self.assertNotIn("decodeURIComponent", m.group(0),
++                             fn + " must go through parseWorkRoute")
++
++    def test_boot_route_reports_a_malformed_link(self):
++        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("route.malformed", body)
++        self.assertIn("showRestoreStatus", body)
++        self.assertIn("clearWorkRoute()", body)
++
++    def test_a_bad_message_fragment_does_not_discard_a_valid_work_id(self):
++        m = re.search(RE_PARSE, APP)
++        body = m.group(0)
++        after = body.split("let msg = null;")[1]
++        self.assertIn("catch", after)
++        self.assertIn("msg = null", after)
++
++
++class StaleRouteClearingTest(unittest.TestCase):
++    """'Clear it and say so' has to be literally true."""
++
++    def test_invalid_route_is_removed_from_the_url(self):
++        self.assertIn("function clearWorkRoute", APP)
++        m = re.search(r"function clearWorkRoute[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("replaceState", m.group(0))
++        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("clearWorkRoute()", r.group(0))
++
++    def test_selection_is_cleared_unconditionally(self):
++        """A conditional clear could announce 'nothing is selected' while a
++        different prior selection survived."""
++        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        unknown = r.group(0).split("if (!known)")[1][:400]
++        self.assertIn("selectTask(null);", unknown)
++        self.assertNotIn("selectedWorkItemId === wid", unknown)
++
++
++class DeepLinkPolicyTest(unittest.TestCase):
++    """Both reviewers asked for an explicit terminal-item policy.
++
++    Decision: an EXPLICIT link may open a terminal item, because reviewing
++    finished work is the point of sharing a link. That is inspection, not
++    active-session restoration, so it is never persisted as the active
++    selection. Automatic restoration still excludes terminal items entirely.
++    """
++
++    def test_terminal_deep_link_is_not_persisted_as_active(self):
++        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        body = r.group(0)
++        self.assertIn("if (!isActiveItem(known))", body)
++        tail = body.split("if (!isActiveItem(known))")[1][:400]
++        self.assertIn("persistSelection(null)", tail)
++        self.assertIn("showRestoreStatus", tail)
++
++    def test_the_policy_is_documented_where_it_is_enforced(self):
++        r = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("POLICY", r.group(0))
++
++    def test_automatic_restoration_still_excludes_terminal_items(self):
++        m = re.search(r"function rankActiveWorkItems[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("filter(isActiveItem)", m.group(0))
++
++
++class RuntimeCoverageTest(unittest.TestCase):
++    """The reviewers asked for coverage that executes, not just source text."""
++
++    def test_a_runtime_harness_exists_and_is_dependency_free(self):
++        here = os.path.dirname(os.path.abspath(__file__))
++        harness = os.path.join(here, "dom", "session_ux_runtime.mjs")
++        self.assertTrue(os.path.isfile(harness))
++        src = open(harness, encoding="utf-8").read()
++        # Every import must resolve to a Node builtin: no installed package,
++        # no browser driver, nothing that needs an install step.
++        imports = re.findall(r'from "([^"]+)"', src)
++        self.assertTrue(imports, "harness should import something")
++        for mod in imports:
++            self.assertTrue(mod.startswith("node:"),
++                            "non-builtin import would add a dependency: " + mod)
++        self.assertNotIn("require(", src)
++        here2 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++        self.assertFalse(os.path.exists(os.path.join(here2, "package.json")),
++                         "no package manifest may be introduced")
++
++    def test_the_harness_states_its_limitation(self):
++        here = os.path.dirname(os.path.abspath(__file__))
++        src = open(os.path.join(here, "dom", "session_ux_runtime.mjs"),
++                   encoding="utf-8").read()
++        self.assertIn("LIMITATION", src)
++
++    def test_the_harness_covers_the_defects_that_actually_occurred(self):
++        here = os.path.dirname(os.path.abspath(__file__))
++        src = open(os.path.join(here, "dom", "session_ux_runtime.mjs"),
++                   encoding="utf-8").read()
++        for probe in ("conversationScrollEl", "parseWorkRoute",
++                      "convComposerTarget", "rankActiveWorkItems",
++                      "wake_pending", "unresolved"):
++            self.assertIn(probe, src)
 +
 +
 +class UnresolvedDestinationTest(unittest.TestCase):
@@ -1514,6 +2161,52 @@ index 0000000..512148d
 +        body = m.group(0)
 +        for mutator in ("postJSON", "fetch(", "/api/action"):
 +            self.assertNotIn(mutator, body)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_session_ux_runtime.py b/tests/test_session_ux_runtime.py
+new file mode 100644
+index 0000000..6c56262
+--- /dev/null
++++ b/tests/test_session_ux_runtime.py
+@@ -0,0 +1,40 @@
++"""Run the dependency-free DOM runtime harness for the session-continuity UX.
++
++Both verification reviewers observed, correctly, that static assertions over
++app.js cannot catch the defect classes this slice actually hit: a scroll
++listener bound to an element that never scrolls, a rank bucket nothing can
++produce, and a composer target shape the server cannot validate. This test
++EXECUTES the real app.js in Node against a controllable DOM stub.
++
++It adds no dependency: no package.json, no npm install, no browser driver. When
++Node is unavailable the test skips rather than failing, so it can never make the
++suite depend on a runtime the project does not otherwise require.
++"""
++import os
++import shutil
++import subprocess
++import unittest
++
++HARNESS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
++                       "dom", "session_ux_runtime.mjs")
++
++
++class SessionUxRuntimeTest(unittest.TestCase):
++
++    def test_harness_exists(self):
++        self.assertTrue(os.path.isfile(HARNESS), HARNESS)
++
++    def test_runtime_behaviour(self):
++        node = shutil.which("node")
++        if not node:
++            self.skipTest("node is not available; runtime DOM checks skipped")
++        proc = subprocess.run([node, HARNESS], capture_output=True)
++        out = (proc.stdout or b"").decode("utf-8", "replace")
++        err = (proc.stderr or b"").decode("utf-8", "replace")
++        self.assertEqual(proc.returncode, 0,
++                         "runtime DOM checks failed:\n%s\n%s" % (out, err))
++        self.assertIn("PASS", out, out + err)
 +
 +
 +if __name__ == "__main__":

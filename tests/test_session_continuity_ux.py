@@ -297,6 +297,51 @@ class RouteParsingTest(unittest.TestCase):
         self.assertIn("msg = null", after)
 
 
+class RouteErrorPersistenceTest(unittest.TestCase):
+    """Clearing the hash makes the bad route invisible to the restoration that
+    follows, so the explanation must not be wiped by the success path."""
+
+    def test_a_reported_route_error_is_not_transient(self):
+        self.assertIn("let routeErrorReported = false;", APP)
+        self.assertIn("function clearTransientRestoreStatus", APP)
+        m = re.search(r"function clearTransientRestoreStatus[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("if (routeErrorReported) return;", m.group(0))
+
+    def test_boot_uses_the_transient_clear(self):
+        i = APP.index("function wire()")
+        j = APP.index("function handleOperatorAction")
+        self.assertIn("clearTransientRestoreStatus();", APP[i:j])
+        self.assertNotIn('showRestoreStatus("");', APP[i:j])
+
+    def test_malformed_boot_route_clears_the_selection(self):
+        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
+        branch = m.group(0).split("route.malformed")[1][:600]
+        self.assertIn("selectTask(null);", branch)
+        self.assertIn("persistSelection(null);", branch)
+        self.assertIn("routeErrorReported = true;", branch)
+
+    def test_the_boot_message_does_not_contradict_restoration(self):
+        """Restoration DOES continue after a malformed boot route, so the
+        message must not claim nothing is selected."""
+        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
+        branch = m.group(0).split("route.malformed")[1]
+        branch = branch[:branch.index("return;")]
+        # Assert on the OPERATOR-FACING string, not the surrounding commentary,
+        # which legitimately quotes the phrase being avoided.
+        call = branch[branch.index("showRestoreStatus("):]
+        self.assertNotIn("nothing is selected", call)
+        self.assertIn("Restoring your active work instead", call)
+
+
+class EmptyRouteTest(unittest.TestCase):
+
+    def test_empty_work_id_is_invalid_not_absent(self):
+        m = re.search(RE_PARSE, APP)
+        body = m.group(0)
+        self.assertIn("[^&]*", body, "an empty work id must still match")
+        self.assertIn("if (!wid) return { malformed: true", body)
+
+
 class StaleRouteClearingTest(unittest.TestCase):
     """'Clear it and say so' has to be literally true."""
 
@@ -463,11 +508,17 @@ class JumpToLatestWiringTest(unittest.TestCase):
         self.assertIn("conversationAnchorEl()", body)
         self.assertIn("conversationScrollEl()", body)
 
-    def test_page_level_scroll_is_observed_on_window(self):
-        """Scroll events do not bubble from the document element."""
-        self.assertIn("function scrollEventTargetFor", APP)
-        m = re.search(r"function scrollEventTargetFor[\s\S]{0,4000}?\n\}", APP)
-        self.assertIn("window", m.group(0))
+    def test_scroll_is_observed_by_capture_on_window(self):
+        """Scroll does not bubble, but it DOES reach window in the capture
+        phase from any target. Binding to the scroller resolved at init went
+        stale as soon as layout changed the scrolling ancestor, which is the
+        very reason the scroller is resolved lazily inside the handler."""
+        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn('window.addEventListener("scroll"', body)
+        self.assertIn("}, true);", body)
+        self.assertNotIn("scrollEventTargetFor", APP,
+                         "the superseded helper must not linger as dead code")
 
 
 class ObservableFailureTest(unittest.TestCase):

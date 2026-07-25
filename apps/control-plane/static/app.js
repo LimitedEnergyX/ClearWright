@@ -1595,10 +1595,12 @@ function restoreActiveSelection() {
   const items = lastWorkItems || [];
   const deep = parseWorkRoute(location.hash);
   if (deep && deep.malformed) {
-    clearWorkRoute();
     selectTask(null);
     persistSelection(null);
-    showRestoreStatus("That link could not be read, so nothing is selected.");
+    clearWorkRoute();
+    routeErrorReported = true;
+    showRestoreStatus("That link could not be read, so it was removed. " +
+                      "Nothing is selected.");
     return;
   }
   if (deep) {
@@ -1654,7 +1656,11 @@ function restoreActiveSelection() {
 // initJumpToLatest(), restoration and the refresh timers are installed, so a
 // single bad URL would disable the console instead of being reported.
 function parseWorkRoute(hash) {
-  const m = /[#&]work=([^&]+)/.exec(hash || "");
+  // NOTE the [^&]* rather than [^&]+: "#work=" carries an explicit but empty
+  // work id. That is an INVALID route, not the absence of one, and it must go
+  // through the same clear-and-report path instead of silently falling through
+  // to stored-selection restoration.
+  const m = /[#&]work=([^&]*)/.exec(hash || "");
   if (!m) return null;
   let wid;
   try {
@@ -1662,6 +1668,7 @@ function parseWorkRoute(hash) {
   } catch (e) {
     return { malformed: true, work_item_id: null, message_id: null };
   }
+  if (!wid) return { malformed: true, work_item_id: null, message_id: null };
   let msg = null;
   const mm = /[#&]msg=([^&]+)/.exec(hash || "");
   if (mm) {
@@ -1738,16 +1745,23 @@ function conversationScrollEl() {
   return document.scrollingElement || document.documentElement;
 }
 
-// Scroll events do not bubble from the document element, so a page-level
-// scroller must be observed on window instead.
-function scrollEventTargetFor(el) {
-  return (el === document.scrollingElement || el === document.documentElement ||
-          el === document.body) ? window : el;
-}
 
 function operatorMovedAwayFromLatest(el) {
   if (!el) return false;
   return (el.scrollHeight - el.scrollTop - el.clientHeight) > 120;
+}
+
+// True when THIS page load already reported an unusable route. The boot success
+// path must not wipe that message: clearing the hash necessarily makes the bad
+// route invisible to the restoration that follows, so without this flag the
+// operator would see the explanation replaced by a silently restored selection.
+let routeErrorReported = false;
+
+// Clear only a TRANSIENT status. A reported route error is not transient: it
+// explains something the operator's link did, and it stays until they navigate.
+function clearTransientRestoreStatus() {
+  if (routeErrorReported) return;
+  showRestoreStatus("");
 }
 
 // Restoration status is surfaced, never swallowed. `retry` shows the control
@@ -1782,11 +1796,15 @@ function initJumpToLatest() {
   const pill = document.getElementById("jump-to-latest");
   if (!pill) return;
   pill.addEventListener("click", jumpToLatestMessage);
-  // Resolved lazily on each event: the real scroller depends on layout, which
-  // changes when the Work view opens and when the conversation grows.
-  scrollEventTargetFor(conversationScrollEl()).addEventListener("scroll", () => {
+  // ONE capturing listener on window. Scroll events do not bubble, but they do
+  // reach window during the CAPTURE phase from any target, so this observes
+  // whichever element is scrolling without having to re-bind. Binding to the
+  // scroller resolved at init would go stale as soon as layout changed the
+  // scrolling ancestor -- which is exactly why the scroller is resolved lazily
+  // inside the handler.
+  window.addEventListener("scroll", () => {
     if (!operatorMovedAwayFromLatest(conversationScrollEl())) pill.hidden = true;
-  });
+  }, true);
   const anchor = conversationAnchorEl();
   if (!anchor) return;
   try {
@@ -1825,10 +1843,18 @@ function applyWorkHashRoute() {
   const route = parseWorkRoute(location.hash);
   if (!route) return;
   if (route.malformed) {
-    // Never throw out of boot. Drop the unusable route and report it once the
-    // status element exists; restoration then proceeds normally.
+    // Never throw out of boot. Clear the route AND the selection unconditionally
+    // -- clearWorkRoute() removes the hash, so the restoration that follows can
+    // no longer see this route, and leaving a selection behind would let an
+    // unusable link keep a destination bound.
+    selectTask(null);
+    persistSelection(null);
     clearWorkRoute();
-    showRestoreStatus("That link could not be read, so nothing is selected.");
+    // Say what actually happens next. Restoration DOES continue, so claiming
+    // "nothing is selected" would be false a moment later.
+    routeErrorReported = true;
+    showRestoreStatus("That link could not be read, so it was removed. " +
+                      "Restoring your active work instead.");
     return;
   }
   const known = (lastWorkItems || []).find((it) => it.work_item_id === route.work_item_id);
@@ -3539,7 +3565,7 @@ function wire() {
   // never strands the operator on an empty panel while active work exists.
   initJumpToLatest();
   refreshWorkItems().then(() => {
-    showRestoreStatus("");
+    clearTransientRestoreStatus();
     restoreActiveSelection();
   }).catch(() => {
     // Continuity that fails silently is worse than continuity that reports the

@@ -258,6 +258,67 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
 }
 
 // --------------------------------------------------------------------------
+// 2b. BOOT ORDERING. applyWorkHashRoute() runs before the queue loads and
+//     clears the bad hash, so restoreActiveSelection() can no longer see it.
+//     The reported explanation must therefore survive, and the malformed route
+//     must not leave a selection bound. This is the exact interaction the
+//     previous harness missed by calling applyWorkHashRoute() in isolation.
+// --------------------------------------------------------------------------
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
+
+  // Pretend a previous session stored a selection, as a real reload would.
+  evalIn(ctx, 'localStorage.setItem("cw_selected_work_item_v1", "message:msg-prior");' +
+              'lastWorkItems = [{ work_item_id: "message:msg-prior", thread_id: "thr-prior",' +
+              ' presentation_state: "needs_operator" }];');
+
+  ctx.applyWorkHashRoute();
+  ok(evalIn(ctx, "selectedWorkItemId") === null,
+     "a malformed route clears the active selection at boot");
+  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === null,
+     "a malformed route clears the persisted selection at boot");
+  ok(ctx.location.hash === "", "the malformed route is removed from the URL");
+  const reported = reg["restore-status"].textContent;
+  ok(reported.indexOf("could not be read") !== -1,
+     "the malformed route is explained to the operator");
+  ok(reg["restore-status"].hidden === false, "the explanation is visible");
+
+  // Now the boot success path runs, exactly as wire() does.
+  ctx.clearTransientRestoreStatus();
+  ok(reg["restore-status"].hidden === false,
+     "the route explanation SURVIVES the boot success path (was erased before)");
+  ok(reg["restore-status"].textContent.indexOf("could not be read") !== -1,
+     "the surviving message is still the route explanation");
+
+  // And the message must not contradict what restoration then does.
+  ctx.restoreActiveSelection();
+  const restored = evalIn(ctx, "selectedWorkItemId");
+  ok(reported.indexOf("nothing is selected") === -1 || restored === null,
+     "the boot message must not claim nothing is selected while restoration binds one");
+}
+
+// 2c. An EMPTY work id is an invalid route, not the absence of one.
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "#work=", ["conv-scroll", "conversation"]);
+  const p = ctx.parseWorkRoute("#work=");
+  ok(p !== null, "an empty work id is recognised as a route");
+  ok(p.malformed === true, "an empty work id is classified invalid, not absent");
+}
+
+// 2d. A transient status is still clearable when no route error occurred.
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
+  ctx.showRestoreStatus("transient");
+  ok(reg["restore-status"].hidden === false, "a transient status shows");
+  ctx.clearTransientRestoreStatus();
+  ok(reg["restore-status"].hidden === true,
+     "a transient status clears when no route error was reported");
+}
+
+// --------------------------------------------------------------------------
 // 3. Ranking: every ranked bucket reachable, unknown last, deterministic ties.
 // --------------------------------------------------------------------------
 {

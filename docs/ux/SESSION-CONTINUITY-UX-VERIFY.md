@@ -1,87 +1,125 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   f516843424e99e616b414b9aa4b45a5dff55e540
+HEAD (bytes under review):   cb577b1171cc63fb9b9c7e99dc4e1db84c5d0bdd
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
-A presentation-and-wiring slice in the LOCAL operator console only. No
-server change, no schema change, no durable-record change. The identity,
-hash-routing, unread-tracking and derived-state foundations already
-existed; this slice surfaces and connects them.
+An operator-workflow identity, integrity and submission-feedback
+correction to the LOCAL control-plane console. Presentation and wiring
+only: apps/control-plane/server.py, tools/clearwright_identity.py and
+every durable record are untouched, and no identity semantics change.
 
-Seven operator-specified items: (1) restore active work on refresh via the
-existing #work= hash route mirrored to one localStorage key, with priority
-ranking over fields /api/work-items already returns; (2) conversation-first
-view landing on the latest message; (3) ONE composer bound to the selected
-work item, displaying work-item id, thread id and abbreviated title;
-(4) render the already-emitted data-message-id with copy controls and a
-post-send confirmation; (5) a contextual session rail shown only when a
-work item is selected; (6) truthful execution state; (7) accessibility.
+It is authorised by durable operator message msg-20260725T224347822028
+(2026-07-25T22:43:47Z, OPERATOR-0001, inbound, bound to work item
+message:msg-20260725T142257787771 and thread thr-20260725T142257787771),
+which postdates the terminal result of the previous verify council by
+seven hours.
 
-SAFETY-RELEVANT DESIGN POINTS (please scrutinise these)
+THE INVESTIGATION THAT CHANGED THE FIX (please scrutinise)
 ----------------------------------------------------------------------
-A. The composer now sends work_item_id ALONGSIDE a durable thread_id.
-   createComposer already supported target.work_item_id, and the server
-   already enforces target integrity: when both are supplied it verifies
-   the pair is genuinely bound and REFUSES a mismatched pair. So this
-   engages an existing server-side check that the previous 'new
-   conversation' path bypassed entirely. work_item_id is never sent with
-   a locally minted thread id.
+The operator reported duplicate queue tiles and asked for canonical
+deduplication. Investigation of the durable records shows deduplication
+would be the WRONG fix:
 
-B. The pre-existing confirmed-target contract is UNCHANGED:
-   isConfirmedTarget: () => !!selectedConvThread. An intermediate version
-   loosened this and was reverted, because selectTask now stores the
-   item's real durable thread, so no looser rule is needed. A
-   pre-allocated thread id is still never shown as a confirmed target.
+  * /api/work-items returns genuinely DISTINCT canonical work items.
+    Their titles collide because the title is derived from the origin
+    message text, and three separate message-scoped work items share one
+    thread (thr-20260723T153047865278).
+  * EVERY work_item_id is a real 'message:msg-...' value. No thread id is
+    rendered as a work item anywhere, so the suspected conflation of
+    work-item id with thread id does NOT occur in the queue.
+  * Collapsing the tiles would therefore HIDE durable governed work.
 
-C. Execution state is never derived from message-post activity. An inbound
-   operator message proves only that the operator acted. States requiring
-   executor acknowledgement or wake telemetry are NOT rendered.
+So the tiles are DISAMBIGUATED (each shows its canonical work-item id,
+thread id and origin message id, each copyable) and the shared-thread
+condition is surfaced as an integrity warning, which is what the
+authorisation requires: surface a warning rather than silently render
+duplicates, and never rewrite durable history to hide a UI problem.
 
-D. The demoted composer uses `inert` (falling back to aria-hidden plus
-   tabindex on every focusable descendant). An earlier version set
-   aria-hidden while leaving the Send button reachable, which is a
-   keyboard trap; that was found by live inspection and fixed.
+The one place a thread id WAS presented as a work item is History:
+the server returns work_item_id and thread_id as distinct fields, but the
+client collapsed them with `work_item_id || thread_id || packet_id`, so
+rows with no work-item binding printed a thr-... under a column headed
+'Work item'. That fallback is removed and the columns are split.
 
-VERIFIED IN THE RUNNING CONSOLE (not asserted from source alone)
+OTHER SAFETY-RELEVANT POINTS
 ----------------------------------------------------------------------
-Selection persisted and restored across reload; hash route written;
-conversation surface revealed with the durable thread bound; destination
-banner showing work item + thread + title with identifiers in their true
-case; 3 message identity rows and 6 copy buttons rendered; 6 queue rows
-exposed as role=button tabindex=0; execution states limited to BLOCKED and
-CLAIMED with no fabricated RUNNING; demoted composer inert with zero
-keyboard-reachable descendants; no console errors.
+A. FAIL-CLOSED SEND. If the URL, the selected item, the bound thread and
+   the composer destination disagree, the send is refused with a visible
+   explanation BEFORE any request body is built.
 
-TESTS
+B. PHASE vs EXECUTOR are now separate facts from separate fields: phase
+   from `status`, executor from `runner_state` ONLY. ACTIVE is reported
+   solely for runner_state==='active_runner', which the server sets only
+   on positive evidence of recent non-claim activity. A claim alone is
+   CLAIMED; a posted message yields no executor state at all.
+
+C. TWO PREVIOUSLY ACCEPTED DEFECTS ARE CORRECTED HERE.
+   operator_message_posted was an UNREACHABLE rank: last_activity_event is
+   emitted only as created|completion|verification|council|gate|progress|
+   claim|response|evidence, so the 'message'/'operator_message' branch was
+   dead code. The branch and the rank are removed. Separately, a
+   successful EMPTY queue load was indistinguishable from an unfetched
+   queue, so an unknown route survived it; an explicit workItemsLoaded
+   flag now separates the two.
+
+D. SUBMISSION FEEDBACK. The send path already blocked re-entry and kept
+   drafts, but that state was invisible. The button now reports
+   'Sending...', is disabled and aria-busy in flight, and is restored in
+   `finally` so it cannot strand.
+
+VERIFIED IN THE RUNNING CONSOLE (measured, not asserted)
 ----------------------------------------------------------------------
-tests/test_session_continuity_ux.py adds 53 tests following the
-established static-assertion pattern used by the 20 existing front-end
-test files. Full suite: 1255 tests OK, 1 pre-existing skip.
-Known limitation, stated plainly: static assertions over source text
-cannot prove DOM behaviour. That limitation is exactly why six real
-defects in this slice were found by live inspection instead, and tests
-were then added to pin each corrected contract.
+  9 durable work items -> 9 tiles under History/All (nothing hidden)
+  0 thread ids rendered as work items in the queue
+  3 integrity warnings on exactly the 3 shared-thread tiles
+  0 thread ids under the History 'Work item' column; 63 rows honestly
+    reporting 'no work item'
+  forced route/selection divergence -> 0 POST attempts, draft preserved,
+    explanation shown
+  three send() calls in flight -> exactly 1 POST; label and disabled
+    state restored afterwards
+  identifiers render with text-transform:none and retain their stored case
+  28 message cards, 28 identity rows, 56 copy controls
+
+The browser verification wrote ZERO durable records: POSTs were
+intercepted at fetch, and the thread still holds 28 messages with 0 probe
+artifacts across 1380 ledger rows.
+
+TESTS (counts measured by running them, not typed)
+----------------------------------------------------------------------
+  focused static   139 tests  (OK)
+  runtime          101 checks (PASS)  tests/dom/session_ux_runtime.mjs
+  full suite       1343 tests  (OK, skipped=1)
+
+The runtime harness executes the real app.js in a Node vm against a
+controllable DOM stub and adds NO dependency: every import is a Node
+builtin, there is no package manifest, and the Python wrapper skips when
+node is absent. Stated limitation, unchanged: it supplies scroll geometry
+rather than computing layout, so it proves decision logic given a
+geometry, not that a browser produces that geometry. Layout-dependent
+behaviour was checked by live inspection, recorded above as manual
+evidence rather than automated coverage.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       158366  01185b6f4212866a3234d77f67d4ea6d3c95b9777722f0ab5254a78815a7050e
-  apps/control-plane/static/index.html                    22153  336d1c97639ac69f8cbbac53f7919ffc1fb815da28c1c4f90175c5b55bc86179
-  apps/control-plane/static/style.css                     52456  51d02fb9466c43a80f5d760a1e613dc0397acb0220fd3f91ffc4c3a1f5ece09f
-  tests/dom/session_ux_runtime.mjs                        22146  e2317ced596d3d4f6b8265bafcbce7a3767fad9603b8342c40be350a0e7d9ad6
-  tests/test_session_continuity_ux.py                     39262  761ab994a93e759530ff2059ecdd07499c8b8746f5ca3ab0f0821bd7620c59d1
+  apps/control-plane/static/app.js                       169781  681bac53210cbc1535578add12516a6506da326a758e502abd5034eaca9288da
+  apps/control-plane/static/index.html                    22393  86b4ffbf452f29a46c2c7c9877a3daadfdf29b5bc3af4118bb40b55a993b02f4
+  apps/control-plane/static/style.css                     53896  449c38f854d4b8a088c885cd35738eaa38bb2e7c64c2e5cf0207fb703a8af1f2
+  tests/dom/session_ux_runtime.mjs                        29015  3dde937c43247603745e9e31ae47b7783c0e96e77bffbba83a41eb73752fdc2f
+  tests/test_session_continuity_ux.py                     52408  09baee5473ae5f32ae75ca183ddb159c1613990488a9a13bfd2964648dade19e
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 632 +++++++++++++++++++++++++-
- apps/control-plane/static/index.html |  42 +-
- apps/control-plane/static/style.css  | 101 +++++
- tests/dom/session_ux_runtime.mjs     | 487 ++++++++++++++++++++
- tests/test_session_continuity_ux.py  | 850 +++++++++++++++++++++++++++++++++++
- tests/test_session_ux_runtime.py     |  40 ++
- 6 files changed, 2123 insertions(+), 29 deletions(-)
+ apps/control-plane/static/app.js     |  866 +++++++++++++++++++++++++-
+ apps/control-plane/static/index.html |   49 +-
+ apps/control-plane/static/style.css  |  135 ++++
+ tests/dom/session_ux_runtime.mjs     |  611 ++++++++++++++++++
+ tests/test_session_continuity_ux.py  | 1133 ++++++++++++++++++++++++++++++++++
+ tests/test_session_ux_runtime.py     |   40 ++
+ 6 files changed, 2801 insertions(+), 33 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -200,21 +238,25 @@ Consequences, stated so they can be checked against the quoted source:
 
 REVIEW QUESTIONS
 ----------------------------------------------------------------------
-1. Does sending work_item_id with a durable thread_id weaken any message,
-   thread, work-item, authority or audit semantics? Point A argues it
-   strengthens them by engaging the server's target-integrity check.
-2. Can the restoration path ever select a terminal or non-active item, or
-   land on an item the operator did not choose when a deep link is present?
-3. Is any rendered execution state not supportable from durable evidence?
-4. Does the demotion leave any keyboard or screen-reader inconsistency?
-5. Is any failure mode here silent rather than fail-closed?
+1. Is disambiguating-plus-warning the right response to the duplicate
+   tiles, given the records are genuinely distinct? Would any form of
+   deduplication hide durable governed work?
+2. Can any code path still render a thread id where a work-item id is
+   claimed, in the queue or in History?
+3. Can the fail-closed destination check be bypassed, or can a request
+   body be built while route, selection, thread and destination disagree?
+4. Are the phase and executor label sets exactly the server value
+   domains, and can ACTIVE be reported without positive runner evidence?
+5. Can the composer strand in a sending state, double-post from any entry
+   point, or clear a draft before durable success is confirmed?
+6. Is any failure mode here silent rather than fail-closed and explained?
 
 FULL DIFF (committed bytes)
 ----------------------------------------------------------------------
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..8cbc81c 100644
+index dd2d10c..b5c25f0 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -239,7 +281,37 @@ index dd2d10c..8cbc81c 100644
    nextBody.innerHTML = '<p class="op-next' + (ts.phase_attention ? " op-next-attention" : "") +
      '">' + esc(ts.next_action || "") + "</p>";
  
-@@ -768,8 +774,36 @@ function createComposer(opts) {
+@@ -761,6 +767,29 @@ function createComposer(opts) {
+     return name + ":" + (target.thread_id || "new") + ":" + (target.work_item_id || "");
+   }
+ 
++  // Item 5: the URL, the selected tile, the bound thread and the composer
++  // destination must describe the SAME durable object before anything is sent.
++  // Any disagreement fails closed with a visible explanation rather than
++  // posting to a destination the operator did not read on screen.
++  function destinationDisagreement(target) {
++    if (!target || !target.work_item_id) return "";
++    if (target.work_item_id !== selectedWorkItemId) {
++      return "The composer destination and the selected work item disagree.";
++    }
++    const known = (lastWorkItems || []).find(
++      (i) => i.work_item_id === selectedWorkItemId);
++    if (known && known.thread_id && target.thread_id &&
++        known.thread_id !== target.thread_id) {
++      return "The composer thread does not match the selected work item's thread.";
++    }
++    const route = parseWorkRoute(location.hash);
++    if (route && !route.malformed && route.work_item_id &&
++        route.work_item_id !== selectedWorkItemId) {
++      return "The URL points at a different work item than the one selected.";
++    }
++    return "";
++  }
++
+   function updateBanner() {
+     if (!bannerEl) return;
+     const target = getTarget();
+@@ -768,8 +797,36 @@ function createComposer(opts) {
      // before anything has actually been sent; the banner only calls it
      // "continuing" once the caller confirms that id is a real durable thread.
      const confirmed = !isConfirmedTarget || isConfirmedTarget();
@@ -278,11 +350,17 @@ index dd2d10c..8cbc81c 100644
      bannerEl.textContent = text;
    }
  
-@@ -823,8 +857,15 @@ function createComposer(opts) {
+@@ -823,10 +880,29 @@ function createComposer(opts) {
        return;
      }
      showError("");
 +    const preTarget = getTarget();
++    const disagreement = destinationDisagreement(preTarget);
++    if (disagreement) {
++      showError(disagreement + " Nothing was sent. Reselect the work item so " +
++                "the URL, the selection and the destination agree.");
++      return;
++    }
 +    if (preTarget && preTarget.unresolved) {
 +      showError("This work item has no durable thread yet, so the destination " +
 +                "cannot be verified. The draft was kept; sending is blocked " +
@@ -292,10 +370,18 @@ index dd2d10c..8cbc81c 100644
      const draft = persistDraft();
 -    const target = getTarget();
 +    const target = preTarget;
++    // Item 13: the operator must never have to guess whether a send is running.
++    // `sending` already blocks re-entry from the button, Enter and Ctrl+Enter --
++    // they all call send() -- but that state was invisible.
      sending = true;
      sendBtn.disabled = true;
++    const idleLabel = sendBtn.textContent;
++    sendBtn.textContent = "Sending...";
++    sendBtn.setAttribute("aria-busy", "true");
      try {
-@@ -865,6 +906,10 @@ function createComposer(opts) {
+       const body = Object.assign(
+         { message: raw, idempotency_key: draft.idempotencyKey },
+@@ -865,10 +941,18 @@ function createComposer(opts) {
        textarea.value = "";
        autoGrow();
        updateCounter();
@@ -305,17 +391,69 @@ index dd2d10c..8cbc81c 100644
 +      showPostConfirmation(result);
        if (onPosted) onPosted(result, stored);
      } finally {
++      // Always restored, on success, refusal, network error and verification
++      // failure alike, so the composer can never strand in a sending state.
        sending = false;
-@@ -1061,11 +1106,21 @@ function queueCard(it) {
+       sendBtn.disabled = false;
++      sendBtn.textContent = idleLabel;
++      sendBtn.removeAttribute("aria-busy");
+     }
+   }
+ 
+@@ -958,6 +1042,11 @@ const WORK_KIND_LABEL = {
+ // --------------------------------------------------------------------------- //
+ 
+ let lastWorkItems = [];
++// Distinguishes "the queue has not been fetched yet" from "the queue was
++// fetched successfully and is empty". Inferring this from lastWorkItems.length
++// conflated the two, so after a successful empty response an unknown explicit
++// route was retained as a provisional selection instead of being rejected.
++let workItemsLoaded = false;
+ let lastQueueCouncils = [];
+ let lastArchiveIndex = { archived: [], count: 0 };
+ 
+@@ -1061,11 +1150,59 @@ function queueCard(it) {
      ? '<span class="q-opflag" title="operator action required"><U+25C9> operator</span>' : "";
    // Technical ids ride on data attributes only; the primary card stays readable.
    const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
 +  // Phase 1, item 7: a queue row is a real control -- role, tabindex and
 +  // aria-pressed -- so it is reachable and activatable from the keyboard
 +  // instead of being a plain div that only responds to a mouse click.
-+  const execLabel = executionStateLabel(it);
++  const execLabel = executorStateLabel(it);
++  const phaseLabel = lifecyclePhaseLabel(it);
++  const wid = it.work_item_id || "";
++  const tid = it.thread_id || "";
++  const originId = originMessageId(wid);
++  // Item 1: multiple canonical work items on one thread is legal but reads as
++  // duplication. Surface it; never hide a durable record to tidy the view.
++  const ambiguous = sharesThreadWithOtherWorkItems(it, lastWorkItems);
++  const warn = ambiguous
++    ? '<div class="q-integrity" role="note">Shared thread: more than one work ' +
++      "item is bound to this thread. These are distinct durable records, not " +
++      "duplicates - compare the work-item IDs.</div>"
++    : "";
++  // Item 3: each identifier is LABELLED by type. A thread id is never presented
++  // as a work-item id, and the shared-suffix coincidence is explained in place.
++  const suffixNote = sharesSuffix(wid, tid)
++    ? ' <span class="q-idnote" title="The thread was created together with this' +
++      " item's origin message, so their numeric suffixes match. They remain" +
++      ' different identifiers.">matching suffix</span>'
++    : "";
++  const ids =
++    '<div class="q-ids">' +
++      '<span class="q-idrow"><span class="q-idk">Work item</span>' +
++        '<code class="mono q-idv" title="' + esc(wid) + '">' + esc(abbrevId(wid)) + "</code>" +
++        copyIdButton(wid, "work-item ID") + "</span>" +
++      (tid ? '<span class="q-idrow"><span class="q-idk">Thread</span>' +
++        '<code class="mono q-idv" title="' + esc(tid) + '">' + esc(abbrevId(tid)) + "</code>" +
++        copyIdButton(tid, "thread ID") + suffixNote + "</span>" : "") +
++      (originId ? '<span class="q-idrow"><span class="q-idk">Origin message</span>' +
++        '<code class="mono q-idv" title="' + esc(originId) + '">' + esc(abbrevId(originId)) +
++        "</code>" + copyIdButton(originId, "origin message ID") + "</span>" : "") +
++    "</div>";
    return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
 -    '" data-thread="' + esc(it.thread_id || "") +
++    (ambiguous ? " q-ambiguous" : "") +
 +    '" role="button" tabindex="0"' +
 +    ' aria-pressed="' + (selected ? "true" : "false") + '"' +
 +    ' aria-label="Open work item ' + esc(it.work_item_id || "") +
@@ -325,12 +463,18 @@ index dd2d10c..8cbc81c 100644
      '<div class="q-title">' + title + "</div>" +
 -    '<div class="q-meta">' + bits.join("") + opFlag + "</div>" +
 +    '<div class="q-meta">' + bits.join("") + opFlag +
-+    (execLabel ? '<span class="q-exec mono">' + esc(execLabel) + "</span>" : "") +
-+    "</div>" +
++    // Item 10: phase and executor state are DIFFERENT facts and are labelled
++    // separately, so "PHASE: VERIFICATION / EXECUTOR: IN COUNCIL" can never be
++    // misread as a single contradictory status.
++    (phaseLabel ? '<span class="q-phase mono" title="lifecycle phase">Phase ' +
++      esc(phaseLabel) + "</span>" : "") +
++    (execLabel ? '<span class="q-exec mono" title="executor state, derived from ' +
++      'runner_state only">Executor ' + esc(execLabel) + "</span>" : "") +
++    "</div>" + ids + warn +
      "</div>";
  }
  
-@@ -1290,17 +1345,498 @@ function openAttention() {
+@@ -1290,17 +1427,617 @@ function openAttention() {
    }
  }
  
@@ -379,6 +523,7 @@ index dd2d10c..8cbc81c 100644
 +  if (e.key !== "Enter" && e.key !== " ") return;
 +  const row = e.target && e.target.closest && e.target.closest(".q-row[data-work-item]");
 +  if (!row) return;
++  if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
 +  e.preventDefault();
 +  const wid = row.getAttribute("data-work-item");
 +  if (wid) navigateToWorkItem(wid);
@@ -407,26 +552,129 @@ index dd2d10c..8cbc81c 100644
 +};
 +
 +// Evidence-backed only. `it` is the derived work item from /api/work-items.
++// LIFECYCLE PHASE: where the governed work item sits in its own lifecycle.
++// Derived from `status`, whose observed domain is open|planning|verification|
++// claimed|operator_required|done|closed|superseded|malformed. This says nothing
++// about whether any executor is running.
++const LIFECYCLE_PHASE_LABELS = {
++  open: "OPEN", planning: "PLANNING", verification: "VERIFICATION",
++  claimed: "CLAIMED", operator_required: "OPERATOR REQUIRED",
++  done: "DONE", closed: "CLOSED", superseded: "SUPERSEDED",
++  malformed: "MALFORMED"
++};
++
++function lifecyclePhaseOf(it) {
++  const st = String((it && it.status) || "");
++  return Object.prototype.hasOwnProperty.call(LIFECYCLE_PHASE_LABELS, st) ? st : "";
++}
++
++function lifecyclePhaseLabel(it) {
++  return LIFECYCLE_PHASE_LABELS[lifecyclePhaseOf(it)] || "";
++}
++
++// EXECUTOR STATE: what a runner is actually doing, derived ONLY from
++// runner_state, whose domain is unowned|active_runner|waiting_on_council|
++// waiting_on_operator|claimed_idle|stale_or_no_heartbeat|unknown.
++//
++// ACTIVE is reported only for "active_runner", which the server returns solely
++// on positive evidence of recent non-claim activity. A claim alone is never
++// running, and a posted message is never running: ClearWright has no heartbeat
++// channel, so anything stronger would be fabricated.
++const EXECUTOR_LABELS = {
++  active_runner: "ACTIVE", waiting_on_council: "IN COUNCIL",
++  waiting_on_operator: "WAITING FOR OPERATOR", claimed_idle: "CLAIMED",
++  stale_or_no_heartbeat: "NO HEARTBEAT", unowned: "UNCLAIMED",
++  unknown: "UNKNOWN"
++};
++
++function executorRunnerState(it) {
++  const r = String((it && it.runner_state) || "");
++  return Object.prototype.hasOwnProperty.call(EXECUTOR_LABELS, r) ? r : "";
++}
++
++function executorStateLabel(it) {
++  return EXECUTOR_LABELS[executorRunnerState(it)] || "";
++}
++
++// Ranking vocabulary, mapped from the SAME evidence as the executor label so
++// the queue order and the rendered state can never disagree. Terminal
++// presentation states win first because a finished item is not active work.
 +function truthfulExecutionState(it) {
 +  if (!it) return "";
 +  const p = String(it.presentation_state || "");
-+  const r = String(it.runner_state || "");
-+  const ev = String(it.last_activity_event || "");
-+  if (p === "recently_completed" || p === "complete") return "complete";
-+  if (p === "blocked") return "blocked";
-+  if (p === "needs_operator" || p === "waiting_on_operator") return "waiting_for_operator";
++  const r = executorRunnerState(it);
++  if (p === "recently_completed" || p === "historical" || p === "superseded") return "complete";
++  if (p === "needs_operator" || p === "waiting_on_operator" || r === "waiting_on_operator") {
++    return "waiting_for_operator";
++  }
 +  if (r === "waiting_on_council") return "in_council";
-+  // An operator message is the LAST durable event: the operator acted, but no
-+  // executor activity followed. Never call this running.
-+  if (ev === "operator_message" || ev === "message") return "operator_message_posted";
-+  if (p === "stale" || r === "stale_or_no_heartbeat") return "paused";
-+  if (p === "running") return "executor_active";
-+  if (it.claimed_by) return "claimed";
++  if (r === "stale_or_no_heartbeat" || p === "stale") return "paused";
++  if (r === "active_runner") return "executor_active";
++  if (p === "blocked") return "blocked";
++  if (r === "claimed_idle" || it.claimed_by) return "claimed";
 +  return "";
 +}
 +
 +function executionStateLabel(it) {
 +  return EXECUTION_STATE_LABELS[truthfulExecutionState(it)] || "";
++}
++
++// --------------------------------------------------------------------------
++// DURABLE IDENTITY ON THE QUEUE (operator correction items 1, 2 and 3)
++// --------------------------------------------------------------------------
++// Investigation result, recorded because it changes what the correct fix is:
++// the apparently duplicated tiles are NOT phantoms and NOT client artifacts.
++// /api/work-items returns genuinely DISTINCT canonical work items whose titles
++// collide because the title is derived from the origin message text, and in one
++// case three separate message-scoped work items share a single thread. Every
++// work_item_id is a real "message:msg-..." value; no thread id is ever rendered
++// as a work item. Collapsing them would HIDE durable governed work, so the tiles
++// are disambiguated and the shared-thread condition is surfaced as an integrity
++// warning instead.
++
++// thread_id -> [work_item_id, ...] for every item the queue can see.
++function threadWorkItemIndex(items) {
++  const idx = {};
++  (items || []).forEach((it) => {
++    const t = it && it.thread_id;
++    if (!t) return;
++    if (!idx[t]) idx[t] = [];
++    if (idx[t].indexOf(it.work_item_id) === -1) idx[t].push(it.work_item_id);
++  });
++  return idx;
++}
++
++// True when this item's thread carries more than one canonical work item. That
++// is legal but ambiguous to read, so it is flagged rather than hidden.
++function sharesThreadWithOtherWorkItems(it, items) {
++  if (!it || !it.thread_id) return false;
++  const peers = threadWorkItemIndex(items)[it.thread_id] || [];
++  return peers.length > 1;
++}
++
++// A work item id derived from a message carries that message's id verbatim:
++// "message:" + message_id. When the thread was created with that same origin
++// message the numeric suffixes match, which reads like duplication but is not.
++function idSuffix(id) {
++  const m = /(\d{8}T\d{6,})/.exec(String(id || ""));
++  return m ? m[1] : "";
++}
++
++function sharesSuffix(workItemId, threadId) {
++  const a = idSuffix(workItemId);
++  return !!a && a === idSuffix(threadId);
++}
++
++function originMessageId(workItemId) {
++  const s = String(workItemId || "");
++  return s.indexOf("message:") === 0 ? s.slice("message:".length) : "";
++}
++
++// Abbreviated for display only. The FULL id is always what gets copied.
++function abbrevId(id, keep) {
++  const s = String(id || "");
++  const k = keep || 14;
++  return s.length <= k + 3 ? s : s.slice(0, k) + "\u2026" + s.slice(-4);
 +}
 +
 +// --------------------------------------------------------------------------
@@ -531,14 +779,24 @@ index dd2d10c..8cbc81c 100644
 +// fill makes the ranking contract inert and advertises a priority that never
 +// applies, so it is deferred rather than simulated (Phase 1, item 6). When the
 +// wake bridge lands it belongs between operator_message_posted and paused.
++// Every entry MUST be producible by executorStateOf(). Two buckets were removed
++// after being proven unreachable against the real server value domain:
++//   wake_pending            needs executor acknowledgement / wake telemetry,
++//                           which is the deferred Phase 2 wake bridge.
++//   operator_message_posted assumed last_activity_event could be "message" or
++//                           "operator_message". It cannot: last_activity() emits
++//                           exactly created|completion|verification|council|gate|
++//                           progress|claim|response|evidence, so that branch was
++//                           dead code and the rank could never be reached.
++// A rank nothing can produce silently mis-orders the queue, so it is removed
++// rather than left as decoration.
 +const ACTIVE_RANK = [
 +  "waiting_for_operator",
-+  "operator_message_posted",
 +  "paused",
 +  "executor_active",
 +  "in_council",
-+  "blocked",
-+  "claimed"
++  "claimed",
++  "blocked"
 +];
 +
 +// Terminal / non-active presentation states are never auto-selected.
@@ -654,7 +912,9 @@ index dd2d10c..8cbc81c 100644
 +// restoreActiveSelection() validates once it is.
 +function bindRouteSelection(wid) {
 +  const items = lastWorkItems || [];
-+  if (!items.length) return null;
++  // Only a genuinely unfetched queue defers validation. A successful empty
++  // response is authoritative: the route cannot be backed by anything.
++  if (!workItemsLoaded) return null;
 +  const known = items.find((it) => it.work_item_id === wid);
 +  if (!known) {
 +    // Queue-unbacked: clear unconditionally, drop the route so a reload does
@@ -692,7 +952,10 @@ index dd2d10c..8cbc81c 100644
  // item id IS "message:" + message_id) -- no message search, no ambiguity.
  function navigateToWorkItem(workItemId) {
 +  // Deliberate navigation: an earlier malformed-link explanation is obsolete.
++  // Clear the flag AND the visible text -- resetting only the flag left the
++  // stale message on screen whenever no hashchange followed.
 +  routeErrorReported = false;
++  showRestoreStatus("");
    const msgId = workItemId && workItemId.indexOf("message:") === 0
      ? workItemId.slice("message:".length) : "";
    location.hash = "#work=" + encodeURIComponent(workItemId) +
@@ -830,7 +1093,7 @@ index dd2d10c..8cbc81c 100644
  }
  
  function highlightMessage(messageId) {
-@@ -1317,14 +1853,38 @@ function highlightMessage(messageId) {
+@@ -1317,20 +2054,45 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -876,7 +1139,56 @@ index dd2d10c..8cbc81c 100644
  }
  
  async function refreshWorkItems() {
-@@ -1837,7 +2397,8 @@ function buildConversationTab(run) {
+   try {
+     const data = await getJSON("/api/work-items");
+     lastWorkItems = data.work_items || [];
++    workItemsLoaded = true;   // a SUCCESSFUL response, even when it is empty
+     try {
+       const cd = await getJSON("/api/review-councils");
+       lastQueueCouncils = cd.review_councils || [];
+@@ -1398,7 +2160,7 @@ async function loadHistory() {
+   lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
+   const body = document.getElementById("ledger-body");
+   if (!lastLedgerRows.length) {
+-    body.innerHTML = '<tr><td colspan="6" class="muted">No records match the filters.</td></tr>';
++    body.innerHTML = '<tr><td colspan="8" class="muted">No records match the filters.</td></tr>';
+     return;
+   }
+   body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
+@@ -1406,12 +2168,31 @@ async function loadHistory() {
+     '" data-ledger-index="' + i + '">' +
+     "<td>" + esc(shortTime(row.at)) + "</td>" +
+     "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
+-    '<td class="mono">' + esc(row.work_item_id || row.thread_id || row.packet_id || "") + "</td>" +
++    // Item 4: message, work-item and thread are SEPARATE columns. The previous
++    // `work_item_id || thread_id || packet_id` fallback printed a thr-... value
++    // under a heading that said "Work item", which is a false identity claim for
++    // the 148 ledger rows that legitimately have no work-item binding.
++    '<td class="mono">' + esc(abbrevId(ledgerMessageId(row), 12)) + "</td>" +
++    '<td class="mono">' + (row.work_item_id
++      ? esc(abbrevId(row.work_item_id, 12))
++      : '<span class="muted ledger-none">no work item</span>') + "</td>" +
++    '<td class="mono">' + (row.thread_id
++      ? esc(abbrevId(row.thread_id, 12))
++      : '<span class="muted ledger-none">-</span>') + "</td>" +
+     "<td>" + esc(row.actor || "") + "</td>" +
+     '<td class="ledger-event">' + esc(row.event || "") + "</td>" +
+     "<td>" + esc(row.status || "") + "</td></tr>").join("");
+ }
+ 
++// The durable message id for a ledger row, when the row IS a message. Packet and
++// council rows have none, and inventing one would be a false identity claim.
++function ledgerMessageId(row) {
++  if (!row) return "";
++  const rec = row.record || {};
++  if (row.type === "message") return rec.message_id || "";
++  return "";
++}
++
+ function openLedgerDetail(index) {
+   const row = lastLedgerRows[index];
+   if (!row) return;
+@@ -1837,7 +2618,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -886,7 +1198,7 @@ index dd2d10c..8cbc81c 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +2696,23 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +2917,23 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -910,7 +1222,18 @@ index dd2d10c..8cbc81c 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2786,9 +3364,12 @@ function toggleToolLog() {
+@@ -2783,12 +3582,23 @@ function toggleToolLog() {
+   if (footer) footer.hidden = !footer.hidden;
+ }
+ 
++// A queue tile is a control that CONTAINS controls. Without this, clicking Copy
++// would also open the item, which is the opposite of a copy-without-navigating
++// affordance.
++function eventTargetsInnerControl(e) {
++  const t = e && e.target;
++  return !!(t && t.closest && t.closest(".copy-id"));
++}
++
  function selectTask(threadId, workItemId) {
    selectedConvThread = threadId || null;
    selectedWorkItemId = workItemId || null;
@@ -923,7 +1246,15 @@ index dd2d10c..8cbc81c 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2886,6 +3467,10 @@ function wire() {
+@@ -2869,6 +3679,7 @@ function wire() {
+ 
+   // Work queue: clicking a row selects that task everywhere.
+   document.getElementById("queue-groups").addEventListener("click", (e) => {
++    if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
+     const row = e.target.closest(".q-row");
+     if (!row) return;
+     const thread = row.getAttribute("data-thread");
+@@ -2886,6 +3697,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -934,7 +1265,7 @@ index dd2d10c..8cbc81c 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +3582,19 @@ function wire() {
+@@ -2997,6 +3812,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -955,7 +1286,7 @@ index dd2d10c..8cbc81c 100644
    setInterval(refreshAgentEvents, LIVE_MS);
    setInterval(refreshMessages, LIVE_MS);
 diff --git a/apps/control-plane/static/index.html b/apps/control-plane/static/index.html
-index 1a5fd93..a982560 100644
+index 1a5fd93..57b8bd6 100644
 --- a/apps/control-plane/static/index.html
 +++ b/apps/control-plane/static/index.html
 @@ -59,6 +59,9 @@
@@ -1031,11 +1362,26 @@ index 1a5fd93..a982560 100644
        </aside>
      </div>
  
+@@ -188,9 +206,12 @@
+         <div class="ledger-table-wrap">
+           <table class="ledger" aria-label="History ledger">
+             <thead>
+-              <tr><th>Time</th><th>Type</th><th>Work item</th><th>Actor</th><th>Event</th><th>Status</th></tr>
++              <!-- Item 4: message, work item and thread are DISTINCT
++                   identifier types and get their own columns. A thr-...
++                   value must never appear under "Work item". -->
++              <tr><th>Time</th><th>Type</th><th>Message</th><th>Work item</th><th>Thread</th><th>Actor</th><th>Event</th><th>Status</th></tr>
+             </thead>
+-            <tbody id="ledger-body"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
++            <tbody id="ledger-body"><tr><td colspan="8" class="muted">Loading...</td></tr></tbody>
+           </table>
+         </div>
+         <div class="ledger-detail" id="ledger-detail" hidden>
 diff --git a/apps/control-plane/static/style.css b/apps/control-plane/static/style.css
-index ac13c95..44a614a 100644
+index ac13c95..133ca13 100644
 --- a/apps/control-plane/static/style.css
 +++ b/apps/control-plane/static/style.css
-@@ -1047,3 +1047,104 @@ body.history-open .mission { display: none !important; }
+@@ -1047,3 +1047,138 @@ body.history-open .mission { display: none !important; }
  .activity-details[open] summary::before { content: "<U+25BE> "; }
  .activity-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray); white-space: nowrap; }
  .activity-log { margin: 0.35rem 0 0.2rem; font-family: ui-monospace, monospace; font-size: 0.74rem; white-space: pre-wrap; max-height: 5.5rem; overflow-y: auto; }
@@ -1140,12 +1486,46 @@ index ac13c95..44a614a 100644
 +  color: var(--warn, #d08a00);
 +  font-weight: 700;
 +}
++
++/* Durable identity on queue tiles (operator correction items 1, 2, 3, 10). */
++.q-ids {
++  display: flex; flex-direction: column; gap: 0.12rem;
++  margin-top: 0.3rem; padding-top: 0.3rem;
++  border-top: 1px dashed var(--line);
++}
++.q-idrow { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; font-size: 0.66rem; }
++.q-idk {
++  color: var(--gray); font-weight: 700; text-transform: uppercase;
++  letter-spacing: 0.04em; min-width: 5.6rem;
++}
++/* Identifiers render in their STORED case; no transform may alter them. */
++.q-idv { text-transform: none; letter-spacing: 0; opacity: .9; }
++.q-idnote {
++  font-size: 0.6rem; color: var(--gray); border: 1px dotted var(--line);
++  border-radius: 999px; padding: 0 0.3rem; cursor: help;
++}
++.q-phase, .q-exec {
++  font-size: 0.6rem; font-weight: 700; text-transform: none; letter-spacing: 0;
++  padding: 0 0.35rem; border-radius: 999px; border: 1px solid var(--line);
++  color: var(--gray);
++}
++.q-phase { border-style: dashed; }
++/* An ambiguous tile is MARKED, never hidden: the records are real. */
++.q-integrity {
++  margin-top: 0.3rem; padding: 0.25rem 0.4rem;
++  font-size: 0.64rem; line-height: 1.35; color: var(--text);
++  background: var(--panel-2); border-left: 3px solid var(--warn, #d08a00);
++  border-radius: 6px;
++}
++.q-row.q-ambiguous { border-left: 3px solid var(--warn, #d08a00); }
++/* History: an absent binding is stated, not substituted. */
++.ledger-none { font-style: italic; opacity: .7; }
 diff --git a/tests/dom/session_ux_runtime.mjs b/tests/dom/session_ux_runtime.mjs
 new file mode 100644
-index 0000000..daa8342
+index 0000000..0ce8341
 --- /dev/null
 +++ b/tests/dom/session_ux_runtime.mjs
-@@ -0,0 +1,487 @@
+@@ -0,0 +1,611 @@
 +/*
 + * Runtime coverage for the session-continuity UX logic.
 + *
@@ -1418,7 +1798,7 @@ index 0000000..daa8342
 +
 +  // Pretend a previous session stored a selection, as a real reload would.
 +  evalIn(ctx, 'localStorage.setItem("cw_selected_work_item_v1", "message:msg-prior");' +
-+              'lastWorkItems = [{ work_item_id: "message:msg-prior", thread_id: "thr-prior",' +
++              'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-prior", thread_id: "thr-prior",' +
 +              ' presentation_state: "needs_operator" }];');
 +
 +  ctx.applyWorkHashRoute();
@@ -1477,7 +1857,7 @@ index 0000000..daa8342
 +  // Unknown item, queue already loaded (the hashchange case).
 +  const reg = baseRegistry();
 +  const ctx = loadApp(reg, "#work=message%3Amsg-ghost", ["conv-scroll", "conversation"]);
-+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-real", thread_id: "thr-real",' +
++  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-real", thread_id: "thr-real",' +
 +              ' presentation_state: "needs_operator" }];');
 +  ctx.applyWorkHashRoute();
 +  ok(evalIn(ctx, "selectedWorkItemId") === null,
@@ -1492,7 +1872,7 @@ index 0000000..daa8342
 +  // Terminal item, queue already loaded: openable, but never persisted.
 +  const reg = baseRegistry();
 +  const ctx = loadApp(reg, "#work=message%3Amsg-done", ["conv-scroll", "conversation"]);
-+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-done", thread_id: "thr-done",' +
++  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-done", thread_id: "thr-done",' +
 +              ' presentation_state: "recently_completed" }];');
 +  ctx.applyWorkHashRoute();
 +  ok(evalIn(ctx, "selectedWorkItemId") === "message:msg-done",
@@ -1507,7 +1887,7 @@ index 0000000..daa8342
 +  // Active item, queue already loaded: bound and persisted normally.
 +  const reg = baseRegistry();
 +  const ctx = loadApp(reg, "#work=message%3Amsg-live", ["conv-scroll", "conversation"]);
-+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
++  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
 +              ' presentation_state: "needs_operator" }];');
 +  ctx.applyWorkHashRoute();
 +  eq([evalIn(ctx, "selectedWorkItemId"), evalIn(ctx, "selectedConvThread")],
@@ -1521,7 +1901,7 @@ index 0000000..daa8342
 +{
 +  const reg = baseRegistry();
 +  const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
-+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
++  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
 +              ' presentation_state: "needs_operator" }];');
 +  ctx.applyWorkHashRoute();                       // reports a malformed route
 +  ok(evalIn(ctx, "routeErrorReported") === true, "a malformed route latches the explanation");
@@ -1543,7 +1923,7 @@ index 0000000..daa8342
 +  // Deliberate operator navigation also supersedes a stale explanation.
 +  const reg = baseRegistry();
 +  const ctx = loadApp(reg, "#work=%", ["conv-scroll", "conversation"]);
-+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
++  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live", thread_id: "thr-live",' +
 +              ' presentation_state: "needs_operator" }];');
 +  ctx.applyWorkHashRoute();
 +  ok(evalIn(ctx, "routeErrorReported") === true, "latched after a malformed route");
@@ -1561,13 +1941,24 @@ index 0000000..daa8342
 +
 +  eq(ctx.activeStateOf({ presentation_state: "needs_operator" }), "waiting_for_operator",
 +     "needs_operator maps to waiting_for_operator");
-+  eq(ctx.activeStateOf({ last_activity_event: "operator_message" }), "operator_message_posted",
-+     "an operator message is reachable as its own rank (was unreachable)");
++  // Round-5 finding, now corrected: last_activity_event can never be
++  // "operator_message" or "message". The producing function emits exactly
++  // created|completion|verification|council|gate|progress|claim|response|
++  // evidence, so the old branch was dead code and its rank unreachable.
++  eq(ctx.activeStateOf({ last_activity_event: "operator_message" }), "",
++     "a fabricated event value produces no state");
++  ["created", "completion", "verification", "council", "gate", "progress",
++   "claim", "response", "evidence"].forEach((ev) => {
++    ok(ctx.activeStateOf({ last_activity_event: ev }) !== "operator_message_posted",
++       "no real event value can produce operator_message_posted (" + ev + ")");
++  });
 +  eq(ctx.activeStateOf({ presentation_state: "totally_new_state" }), "",
 +     "an unrecognised state is NOT guessed as in_council");
 +
 +  ok(evalIn(ctx, 'ACTIVE_RANK.indexOf("wake_pending")') === -1,
 +     "wake_pending is not in the executable rank");
++  ok(evalIn(ctx, 'ACTIVE_RANK.indexOf("operator_message_posted")') === -1,
++     "the unreachable operator_message_posted rank is removed");
 +  ok(evalIn(ctx, "ACTIVE_RANK.length") > 0, "ACTIVE_RANK is readable and non-empty");
 +
 +  // Unknown states must sort AFTER every known state.
@@ -1597,13 +1988,126 @@ index 0000000..daa8342
 +}
 +
 +// --------------------------------------------------------------------------
++// 3b. LOADED-EMPTY is not NOT-LOADED. Round-5 finding: inferring queue
++//     availability from lastWorkItems.length meant a successful empty response
++//     looked identical to an unfetched queue, so an unknown explicit route was
++//     retained as a provisional selection instead of being rejected.
++// --------------------------------------------------------------------------
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=message%3Amsg-ghost", ["conv-scroll", "conversation"]);
++  // Queue NOT yet fetched: validation defers, nothing is rejected.
++  ok(ctx.bindRouteSelection("message:msg-ghost") === null,
++     "an unfetched queue defers route validation");
++
++  // Queue fetched SUCCESSFULLY and empty: authoritative, so the route is bad.
++  evalIn(ctx, "workItemsLoaded = true; lastWorkItems = [];");
++  ok(ctx.bindRouteSelection("message:msg-ghost") === false,
++     "a successful EMPTY load rejects an unknown route (was retained before)");
++  ok(evalIn(ctx, "selectedWorkItemId") === null,
++     "nothing stays selected after a successful empty load");
++  ok(evalIn(ctx, 'localStorage.getItem("cw_selected_work_item_v1")') === null,
++     "nothing stays persisted after a successful empty load");
++  ok(reg["restore-status"].textContent.indexOf("not in the live queue") !== -1,
++     "the rejection is explained");
++}
++
++// --------------------------------------------------------------------------
++// 3c. PHASE and EXECUTOR STATE are separate facts from separate fields.
++// --------------------------------------------------------------------------
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
++
++  // Same item: phase VERIFICATION, executor IN COUNCIL. Not contradictory.
++  const it = { status: "verification", runner_state: "waiting_on_council" };
++  eq(ctx.lifecyclePhaseLabel(it), "VERIFICATION", "phase comes from status");
++  eq(ctx.executorStateLabel(it), "IN COUNCIL", "executor comes from runner_state");
++
++  // ACTIVE requires positive runner evidence, never a posted message.
++  eq(ctx.executorStateLabel({ runner_state: "active_runner" }), "ACTIVE",
++     "ACTIVE is reported only for active_runner");
++  eq(ctx.executorStateLabel({ status: "claimed", runner_state: "claimed_idle" }), "CLAIMED",
++     "a claim alone is CLAIMED, never ACTIVE");
++  eq(ctx.executorStateLabel({ last_activity_event: "progress" }), "",
++     "a posted message alone yields no executor state");
++  eq(ctx.executorStateLabel({ runner_state: "unowned" }), "UNCLAIMED",
++     "an unowned runner is UNCLAIMED");
++
++  // Only the real server domain is honoured.
++  eq(ctx.executorStateLabel({ runner_state: "totally_invented" }), "",
++     "an unknown runner_state is not labelled");
++  eq(ctx.lifecyclePhaseLabel({ status: "totally_invented" }), "",
++     "an unknown status is not labelled");
++}
++
++// --------------------------------------------------------------------------
++// 3d. CANONICAL IDENTITY. The duplicate tiles are distinct durable work items
++//     that share a thread, so they are disambiguated and flagged, never merged.
++// --------------------------------------------------------------------------
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
++  const items = [
++    { work_item_id: "message:msg-20260723T165821979878", thread_id: "thr-20260723T153047865278" },
++    { work_item_id: "message:msg-20260723T163351081476", thread_id: "thr-20260723T153047865278" },
++    { work_item_id: "message:msg-20260720T192858711719", thread_id: "thr-20260720T192858711719" },
++  ];
++  const idx = ctx.threadWorkItemIndex(items);
++  eq(idx["thr-20260723T153047865278"].length, 2,
++     "two canonical work items share one thread");
++  ok(ctx.sharesThreadWithOtherWorkItems(items[0], items) === true,
++     "a shared-thread item is flagged");
++  ok(ctx.sharesThreadWithOtherWorkItems(items[2], items) === false,
++     "a sole-owner item is not flagged");
++
++  // A thread id must never be mistaken for a work item id.
++  items.forEach((i) => {
++    ok(String(i.work_item_id).indexOf("message:") === 0,
++       "every canonical work item id is message-scoped");
++    ok(String(i.work_item_id).indexOf("thr-") !== 0,
++       "a thread id is never used as a work item id");
++  });
++
++  eq(ctx.originMessageId("message:msg-20260723T165821979878"), "msg-20260723T165821979878",
++     "the origin message id is derived from the canonical work item id");
++  eq(ctx.originMessageId("in_progress:session-ux-cta-20260725"), "",
++     "a non-message work item has no origin message id");
++
++  // The shared-suffix coincidence is detected so it can be explained.
++  ok(ctx.sharesSuffix("message:msg-20260720T192858711719", "thr-20260720T192858711719") === true,
++     "a matching suffix is detected");
++  ok(ctx.sharesSuffix("message:msg-20260723T165821979878", "thr-20260723T153047865278") === false,
++     "a differing suffix is not claimed to match");
++
++  // Abbreviation is display-only: it must never be mistaken for the real id.
++  const full = "message:msg-20260723T165821979878";
++  ok(ctx.abbrevId(full).length < full.length, "long ids are abbreviated for display");
++  ok(ctx.abbrevId("msg-1") === "msg-1", "short ids are shown whole");
++}
++
++// --------------------------------------------------------------------------
++// 3e. LEDGER identity: an absent binding is stated, never substituted.
++// --------------------------------------------------------------------------
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
++  eq(ctx.ledgerMessageId({ type: "message", record: { message_id: "msg-1" } }), "msg-1",
++     "a message row exposes its durable message id");
++  eq(ctx.ledgerMessageId({ type: "packet", record: { filename: "x.json" } }), "",
++     "a packet row has no message id and does not borrow one");
++  eq(ctx.ledgerMessageId({ type: "agent_event", record: {} }), "",
++     "an event row has no message id");
++}
++
++// --------------------------------------------------------------------------
 +// 4. Composer target fails closed without a durable thread.
 +// --------------------------------------------------------------------------
 +{
 +  const reg = baseRegistry();
 +  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
 +
-+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-1", thread_id: "thr-1" }];' +
++  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-1", thread_id: "thr-1" }];' +
 +              'selectedWorkItemId = "message:msg-1"; selectedConvThread = null;');
 +  const bound = ctx.convComposerTarget();
 +  eq([bound.work_item_id, bound.thread_id, !!bound.unresolved],
@@ -1611,7 +2115,7 @@ index 0000000..daa8342
 +     "a known item binds work item and durable thread together");
 +
 +  // Same selection, but the queue has no thread for it.
-+  evalIn(ctx, 'lastWorkItems = [{ work_item_id: "message:msg-2", thread_id: null }];' +
++  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-2", thread_id: null }];' +
 +              'selectedWorkItemId = "message:msg-2"; selectedConvThread = null;');
 +  const unresolved = ctx.convComposerTarget();
 +  ok(unresolved.unresolved === true,
@@ -1635,10 +2139,10 @@ index 0000000..daa8342
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..38d65a2
+index 0000000..ad814fc
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,850 @@
+@@ -0,0 +1,1133 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -1657,6 +2161,10 @@ index 0000000..38d65a2
 +import re
 +import unittest
 +
++# Single backslash, built from its code point so the source stays
++# ASCII-safe and the regex literals below assemble unambiguously.
++BS = chr(92)
++
 +STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 +                      "..", "apps", "control-plane", "static")
 +
@@ -1672,6 +2180,7 @@ index 0000000..38d65a2
 +
 +
 +
++RE_CARD = r"function queueCard[\s\S]{0,8000}?\n}"
 +RE_PARSE = r"function parseWorkRoute[\s\S]{0,4000}?\n\}"
 +
 +
@@ -1751,8 +2260,18 @@ index 0000000..38d65a2
 +        self.assertIsNotNone(m)
 +        order = re.findall(r'"([a-z_]+)"', m.group(1))
 +        self.assertEqual(order, [
-+            "waiting_for_operator", "operator_message_posted",
-+            "paused", "executor_active", "in_council", "blocked", "claimed"])
++            "waiting_for_operator", "paused", "executor_active",
++            "in_council", "claimed", "blocked"])
++
++    def test_operator_message_posted_is_removed_as_unreachable(self):
++        """Proven against the real server value domain: last_activity_event is
++        emitted only as created|completion|verification|council|gate|progress|
++        claim|response|evidence, so no item can ever reach this rank."""
++        m = re.search(r"ACTIVE_RANK = " + BS + r"[(.*?)" + BS + r"]", APP, re.S)
++        self.assertNotIn("operator_message_posted", m.group(1))
++        self.assertNotIn('=== "operator_message"', APP,
++                         "the dead event alias must be gone, not just unranked")
++        self.assertNotIn('ev === "message"', APP)
 +
 +    def test_wake_pending_is_deferred_not_simulated(self):
 +        """No durable field can establish wake_pending before the wake bridge.
@@ -1974,6 +2493,268 @@ index 0000000..38d65a2
 +        self.assertIn("highest-priority active work", call,
 +                      "the message must not promise the operator's previous item: "
 +                      "the persisted selection is cleared before restoration runs")
++
++
++class CanonicalIdentityTest(unittest.TestCase):
++    """Correction item 1.
++
++    Investigation result: the apparently duplicated tiles are NOT phantoms.
++    /api/work-items returns genuinely distinct canonical work items whose titles
++    collide because the title is derived from the origin message text, and three
++    of them share one thread. Every work_item_id is a real "message:msg-..."
++    value. Collapsing them would HIDE durable governed work, so they are
++    disambiguated and the shared-thread condition is surfaced instead.
++    """
++
++    def test_queue_identity_is_derived_from_the_canonical_work_item_id(self):
++        m = re.search(RE_CARD, APP)
++        self.assertIsNotNone(m, "queueCard not found")
++        body = m.group(0)
++        self.assertIn("it.work_item_id", body)
++        self.assertIn("originMessageId(wid)", body)
++
++    def test_a_thread_id_is_never_rendered_as_a_work_item(self):
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        # The work-item row must read work_item_id, never fall back to a thread.
++        self.assertNotIn("it.work_item_id || it.thread_id", body)
++        self.assertIn("Work item", body)
++        self.assertIn("Thread", body)
++
++    def test_shared_thread_raises_an_integrity_warning(self):
++        self.assertIn("function threadWorkItemIndex", APP)
++        self.assertIn("function sharesThreadWithOtherWorkItems", APP)
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        self.assertIn("q-integrity", body)
++        self.assertIn("sharesThreadWithOtherWorkItems", body)
++
++    def test_conflicting_records_are_flagged_not_hidden(self):
++        """No filtering may drop a durable work item to tidy the view."""
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        for banned in ("filter(", "dedupe", "unique("):
++            self.assertNotIn(banned, body,
++                             "tiles must not be removed; the records are real")
++        self.assertIn("q-ambiguous", body)
++        self.assertIn(".q-integrity", CSS)
++
++
++class QueueTileIdentityTest(unittest.TestCase):
++    """Correction item 2: identify the durable object without opening it."""
++
++    def test_tile_shows_work_item_thread_and_origin_ids(self):
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        for label in ("Work item", "Thread", "Origin message"):
++            self.assertIn(label, body)
++
++    def test_tile_offers_copy_for_each_identifier(self):
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        self.assertEqual(body.count("copyIdButton("), 3,
++                         "work item, thread and origin message each need Copy")
++        self.assertIn('copyIdButton(wid, "work-item ID")', body)
++        self.assertIn('copyIdButton(tid, "thread ID")', body)
++
++    def test_copy_controls_carry_the_full_id_not_the_abbreviation(self):
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        self.assertIn("copyIdButton(wid", body)
++        self.assertNotIn("copyIdButton(abbrevId", body)
++
++    def test_copying_does_not_also_open_the_item(self):
++        self.assertIn("function eventTargetsInnerControl", APP)
++        # One definition plus exactly two guarded entry points: click and key.
++        self.assertEqual(APP.count("if (eventTargetsInnerControl(e)) return;"), 2,
++                         "both the click and keyboard paths must be guarded")
++
++
++class IdentifierTerminologyTest(unittest.TestCase):
++    """Correction item 3: each identifier type is named and explained."""
++
++    def test_matching_suffix_is_explained_rather_than_hidden(self):
++        self.assertIn("function sharesSuffix", APP)
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        self.assertIn("sharesSuffix(wid, tid)", body)
++        self.assertIn("matching suffix", body)
++
++    def test_the_explanation_says_they_remain_different_identifiers(self):
++        m = re.search(RE_CARD, APP)
++        self.assertIn("different identifiers", m.group(0))
++
++    def test_identifiers_are_not_case_transformed_on_tiles(self):
++        i = CSS.index(".q-idv")
++        self.assertIn("text-transform: none", CSS[i:i + 200])
++
++
++class HistoryColumnsTest(unittest.TestCase):
++    """Correction item 4.
++
++    The server already returns work_item_id and thread_id as distinct fields
++    (zero ledger rows carry a thread id in the work-item field). The CLIENT
++    collapsed them with `work_item_id || thread_id || packet_id`, so the 148
++    rows with no work-item binding printed a thr-... under a heading that said
++    "Work item" -- a false identity claim.
++    """
++
++    def test_history_has_distinct_identifier_columns(self):
++        i = HTML.index('<table class="ledger"')
++        head = HTML[i:i + 700]
++        for col in ("<th>Message</th>", "<th>Work item</th>", "<th>Thread</th>",
++                    "<th>Actor</th>", "<th>Event</th>", "<th>Status</th>"):
++            self.assertIn(col, head)
++
++    def test_the_substitution_fallback_is_gone(self):
++        self.assertNotIn("row.work_item_id || row.thread_id", APP)
++
++    def test_a_missing_binding_is_stated_honestly(self):
++        self.assertIn("no work item", APP)
++        self.assertIn("ledger-none", APP)
++        self.assertIn(".ledger-none", CSS)
++
++    def test_message_id_column_is_only_populated_for_messages(self):
++        self.assertIn("function ledgerMessageId", APP)
++        m = re.search(r"function ledgerMessageId[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n" + BS + r"}", APP)
++        body = m.group(0)
++        self.assertIn('row.type === "message"', body)
++        self.assertIn('return ""', body)
++
++    def test_colspan_matches_the_new_column_count(self):
++        self.assertIn('colspan="8"', HTML)
++        self.assertIn('colspan="8"', APP)
++        self.assertNotIn('colspan="6"', APP)
++
++
++class DestinationAgreementTest(unittest.TestCase):
++    """Correction item 5: URL, selection, thread and composer must agree."""
++
++    def test_a_disagreement_check_exists(self):
++        self.assertIn("function destinationDisagreement", APP)
++
++    def test_it_compares_route_selection_and_thread(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        self.assertIsNotNone(m, "destinationDisagreement not found")
++        body = m.group(0)
++        self.assertIn("selectedWorkItemId", body)
++        self.assertIn("thread_id", body)
++        self.assertIn("parseWorkRoute(location.hash)", body)
++
++    def test_no_body_is_built_when_they_disagree(self):
++        i = APP.index("const disagreement = destinationDisagreement(preTarget)")
++        j = APP.index("const body = Object.assign")
++        self.assertLess(i, j, "the check must precede request construction")
++        window = APP[i:i + 400]
++        self.assertIn("showError", window)
++        self.assertIn("return;", window)
++
++    def test_the_operator_is_told_why(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        body = m.group(0)
++        for phrase in ("disagree", "does not match", "different work item"):
++            self.assertIn(phrase, body)
++
++
++class LoadedEmptyQueueTest(unittest.TestCase):
++    """Round-5 finding: a successful empty load is authoritative."""
++
++    def test_a_loaded_flag_exists_and_is_set_on_success(self):
++        self.assertIn("let workItemsLoaded = false;", APP)
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        self.assertIn("workItemsLoaded = true;", m.group(0))
++
++    def test_validation_no_longer_infers_from_length(self):
++        m = re.search(r"function bindRouteSelection[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("if (!workItemsLoaded) return null;", body)
++        self.assertNotIn("if (!items.length) return null;", body)
++
++
++class PhaseVersusExecutorTest(unittest.TestCase):
++    """Correction item 10: two different facts, two different fields."""
++
++    def test_phase_and_executor_are_separate_functions(self):
++        for fn in ("lifecyclePhaseOf", "lifecyclePhaseLabel",
++                   "executorRunnerState", "executorStateLabel"):
++            self.assertIn("function " + fn, APP)
++
++    def test_phase_comes_from_status_only(self):
++        m = re.search(r"function lifecyclePhaseOf[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("it.status", body)
++        self.assertNotIn("runner_state", body)
++
++    def test_executor_comes_from_runner_state_only(self):
++        m = re.search(r"function executorRunnerState[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("it.runner_state", body)
++        self.assertNotIn("last_activity_event", body)
++
++    def test_labels_cover_exactly_the_server_domain(self):
++        m = re.search(r"const EXECUTOR_LABELS = {(.*?)};", APP, re.S)
++        keys = set(re.findall(r"(\w+):", m.group(1)))
++        self.assertEqual(keys, {"active_runner", "waiting_on_council",
++                                "waiting_on_operator", "claimed_idle",
++                                "stale_or_no_heartbeat", "unowned", "unknown"})
++
++    def test_active_requires_positive_runner_evidence(self):
++        m = re.search(r"const EXECUTOR_LABELS = {(.*?)};", APP, re.S)
++        self.assertIn('active_runner: "ACTIVE"', m.group(1))
++        self.assertNotIn('claimed_idle: "ACTIVE"', m.group(1))
++
++    def test_the_tile_labels_both_separately(self):
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        self.assertIn("Phase ", body)
++        self.assertIn("Executor ", body)
++
++
++class ComposerSubmissionFeedbackTest(unittest.TestCase):
++    """Correction item 13: submission must be visible and non-duplicable."""
++
++    def test_the_button_reports_the_in_flight_state(self):
++        self.assertIn('sendBtn.textContent = "Sending...";', APP)
++        self.assertIn('sendBtn.setAttribute("aria-busy", "true");', APP)
++
++    def test_the_button_is_disabled_while_in_flight(self):
++        i = APP.index('sendBtn.textContent = "Sending...";')
++        self.assertIn("sendBtn.disabled = true;", APP[i - 200:i])
++
++    def test_the_label_is_captured_not_hardcoded_on_restore(self):
++        self.assertIn("const idleLabel = sendBtn.textContent;", APP)
++        self.assertIn("sendBtn.textContent = idleLabel;", APP)
++
++    def test_state_is_restored_in_finally_so_it_cannot_strand(self):
++        i = APP.index("sendBtn.textContent = idleLabel;")
++        window = APP[max(0, i - 400):i]
++        self.assertIn("} finally {", window)
++
++    def test_duplicate_submission_is_blocked_for_every_entry_point(self):
++        """Click, Enter and Ctrl+Enter all funnel through send()."""
++        i = APP.index("async function send() {")
++        self.assertIn("if (sending) return;", APP[i:i + 200],
++                      "re-entry must be blocked at the top of send()")
++        # Ctrl+Enter routes to the same guarded function, not a parallel path.
++        self.assertIn("send();", APP[APP.index('e.key === "Enter" && (e.ctrlKey'):][:200])
++
++    def test_the_draft_is_kept_until_durable_success(self):
++        i = APP.index("clearDraft(draftKey());")
++        before = APP[max(0, i - 1400):i]
++        self.assertIn("stored.message !== canonical", before,
++                      "the draft may only clear after the durable re-read matches")
++
++    def test_failure_paths_preserve_the_draft(self):
++        for msg in ("The draft was kept", "draft was kept"):
++            self.assertIn(msg, APP)
++
++    def test_success_shows_the_durable_id_and_destination(self):
++        self.assertIn("showPostConfirmation(result);", APP)
++        m = re.search(r"function showPostConfirmation[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("message_id", body)
++        self.assertIn("thread_id", body)
++        self.assertIn("copyIdButton", body)
 +
 +
 +class UnifiedRoutePolicyTest(unittest.TestCase):
@@ -2381,12 +3162,18 @@ index 0000000..38d65a2
 +    def test_operator_message_does_not_yield_a_running_state(self):
 +        m = re.search(r"function truthfulExecutionState[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
-+        self.assertIn("operator_message_posted", body)
-+        i_msg = body.index('ev === "operator_message"')
-+        i_run = body.index('p === "running"')
-+        self.assertLess(i_msg, i_run,
-+                        "an operator message must be classified before any "
-+                        "running check can claim the executor is active")
++        # The event-derived branch is GONE: last_activity_event can never be
++        # "message" or "operator_message", so that rank was unreachable.
++        self.assertNotIn("operator_message_posted", body)
++        self.assertNotIn("last_activity_event", body)
++        self.assertNotIn('"running"', body,
++                         "a presentation_state of running must not imply an "
++                         "executor state; ACTIVE comes from runner_state only")
++        # The old ordering assertion (operator-message branch before the
++        # running check) no longer applies: BOTH branches are gone. ACTIVE is
++        # now derived solely from runner_state === "active_runner", which the
++        # server sets only on positive evidence of recent non-claim activity.
++        self.assertIn('r === "active_runner"', body)
 +
 +    def test_unsupported_states_are_not_simulated(self):
 +        labels = re.search(r"EXECUTION_STATE_LABELS = \{(.*?)\n\}", APP, re.S).group(1)

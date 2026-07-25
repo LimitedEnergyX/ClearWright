@@ -242,12 +242,16 @@ class PreAllocationRefusalIntegrationTest(unittest.TestCase):
         finally:
             eg.classify = orig
         payload = json.loads(out.strip().splitlines()[-1])
-        self.assertEqual(payload.get("normalized_reason"), "tripwire_refusal")
+        # a scanner EXCEPTION is an unresolved classifier, not a tripwire hit
+        self.assertEqual(payload.get("normalized_reason"), "classifier_unresolved")
         self.assertEqual(self._council_count(), 0)
 
     def test_non_confusable_hit_category_is_also_refused(self):
-        """Codex round-1 blocking finding: the gate collapses ANY non-clear
-        classify() verdict into tripwire_refusal. That is SOUND, not
+        """A "hit" of ANY finding category is a tripwire refusal, because
+        egress_guard.authorize() raises EgressBlocked("tripwire_hit") for a hit
+        verdict over the FULL outbound bytes with NO branching on category and
+        before the sensitive-tier branch, so it applies on every lane. Unknown
+        verdicts no longer take this path; they are classifier_unresolved.
         over-refusal, because egress_guard.authorize() raises
         EgressBlocked("tripwire_hit") for any non-clear verdict over the FULL
         outbound bytes with NO branching on finding category, and before the
@@ -283,14 +287,18 @@ class PreAllocationRefusalIntegrationTest(unittest.TestCase):
             seen.append("exception")
             raise RuntimeError("scanner exploded")
 
-        for fn in (_verdict, _raise):
+        # Under the three-way contract these report DIFFERENT normalized
+        # reasons: a structured "hit" is a tripwire refusal, while an exception
+        # is an unresolved classifier. Both refuse; neither dispatches.
+        for fn, expected in ((_verdict, "tripwire_refusal"),
+                             (_raise, "classifier_unresolved")):
             eg.classify = fn
             try:
                 code, out = self._run(self._plan("ordinary ascii packet\n"))
             finally:
                 eg.classify = orig
             payload = json.loads(out.strip().splitlines()[-1])
-            self.assertEqual(payload.get("normalized_reason"), "tripwire_refusal")
+            self.assertEqual(payload.get("normalized_reason"), expected)
             self.assertEqual(self._council_count(), 0)
         self.assertEqual(seen, ["verdict", "exception"])
 
@@ -317,6 +325,101 @@ class PreAllocationRefusalIntegrationTest(unittest.TestCase):
         self.assertEqual(captured["data_sensitivity"], expected)
         self.assertEqual(cwrc.resolve_lane(captured["data_sensitivity"])[1],
                          cwrc.resolve_lane(expected)[1])
+
+    def test_classifier_verdict_matrix_is_exhaustive(self):
+        """Operator-authorized round-3 correction. The classifier contract is
+        exactly two KNOWN verdicts; everything else fails closed with a DISTINCT
+        reason and is never treated as authorization.
+
+        clear -> eligible | hit -> tripwire_refusal | anything else ->
+        classifier_unresolved. Every refusal consumes zero council ids."""
+        import clearwright_egress_guard as eg
+
+        def verdict(v):
+            return lambda text, *a, **kw: {"findings": {}, "verdict": v,
+                                           "policy_version": "t",
+                                           "policy_sha256": "x",
+                                           "input_sha256": "y"}
+
+        cases = [
+            ("hit", verdict("hit"), "tripwire_refusal"),
+            ("unknown", verdict("degraded"), "classifier_unresolved"),
+            ("empty", verdict(""), "classifier_unresolved"),
+            ("none", verdict(None), "classifier_unresolved"),
+            ("future", verdict("quarantined"), "classifier_unresolved"),
+            ("malformed-no-verdict-key",
+             lambda text, *a, **kw: {"findings": {}}, "classifier_unresolved"),
+            ("malformed-not-a-dict",
+             lambda text, *a, **kw: None, "classifier_unresolved"),
+            ("malformed-nonstring-verdict",
+             verdict(1), "classifier_unresolved"),
+            ("exception",
+             lambda text, *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+             "classifier_unresolved"),
+        ]
+        orig = eg.classify
+        for label, fn, expected in cases:
+            eg.classify = fn
+            try:
+                code, out = self._run(self._plan("ascii packet\n"))
+            finally:
+                eg.classify = orig
+            payload = json.loads(out.strip().splitlines()[-1])
+            self.assertEqual(payload.get("normalized_reason"), expected,
+                             "case %s" % label)
+            self.assertEqual(payload.get("error"), "dispatch_ineligible",
+                             "case %s" % label)
+            self.assertIsNone(payload.get("council_id"), "case %s" % label)
+            self.assertEqual(payload.get("attempts"), {}, "case %s" % label)
+            self.assertEqual(self._council_count(), 0, "case %s" % label)
+
+    def test_every_refusal_reason_is_a_known_normalized_class(self):
+        self.assertIn("classifier_unresolved", cwdp.NORMALIZED_FAILURE_CLASSES)
+        self.assertIn("tripwire_refusal", cwdp.NORMALIZED_FAILURE_CLASSES)
+
+    def test_unresolved_classifier_is_not_reported_as_a_tripwire(self):
+        """An unrecognised verdict must report its OWN reason: mislabelling it a
+        tripwire hit would hide a classifier contract change."""
+        sig = cwdp.production_signals(
+            dispatch_lane="user", review_profile="code", artifact_count=0,
+            lineage_bound=True, raw_provenance_standard=True,
+            tripwire_clear=True, classifier_resolved=False)
+        self.assertEqual(cwdp.dispatch_eligibility(sig),
+                         (False, "classifier_unresolved"))
+        # and it wins over a simultaneous tripwire failure, by check ordering
+        sig2 = cwdp.production_signals(
+            dispatch_lane="user", review_profile="code", artifact_count=0,
+            lineage_bound=True, raw_provenance_standard=True,
+            tripwire_clear=False, classifier_resolved=False)
+        self.assertEqual(cwdp.dispatch_eligibility(sig2),
+                         (False, "classifier_unresolved"))
+
+    def test_clear_verdict_still_reaches_dispatch_unchanged(self):
+        """The eligible path must be untouched by the three-way branch."""
+        sig = cwdp.production_signals(
+            dispatch_lane="user", review_profile="code", artifact_count=0,
+            lineage_bound=True, raw_provenance_standard=True,
+            tripwire_clear=True, classifier_resolved=True)
+        self.assertEqual(cwdp.dispatch_eligibility(sig), (True, None))
+
+    def test_caller_input_cannot_convert_a_refusal_into_authorization(self):
+        """No caller-controlled value may turn any refusal into an allow."""
+        for planted in ({}, {"classifier_resolved": True},
+                        {"tripwire_clear": True}, {"lane_authorized": True},
+                        {"classifier_resolved": "yes"}, {"tripwire_clear": 1}):
+            for real in (cwdp.production_signals(
+                             dispatch_lane="user", review_profile="code",
+                             artifact_count=0, lineage_bound=True,
+                             raw_provenance_standard=True, tripwire_clear=True,
+                             classifier_resolved=False),
+                         cwdp.production_signals(
+                             dispatch_lane="user", review_profile="code",
+                             artifact_count=0, lineage_bound=True,
+                             raw_provenance_standard=True, tripwire_clear=False,
+                             classifier_resolved=True)):
+                merged = dict(planted)
+                merged.update(real)          # authoritative facts win
+                self.assertFalse(cwdp.dispatch_eligibility(merged)[0])
 
     def test_eligible_packet_still_reaches_council_creation(self):
         """The gate must not block a packet that would dispatch today."""

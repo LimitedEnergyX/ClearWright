@@ -612,13 +612,28 @@ def _council_body(args, phase, root, stage):
         # send. It does NOT claim the converse, because the outbound bytes also
         # include scaffold and derived components not available before a council
         # exists. The guard remains the complete check over the exact bytes.
+        # THREE-WAY classifier contract, so no verdict is ever treated as
+        # authorization by default:
+        #   "clear"  -> continue through the existing eligible dispatch path;
+        #   "hit"    -> refuse before allocation with tripwire_refusal;
+        #   anything else (unknown, malformed, empty, absent, a future verdict)
+        #            -> refuse before allocation with the DISTINCT reason
+        #               classifier_unresolved, never mislabelled as a tripwire.
+        # An exception during classification takes the same unresolved path, so a
+        # scanner failure and an unrecognised verdict both fail closed.
         _tripwire_clear = True
+        _classifier_resolved = True
         if _pre_ctx_loaded:
             try:
-                _tripwire_clear = _egress.classify(_pre_ctx)["verdict"] == "clear"
+                _verdict = (_egress.classify(_pre_ctx) or {}).get("verdict")
             except Exception:
-                # ANY classification failure fails closed, not just EgressBlocked.
+                _verdict = None
+            if _verdict == "clear":
+                _tripwire_clear = True
+            elif _verdict == "hit":
                 _tripwire_clear = False
+            else:
+                _classifier_resolved = False
         _raw_provenance_ok = all(
             (_r.get("provenance") or {}).get("class") in _egress._STANDARD_PROVENANCE
             for _r in (lineage_records or [])
@@ -629,7 +644,8 @@ def _council_body(args, phase, root, stage):
                             + len(getattr(args, "artifact_id", None) or [])),
             lineage_bound=bool(lineage_records) and _cand is not None,
             raw_provenance_standard=_raw_provenance_ok,
-            tripwire_clear=_tripwire_clear))
+            tripwire_clear=_tripwire_clear,
+            classifier_resolved=_classifier_resolved))
         if not _elig_ok:
             cwrc.log_invocation(root, cwdp.refused_dispatch_record(
                 phase=phase, dispatch_lane=_lane, normalized_reason=_elig_reason,

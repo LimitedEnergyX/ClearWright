@@ -24,7 +24,8 @@ NORMALIZED_FAILURE_CLASSES = (
     "policy_denial", "repo_not_approved", "provenance_unresolved",
     "sensitive_content_prohibited", "tripwire_refusal",
     "composition_or_hash_mismatch", "provider_unavailable", "auth_failure",
-    "rate_limit", "timeout", "malformed_response", "adapter_failure", "unknown",
+    "rate_limit", "timeout", "malformed_response", "adapter_failure",
+    "classifier_unresolved", "unknown",
 )
 
 # Ordered (specific -> general) keyword rules over the safe signal text. Each rule
@@ -103,6 +104,9 @@ _ELIGIBILITY_CHECKS = (
     ("sensitive_prohibited", False, "sensitive_content_prohibited"),
     ("composition_bound", True, "composition_or_hash_mismatch"),
     ("exact_bytes_ok", True, "composition_or_hash_mismatch"),
+    # ordered BEFORE tripwire_clear: an unresolved classifier must report its own
+    # distinct reason and must never be reported as a tripwire hit.
+    ("classifier_resolved", True, "classifier_unresolved"),
     ("tripwire_clear", True, "tripwire_refusal"),
     ("provider_ready", True, "provider_unavailable"),
     ("auth_ok", True, "auth_failure"),
@@ -123,7 +127,8 @@ def dispatch_eligibility(signals):
 
 
 def production_signals(*, dispatch_lane, review_profile, artifact_count,
-                       lineage_bound, raw_provenance_standard, tripwire_clear):
+                       lineage_bound, raw_provenance_standard, tripwire_clear,
+                       classifier_resolved=True):
     """Derive AUTHORITATIVE pre-allocation signals from production preflight
     outputs. Callers pass already-computed facts; this function invents nothing.
 
@@ -141,6 +146,15 @@ def production_signals(*, dispatch_lane, review_profile, artifact_count,
       - tripwire_clear       mirrors the guard's unconditional tripwire_hit block
                              (enforced on EVERY lane). See the one-directional
                              note below.
+      - classifier_resolved  the classifier returned a verdict this gate
+                             UNDERSTANDS. The classifier contract is treated as
+                             exactly two known verdicts, "clear" and "hit".
+                             Anything else -- unknown, malformed, empty, absent,
+                             or a verdict added in future -- sets this False and
+                             refuses with the DISTINCT reason
+                             classifier_unresolved. An unrecognised verdict is
+                             NEVER treated as authorization, and is never
+                             mislabelled as a tripwire hit.
 
     DELIBERATELY EXCLUDED: provider readiness and credential presence. Those are
     DYNAMIC ENVIRONMENTAL conditions, not deterministic content properties: a
@@ -162,7 +176,8 @@ def production_signals(*, dispatch_lane, review_profile, artifact_count,
     signal is treated as eligible by dispatch_eligibility, so a lane that does
     not perform a given check never acquires a new blocker from it.
     """
-    signals = {"tripwire_clear": bool(tripwire_clear)}
+    signals = {"tripwire_clear": bool(tripwire_clear),
+               "classifier_resolved": bool(classifier_resolved)}
     if dispatch_lane == "internal_technical":
         signals["lane_authorized"] = (int(artifact_count or 0) == 0
                                       and review_profile == "code")

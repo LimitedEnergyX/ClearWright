@@ -777,6 +777,15 @@ function createComposer(opts) {
     // Phase 1, item 3: the destination is DISPLAYED, never inferred from prose.
     // Work-item id, thread id and an abbreviated title are shown above the
     // composer so posting to the wrong destination requires an explicit change.
+    if (target.work_item_id && target.unresolved) {
+      bannerEl.classList.add("composer-destination");
+      bannerEl.innerHTML =
+        '<span class="dest-label dest-unresolved">Destination unresolved</span> ' +
+        '<span class="dest-work mono" data-dest-work-item="' + esc(target.work_item_id) + '">' +
+        esc(target.work_item_id) + '</span>' +
+        '<span class="dest-title">no durable thread yet - sending is blocked</span>';
+      return;
+    }
     if (target.work_item_id) {
       const di = (lastWorkItems || []).find((it) => it.work_item_id === target.work_item_id);
       const title = di && di.title ? String(di.title) : "";
@@ -848,8 +857,15 @@ function createComposer(opts) {
       return;
     }
     showError("");
+    const preTarget = getTarget();
+    if (preTarget && preTarget.unresolved) {
+      showError("This work item has no durable thread yet, so the destination " +
+                "cannot be verified. The draft was kept; sending is blocked " +
+                "until the queue reports the thread.");
+      return;
+    }
     const draft = persistDraft();
-    const target = getTarget();
+    const target = preTarget;
     sending = true;
     sendBtn.disabled = true;
     try {
@@ -1351,7 +1367,19 @@ function applyComposerFocus() {
   } else {
     generic.setAttribute("aria-hidden", active ? "true" : "false");
     generic.querySelectorAll(FOCUSABLE).forEach((el) => {
-      if (active) el.tabIndex = -1; else el.removeAttribute("tabindex");
+      if (active) {
+        // Preserve any explicit tabindex so demotion is exactly reversible.
+        if (!el.hasAttribute("data-prior-tabindex")) {
+          el.setAttribute("data-prior-tabindex",
+                          el.hasAttribute("tabindex") ? el.getAttribute("tabindex") : "");
+        }
+        el.tabIndex = -1;
+      } else if (el.hasAttribute("data-prior-tabindex")) {
+        const prior = el.getAttribute("data-prior-tabindex");
+        if (prior === "") el.removeAttribute("tabindex");
+        else el.setAttribute("tabindex", prior);
+        el.removeAttribute("data-prior-tabindex");
+      }
     });
   }
 }
@@ -1508,14 +1536,20 @@ function readPersistedSelection() {
 
 // Operator-specified priority order. Ranked ONLY from fields /api/work-items
 // already returns; nothing is inferred or simulated.
+// The operator's stated priority order. "wake_pending" is DELIBERATELY ABSENT:
+// it can only be established by executor acknowledgement or wake telemetry,
+// which is the Phase 2 wake bridge. Listing a bucket that no durable field can
+// fill makes the ranking contract inert and advertises a priority that never
+// applies, so it is deferred rather than simulated (Phase 1, item 6). When the
+// wake bridge lands it belongs between operator_message_posted and paused.
 const ACTIVE_RANK = [
   "waiting_for_operator",
   "operator_message_posted",
-  "wake_pending",
   "paused",
   "executor_active",
   "in_council",
-  "blocked"
+  "blocked",
+  "claimed"
 ];
 
 // Terminal / non-active presentation states are never auto-selected.
@@ -1531,14 +1565,12 @@ function isActiveItem(it) {
 // needing executor acknowledgement or wake telemetry is deferred to the wake
 // bridge and is NEVER synthesised here.
 function activeStateOf(it) {
-  const p = String((it && it.presentation_state) || "");
-  const r = String((it && it.runner_state) || "");
-  if (p === "needs_operator" || p === "waiting_on_operator") return "waiting_for_operator";
-  if (p === "blocked") return "blocked";
-  if (r === "waiting_on_council") return "in_council";
-  if (p === "running") return "executor_active";
-  if (p === "stale" || r === "stale_or_no_heartbeat") return "paused";
-  return "in_council";
+  // Delegate to the ONE truthful mapping instead of keeping a second, looser
+  // copy. The earlier duplicate never returned operator_message_posted (so that
+  // rank was unreachable) and defaulted every unrecognised item to in_council,
+  // which silently ranked unknown states ahead of blocked work. An unknown
+  // state now returns "" and sorts last rather than being guessed.
+  return truthfulExecutionState(it);
 }
 
 function rankActiveWorkItems(items) {
@@ -1548,7 +1580,11 @@ function rankActiveWorkItems(items) {
     const na = ra === -1 ? ACTIVE_RANK.length : ra;
     const nb = rb === -1 ? ACTIVE_RANK.length : rb;
     if (na !== nb) return na - nb;
-    return String(b.last_activity_at || "").localeCompare(String(a.last_activity_at || ""));
+    const t = String(b.last_activity_at || "").localeCompare(String(a.last_activity_at || ""));
+    if (t !== 0) return t;
+    // Deterministic final key: equal or missing timestamps must not leave the
+    // restored selection dependent on queue iteration order.
+    return String(a.work_item_id || "").localeCompare(String(b.work_item_id || ""));
   });
 }
 
@@ -1565,7 +1601,17 @@ function restoreActiveSelection() {
     // conversation stays empty and the composer shows no thread.
     const wid = decodeURIComponent(deep[1]);
     const known = items.find((it) => it.work_item_id === wid);
-    if (known && known.thread_id && selectedWorkItemId === wid && !selectedConvThread) {
+    if (!known) {
+      // A malformed, stale, or unavailable deep link must not leave a selected
+      // work item with no queue-backed identity. Clear it, say so, and do not
+      // persist it as the active selection.
+      if (selectedWorkItemId === wid) selectTask(null);
+      persistSelection(null);
+      showRestoreStatus('Work item "' + wid + '" is not in the live queue. ' +
+                        "The link may be stale, so nothing is selected.");
+      return;
+    }
+    if (known.thread_id && selectedWorkItemId === wid && !selectedConvThread) {
       selectTask(known.thread_id, wid);
     }
     return;
@@ -1610,15 +1656,93 @@ function openConversationTab() {
   if (currentView !== "work") showView("work");
 }
 
-function conversationScrollEl() {
+// The element whose CONTENT is the conversation. Mutations are observed here.
+function conversationAnchorEl() {
   return document.getElementById("conv-scroll") ||
+         document.getElementById("conv-detail") ||
          document.getElementById("conversation") ||
          document.getElementById("comms");
+}
+
+// The element that ACTUALLY SCROLLS. #conv-detail is laid out with
+// overflow-y:visible and grows with its content, so scrollHeight equals
+// clientHeight and it can never report a scroll position -- targeting it left
+// the whole jump-to-latest feature inert. Walk up to the nearest genuinely
+// scrollable ancestor and fall back to the page, which is the real scroller
+// in the current layout.
+function conversationScrollEl() {
+  let el = conversationAnchorEl();
+  while (el && el !== document.body && el !== document.documentElement) {
+    let oy = "";
+    try { oy = getComputedStyle(el).overflowY; } catch (e) { oy = ""; }
+    if ((oy === "auto" || oy === "scroll") && (el.scrollHeight - el.clientHeight) > 4) {
+      return el;
+    }
+    el = el.parentElement;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+
+// Scroll events do not bubble from the document element, so a page-level
+// scroller must be observed on window instead.
+function scrollEventTargetFor(el) {
+  return (el === document.scrollingElement || el === document.documentElement ||
+          el === document.body) ? window : el;
 }
 
 function operatorMovedAwayFromLatest(el) {
   if (!el) return false;
   return (el.scrollHeight - el.scrollTop - el.clientHeight) > 120;
+}
+
+// Restoration status is surfaced, never swallowed. `retry` shows the control
+// that re-runs the same load path.
+function showRestoreStatus(text, retry) {
+  const el = document.getElementById("restore-status");
+  if (!el) return;
+  if (!text) { el.hidden = true; el.textContent = ""; return; }
+  el.textContent = text;
+  el.hidden = false;
+  if (retry) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-quiet";
+    btn.textContent = "Retry";
+    btn.addEventListener("click", () => {
+      showRestoreStatus("");
+      refreshWorkItems().then(restoreActiveSelection).catch(() => {
+        showRestoreStatus("Still could not load the work queue.", true);
+      });
+    });
+    el.appendChild(document.createTextNode(" "));
+    el.appendChild(btn);
+  }
+}
+
+// The Jump to latest control must actually work: it is activated by click, and
+// it appears only when new content arrives while the operator has deliberately
+// scrolled away from the newest message. Arriving content never yanks a
+// deliberately positioned view; it offers this control instead.
+function initJumpToLatest() {
+  const pill = document.getElementById("jump-to-latest");
+  if (!pill) return;
+  pill.addEventListener("click", jumpToLatestMessage);
+  // Resolved lazily on each event: the real scroller depends on layout, which
+  // changes when the Work view opens and when the conversation grows.
+  scrollEventTargetFor(conversationScrollEl()).addEventListener("scroll", () => {
+    if (!operatorMovedAwayFromLatest(conversationScrollEl())) pill.hidden = true;
+  });
+  const anchor = conversationAnchorEl();
+  if (!anchor) return;
+  try {
+    const obs = new MutationObserver(() => {
+      // The pill is OUTSIDE the observed content container, so toggling it
+      // cannot re-enter this observer.
+      if (operatorMovedAwayFromLatest(conversationScrollEl())) pill.hidden = false;
+      else jumpToLatestMessage();
+    });
+    obs.observe(anchor, { childList: true, subtree: true });
+  } catch (e) { /* no observer -> the click path still works */ }
 }
 
 function jumpToLatestMessage() {
@@ -2472,8 +2596,13 @@ function convComposerTarget() {
   if (selectedWorkItemId) {
     const it = (lastWorkItems || []).find((i) => i.work_item_id === selectedWorkItemId);
     const thread = selectedConvThread || (it && it.thread_id) || null;
-    return thread ? { work_item_id: selectedWorkItemId, thread_id: thread }
-                  : { work_item_id: selectedWorkItemId };
+    if (thread) return { work_item_id: selectedWorkItemId, thread_id: thread };
+    // FAIL CLOSED. A work_item_id WITHOUT a thread_id is the one shape the
+    // server's target-integrity check cannot validate, because that check
+    // compares the pair. Rather than emit an unverifiable target, report the
+    // selection as unresolved: the banner says so and the send is refused
+    // until the queue supplies a durable thread for this item.
+    return { work_item_id: selectedWorkItemId, thread_id: null, unresolved: true };
   }
   if (selectedConvThread) return { thread_id: selectedConvThread };
   if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
@@ -3229,6 +3358,10 @@ function wire() {
     if (nav === "history") showView("history");
     else showView("work");   // conv / council / evidence / gate / verification tabs
   });
+  // This is the explicit, keyboard-reachable action that starts a new
+  // conversation while work is selected: clearing the selection is what
+  // re-enables the generic composer (applyComposerFocus lifts the demotion), so
+  // the demoted composer is never a dead end.
   document.getElementById("queue-new-btn").addEventListener("click", () => {
     selectTask(null);
     renderConvDetail(null);
@@ -3343,7 +3476,16 @@ function wire() {
   // Active session continuity: once the queue has loaded, restore the prior
   // selection or fall back to the highest-priority active item so a refresh
   // never strands the operator on an empty panel while active work exists.
-  refreshWorkItems().then(restoreActiveSelection).catch(() => {});
+  initJumpToLatest();
+  refreshWorkItems().then(() => {
+    showRestoreStatus("");
+    restoreActiveSelection();
+  }).catch(() => {
+    // Continuity that fails silently is worse than continuity that reports the
+    // failure: the operator would see an empty console with no reason given.
+    showRestoreStatus("Could not load the work queue, so active work was not " +
+                      "restored. The next refresh will retry.", true);
+  });
   setInterval(refresh, LIVE_MS);
   setInterval(refreshAgentEvents, LIVE_MS);
   setInterval(refreshMessages, LIVE_MS);

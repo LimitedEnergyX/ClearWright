@@ -1135,3 +1135,16 @@ body.history-open .mission { display: none !important; }
 .q-row[role="button"] { cursor: pointer; }
 .q-row[role="button"]:focus-visible { outline: 2px solid #7aa2ff; outline-offset: 2px; }
 .q-exec { font-size: .68rem; opacity: .65; letter-spacing: .02em; }
+
+/* Round-2 council corrections. */
+.restore-status {
+  margin: 0 0 0.4rem; padding: 0.4rem 0.55rem;
+  font-size: 0.74rem; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-left: 3px solid var(--warn, #d08a00); border-radius: 8px;
+}
+/* An unverifiable destination must not look like a valid one. */
+.composer-destination .dest-unresolved {
+  color: var(--warn, #d08a00);
+  font-weight: 700;
+}

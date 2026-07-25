@@ -30,6 +30,23 @@ HTML = _read("index.html")
 CSS = _read("style.css")
 
 
+
+def _block_of(html, elem_id):
+    """Return the balanced-div source of the element carrying elem_id.
+
+    Used so containment assertions test the real tree rather than the byte
+    order of two ids in the file.
+    """
+    i = html.index('id="%s"' % elem_id)
+    start = html.rindex("<div", 0, i)
+    depth = 0
+    for m in re.finditer(r"<div" + chr(92) + "b|</div>", html[start:]):
+        depth += 1 if m.group(0) != "</div>" else -1
+        if depth == 0:
+            return html[start:start + m.end()]
+    raise AssertionError("unbalanced markup around " + elem_id)
+
+
 class SelectionRestorationTest(unittest.TestCase):
     """Item 1: a refresh returns the operator to active work."""
 
@@ -45,9 +62,9 @@ class SelectionRestorationTest(unittest.TestCase):
 
     def test_persistence_failure_is_survivable(self):
         """Storage may be unavailable; the hash route must still work."""
-        m = re.search(r"function persistSelection[\s\S]{0,400}?\n\}", APP)
+        m = re.search(r"function persistSelection[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("catch", m.group(0))
-        m2 = re.search(r"function readPersistedSelection[\s\S]{0,300}?\n\}", APP)
+        m2 = re.search(r"function readPersistedSelection[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("catch", m2.group(0))
 
     def test_restore_runs_at_boot_after_the_queue_loads(self):
@@ -55,7 +72,7 @@ class SelectionRestorationTest(unittest.TestCase):
         self.assertRegex(APP, r"refreshWorkItems\(\)\s*\.then\(\s*restoreActiveSelection")
 
     def test_explicit_deep_link_wins_over_stored_selection(self):
-        m = re.search(r"function restoreActiveSelection[\s\S]{0,1400}?\n\}", APP)
+        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn("location.hash", body)
         # The deep-link branch must short-circuit BEFORE any fallback ranking,
@@ -66,7 +83,7 @@ class SelectionRestorationTest(unittest.TestCase):
 
     def test_stale_stored_selection_is_not_used(self):
         """A stored id must be validated against the live queue AND activity."""
-        m = re.search(r"function restoreActiveSelection[\s\S]{0,1400}?\n\}", APP)
+        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn("isActiveItem", body)
         self.assertIn("work_item_id === stored", body)
@@ -80,11 +97,33 @@ class FallbackRankingTest(unittest.TestCase):
         self.assertIsNotNone(m)
         order = re.findall(r'"([a-z_]+)"', m.group(1))
         self.assertEqual(order, [
-            "waiting_for_operator", "operator_message_posted", "wake_pending",
-            "paused", "executor_active", "in_council", "blocked"])
+            "waiting_for_operator", "operator_message_posted",
+            "paused", "executor_active", "in_council", "blocked", "claimed"])
+
+    def test_wake_pending_is_deferred_not_simulated(self):
+        """No durable field can establish wake_pending before the wake bridge.
+
+        Keeping it in the executable order would advertise a priority bucket
+        that nothing can ever fall into, which is what made the first round of
+        this ranking inert.
+        """
+        m = re.search(r"ACTIVE_RANK = \[(.*?)\]", APP, re.S)
+        self.assertNotIn("wake_pending", m.group(1))
+        head = APP[:APP.index("const ACTIVE_RANK")]
+        self.assertIn("wake_pending", head[-900:],
+                      "the deferral must be documented where the rank is defined")
+
+    def test_every_ranked_state_is_reachable_from_the_mapping(self):
+        """A rank nothing can produce is a silent mis-ordering."""
+        m = re.search(r"ACTIVE_RANK = \[(.*?)\]", APP, re.S)
+        ranked = set(re.findall(r'"([a-z_]+)"', m.group(1)))
+        tm = re.search(r"function truthfulExecutionState[\s\S]{0,4000}?\n\}", APP)
+        produced = set(re.findall(r'return "([a-z_]+)"', tm.group(0)))
+        self.assertEqual(ranked - produced, set(),
+                         "ACTIVE_RANK contains states the mapping never returns")
 
     def test_ranking_filters_to_active_items_only(self):
-        m = re.search(r"function rankActiveWorkItems[\s\S]{0,600}?\n\}", APP)
+        m = re.search(r"function rankActiveWorkItems[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("filter(isActiveItem)", m.group(0))
 
     def test_completed_items_are_never_auto_selected(self):
@@ -94,22 +133,31 @@ class FallbackRankingTest(unittest.TestCase):
             self.assertIn(terminal, m.group(1))
 
     def test_ranking_is_stable_by_recent_activity(self):
-        m = re.search(r"function rankActiveWorkItems[\s\S]{0,600}?\n\}", APP)
+        m = re.search(r"function rankActiveWorkItems[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("last_activity_at", m.group(0))
 
-    def test_ranking_uses_only_fields_the_api_returns(self):
-        """No invented field may drive selection."""
-        m = re.search(r"function activeStateOf[\s\S]{0,700}?\n\}", APP)
+    def test_ranking_delegates_to_the_single_truthful_mapping(self):
+        """Two mappings drifted: the ranking copy never returned
+        operator_message_posted and defaulted unknowns to in_council."""
+        m = re.search(r"function activeStateOf[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
-        for field in ("presentation_state", "runner_state"):
-            self.assertIn(field, body)
+        self.assertIn("return truthfulExecutionState(it)", body)
+        self.assertNotIn('return "in_council"', body)
+
+    def test_unknown_states_are_not_guessed(self):
+        tm = re.search(r"function truthfulExecutionState[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn('return ""', tm.group(0))
+
+    def test_ranking_has_a_deterministic_final_key(self):
+        m = re.search(r"function rankActiveWorkItems[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("work_item_id", m.group(0).split("last_activity_at")[-1])
 
 
 class EmptyStateTest(unittest.TestCase):
     """Item 1/5: the empty state is legitimate ONLY with no active work."""
 
     def test_no_active_work_clears_the_selection_and_returns(self):
-        m = re.search(r"function restoreActiveSelection[\s\S]{0,1400}?\n\}", APP)
+        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("if (!target)", m.group(0))
 
     def test_duplicate_no_task_selected_placeholders_are_gone(self):
@@ -127,11 +175,11 @@ class ConversationFirstTest(unittest.TestCase):
     """Item 2: conversation-first, latest message, deliberate-scroll respected."""
 
     def test_navigation_opens_the_conversation_tab(self):
-        m = re.search(r"function navigateToWorkItem[\s\S]{0,1600}?\n\}", APP)
+        m = re.search(r"function navigateToWorkItem[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("openConversationTab()", m.group(0))
 
     def test_navigation_lands_on_the_latest_message(self):
-        m = re.search(r"function navigateToWorkItem[\s\S]{0,1600}?\n\}", APP)
+        m = re.search(r"function navigateToWorkItem[\s\S]{0,4000}?\n\}", APP)
         self.assertIn("jumpToLatestMessage", m.group(0))
 
     def test_scroll_is_preserved_only_when_deliberately_moved_away(self):
@@ -154,7 +202,7 @@ class ComposerBindingTest(unittest.TestCase):
     """
 
     def test_composer_target_binds_to_the_selected_work_item(self):
-        m = re.search(r"function convComposerTarget[\s\S]{0,1600}?\n\}", APP)
+        m = re.search(r"function convComposerTarget[\s\S]{0,4000}?\n\}", APP)
         self.assertIsNotNone(m, "convComposerTarget not found")
         body = m.group(0)
         self.assertIn("selectedWorkItemId", body)
@@ -162,10 +210,13 @@ class ComposerBindingTest(unittest.TestCase):
 
     def test_work_item_id_is_only_sent_with_a_durable_thread(self):
         """The server refuses an unbound thread/work-item pair; never invent one."""
-        m = re.search(r"function convComposerTarget[\s\S]{0,1600}?\n\}", APP)
+        m = re.search(r"function convComposerTarget[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertNotIn("convComposerNewThreadId", body.split("selectedConvThread ||")[0])
-        self.assertIn("thread ?", body)
+        # The bare-work-item shape is now an explicit fail-closed marker rather
+        # than a sendable target.
+        self.assertIn("if (thread) return {", body)
+        self.assertIn("unresolved: true", body)
 
     def test_selection_change_refreshes_the_destination(self):
         m = re.search(r"function selectTask\([^)]*\)\s*\{(.{0,900})", APP, re.S)
@@ -173,13 +224,13 @@ class ComposerBindingTest(unittest.TestCase):
 
     def test_navigation_binds_the_real_durable_thread(self):
         """selectTask(null, id) would drop the thread and mint a new one."""
-        m = re.search(r"function navigateToWorkItem[\s\S]{0,1600}?\n\}", APP)
+        m = re.search(r"function navigateToWorkItem[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertNotIn("selectTask(null, workItemId)", body)
         self.assertIn("thread_id", body)
 
     def test_deep_link_binds_the_thread_the_same_way(self):
-        m = re.search(r"function applyWorkHashRoute[\s\S]{0,1200}?\n\}", APP)
+        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertNotIn("selectTask(null, wid)", body)
         self.assertIn("thread_id", body)
@@ -196,6 +247,156 @@ class ComposerBindingTest(unittest.TestCase):
         self.assertNotIn("selectedConvThread || selectedWorkItemId", APP)
 
 
+class UnresolvedDestinationTest(unittest.TestCase):
+    """A work_item_id WITHOUT a thread_id is the one shape the server's
+    target-integrity check cannot validate, because that check compares the
+    pair. The UI must fail closed rather than emit it."""
+
+    def test_target_reports_unresolved_instead_of_a_bare_work_item(self):
+        m = re.search(r"function convComposerTarget[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("unresolved: true", body)
+        self.assertIn("thread_id: null", body)
+
+    def test_send_is_refused_while_the_destination_is_unresolved(self):
+        self.assertIn("preTarget.unresolved", APP)
+        i = APP.index("preTarget.unresolved")
+        window = APP[i:i + 400]
+        self.assertIn("showError", window)
+        self.assertIn("return;", window)
+
+    def test_refusal_happens_before_the_body_is_built(self):
+        i = APP.index("preTarget.unresolved")
+        j = APP.index("const body = Object.assign")
+        self.assertLess(i, j)
+
+    def test_banner_does_not_present_an_unresolved_target_as_valid(self):
+        self.assertIn("dest-unresolved", APP)
+        self.assertIn("dest-unresolved", CSS)
+
+
+class StaleDeepLinkTest(unittest.TestCase):
+    """An unknown deep link must not leave a selected item with no
+    queue-backed identity."""
+
+    def test_unknown_deep_link_clears_the_selection(self):
+        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("if (!known)", body)
+        self.assertIn("selectTask(null)", body)
+        self.assertIn("persistSelection(null)", body)
+
+    def test_unknown_deep_link_is_reported_not_silent(self):
+        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("showRestoreStatus", m.group(0))
+
+
+class JumpToLatestWiringTest(unittest.TestCase):
+    """The control was rendered but inert: no click handler, no visibility
+    logic, and operatorMovedAwayFromLatest was never called."""
+
+    def test_button_is_actually_activated(self):
+        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
+        self.assertIsNotNone(m, "initJumpToLatest not found")
+        self.assertIn('addEventListener("click", jumpToLatestMessage)', m.group(0))
+
+    def test_visibility_is_driven_by_deliberate_scroll(self):
+        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("operatorMovedAwayFromLatest", body)
+        self.assertIn('addEventListener("scroll"', body)
+
+    def test_new_content_does_not_yank_a_deliberate_position(self):
+        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("MutationObserver", body)
+        self.assertIn("pill.hidden = false", body)
+
+    def test_it_is_wired_at_boot(self):
+        self.assertIn("initJumpToLatest();", APP)
+
+    def test_scroll_target_is_the_element_that_actually_scrolls(self):
+        """#conv-detail is overflow-y:visible and grows with its content, so it
+        can never report a scroll position. Targeting it made every scroll
+        check return false and the pill unreachable."""
+        m = re.search(r"function conversationScrollEl[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("overflowY", body)
+        self.assertIn("scrollHeight", body)
+        self.assertIn("document.scrollingElement", body)
+
+    def test_content_anchor_and_scroller_are_distinct(self):
+        self.assertIn("function conversationAnchorEl", APP)
+        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("conversationAnchorEl()", body)
+        self.assertIn("conversationScrollEl()", body)
+
+    def test_page_level_scroll_is_observed_on_window(self):
+        """Scroll events do not bubble from the document element."""
+        self.assertIn("function scrollEventTargetFor", APP)
+        m = re.search(r"function scrollEventTargetFor[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("window", m.group(0))
+
+
+class ObservableFailureTest(unittest.TestCase):
+    """Continuity that fails silently is worse than continuity that says so."""
+
+    def test_restoration_failure_is_reported(self):
+        self.assertNotIn("refreshWorkItems().then(restoreActiveSelection).catch(() => {});", APP)
+        self.assertIn("function showRestoreStatus", APP)
+        self.assertIn('id="restore-status"', HTML)
+
+    def test_failure_offers_a_retry(self):
+        m = re.search(r"function showRestoreStatus[\s\S]{0,4000}?\n\}", APP)
+        body = m.group(0)
+        self.assertIn("Retry", body)
+        self.assertIn("refreshWorkItems()", body)
+
+    def test_status_is_announced(self):
+        i = HTML.index('id="restore-status"')
+        window = HTML[max(0, i - 200):i + 200]
+        self.assertIn('role="status"', window)
+        self.assertIn('aria-live="polite"', window)
+
+
+class ContextualRailCompletenessTest(unittest.TestCase):
+    """No contextual card may render empty when nothing is selected."""
+
+    def test_operator_actions_card_is_inside_the_rail(self):
+        """Source ORDER is not containment.
+
+        An earlier version of this change placed the card immediately after the
+        rail's closing tag. Every ordering assertion still passed while the
+        browser showed the card as a sibling that stayed visible with an empty
+        body. This parses the actual element tree instead.
+        """
+        rail = _block_of(HTML, "session-rail")
+        self.assertIn('id="operator-actions-card"', rail)
+        self.assertIn('id="next-action-card"', rail)
+        self.assertNotIn('id="clearance-card"', rail,
+                         "the clearance card is not contextual to a selection")
+
+    def test_only_one_actions_card_exists(self):
+        self.assertEqual(HTML.count('id="operator-actions-card"'), 1)
+
+
+class DeliberateNewConversationTest(unittest.TestCase):
+    """The demoted composer must not be a dead end."""
+
+    def test_an_explicit_control_clears_the_selection(self):
+        i = APP.index('getElementById("queue-new-btn")')
+        self.assertIn("selectTask(null)", APP[i:i + 300])
+
+    def test_the_affordance_is_documented_where_demotion_happens(self):
+        head = APP[:APP.index('getElementById("queue-new-btn")')]
+        self.assertIn("re-enables the generic composer", head[-700:])
+
+    def test_demotion_is_exactly_reversible(self):
+        m = re.search(r"function applyComposerFocus[\s\S]{0,4000}?\n\}", APP)
+        self.assertIn("data-prior-tabindex", m.group(0))
+
+
 class ConversationSurfaceTest(unittest.TestCase):
     """Item 2, behaviour: the conversation surface must actually be revealed.
 
@@ -205,13 +406,13 @@ class ConversationSurfaceTest(unittest.TestCase):
     """
 
     def test_open_conversation_does_not_depend_on_a_nonexistent_tab(self):
-        m = re.search(r"function openConversationTab[\s\S]{0,1200}?\n\}", APP)
+        m = re.search(r"function openConversationTab[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertNotIn('data-tab="conversation"', body)
         self.assertNotIn("#tab-conversation", body)
 
     def test_open_conversation_reveals_the_work_view(self):
-        m = re.search(r"function openConversationTab[\s\S]{0,1200}?\n\}", APP)
+        m = re.search(r"function openConversationTab[\s\S]{0,4000}?\n\}", APP)
         self.assertIn('showView("work")', m.group(0))
 
     def test_no_conversation_tab_control_is_invented_in_markup(self):
@@ -236,7 +437,7 @@ class TargetedComposerTest(unittest.TestCase):
 
     def test_generic_composer_is_demoted_while_work_is_selected(self):
         self.assertIn("function applyComposerFocus", APP)
-        m = re.search(r"function applyComposerFocus[\s\S]{0,2200}?\n\}", APP)
+        m = re.search(r"function applyComposerFocus[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn("composer-demoted", body)
         self.assertIn("tabIndex", body)
@@ -256,27 +457,27 @@ class MessageIdentityTest(unittest.TestCase):
 
     def test_identity_row_is_rendered_on_every_message_card(self):
         self.assertIn("messageIdentityRow(m)", APP)
-        m = re.search(r"function messageIdentityRow[\s\S]{0,1400}?\n\}", APP)
+        m = re.search(r"function messageIdentityRow[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         for field in ("message_id", "thread_id", "work_item_id", "actor", "intent"):
             self.assertIn(field, body)
 
     def test_copy_controls_are_real_keyboard_reachable_buttons(self):
-        m = re.search(r"function copyIdButton[\s\S]{0,600}?\n\}", APP)
+        m = re.search(r"function copyIdButton[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn('<button type="button"', body)
         self.assertIn("aria-label", body)
         self.assertIn(".copy-id:focus-visible", CSS)
 
     def test_copy_uses_the_clipboard_api_and_degrades_safely(self):
-        m = re.search(r"function copyToClipboard[\s\S]{0,700}?\n\}", APP)
+        m = re.search(r"function copyToClipboard[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn("navigator.clipboard", body)
         self.assertIn("catch", body)
 
     def test_post_send_confirmation_exposes_the_new_message_id(self):
         self.assertIn("function showPostConfirmation", APP)
-        m = re.search(r"function showPostConfirmation[\s\S]{0,900}?\n\}", APP)
+        m = re.search(r"function showPostConfirmation[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn("data-posted-message-id", body)
         self.assertIn("result.thread_id", body)
@@ -301,7 +502,7 @@ class TruthfulExecutionStateTest(unittest.TestCase):
     """Item 6: RUNNING is never derived from message-post activity."""
 
     def test_operator_message_does_not_yield_a_running_state(self):
-        m = re.search(r"function truthfulExecutionState[\s\S]{0,1400}?\n\}", APP)
+        m = re.search(r"function truthfulExecutionState[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn("operator_message_posted", body)
         i_msg = body.index('ev === "operator_message"')
@@ -336,13 +537,13 @@ class ConsistentDemotionTest(unittest.TestCase):
     """
 
     def test_demotion_removes_a11y_and_tab_order_together(self):
-        m = re.search(r"function applyComposerFocus[\s\S]{0,2200}?\n\}", APP)
+        m = re.search(r"function applyComposerFocus[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn("inert", body)
         self.assertIn("removeAttribute(\"aria-hidden\")", body)
 
     def test_fallback_covers_every_focusable_not_just_the_textarea(self):
-        m = re.search(r"function applyComposerFocus[\s\S]{0,2200}?\n\}", APP)
+        m = re.search(r"function applyComposerFocus[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         self.assertIn("querySelectorAll(FOCUSABLE)", body)
         self.assertIn("button", body)
@@ -374,7 +575,7 @@ class AccessibilityTest(unittest.TestCase):
         self.assertIn("aria-pressed=", APP)
 
     def test_queue_rows_activate_on_enter_and_space(self):
-        m = re.search(r'if \(e\.key !== "Enter" && e\.key !== " "\)[\s\S]{0,500}?\n\}\);', APP)
+        m = re.search(r'if \(e\.key !== "Enter" && e\.key !== " "\)[\s\S]{0,4000}?\n\}\);', APP)
         self.assertIsNotNone(m, "queue rows need Enter/Space activation")
         self.assertIn("navigateToWorkItem", m.group(0))
 
@@ -397,13 +598,13 @@ class SemanticsPreservedTest(unittest.TestCase):
         self.assertTrue(os.path.exists(server))
 
     def test_identity_helpers_only_read_existing_fields(self):
-        m = re.search(r"function messageIdentityRow[\s\S]{0,1400}?\n\}", APP)
+        m = re.search(r"function messageIdentityRow[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         for mutator in ("postJSON", "fetch(", "POST"):
             self.assertNotIn(mutator, body)
 
     def test_restoration_never_mutates_durable_state(self):
-        m = re.search(r"function restoreActiveSelection[\s\S]{0,1400}?\n\}", APP)
+        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
         for mutator in ("postJSON", "fetch(", "/api/action"):
             self.assertNotIn(mutator, body)

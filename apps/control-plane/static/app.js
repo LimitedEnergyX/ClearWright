@@ -782,9 +782,19 @@ function createComposer(opts) {
         known.thread_id !== target.thread_id) {
       return "The composer thread does not match the selected work item's thread.";
     }
+    // STRICT. A work-item-bound send requires a canonical route that PROVES the
+    // URL agrees. Absent and malformed routes are not evidence of agreement, so
+    // both refuse rather than silently passing the check. Every queue activation
+    // now writes the route, so a missing one means the selection was not
+    // established through navigation and must be re-made.
     const route = parseWorkRoute(location.hash);
-    if (route && !route.malformed && route.work_item_id &&
-        route.work_item_id !== selectedWorkItemId) {
+    if (!route) {
+      return "The URL carries no work route, so it cannot confirm the destination.";
+    }
+    if (route.malformed) {
+      return "The URL contains an unreadable work route.";
+    }
+    if (route.work_item_id !== selectedWorkItemId) {
       return "The URL points at a different work item than the one selected.";
     }
     return "";
@@ -1185,15 +1195,21 @@ function queueCard(it) {
         '<code class="mono q-idv" title="' + esc(originId) + '">' + esc(abbrevId(originId)) +
         "</code>" + copyIdButton(originId, "origin message ID") + "</span>" : "") +
     "</div>";
+  // ACCESSIBILITY: the row is a plain CONTAINER. Nesting real <button> copy
+  // controls inside an element that itself claimed role="button" is an invalid
+  // pattern, so the primary action is now an explicit button and the copy
+  // buttons are its siblings. Enter and Space come free from native button
+  // semantics rather than a hand-rolled key handler.
   return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
-    (ambiguous ? " q-ambiguous" : "") +
-    '" role="button" tabindex="0"' +
-    ' aria-pressed="' + (selected ? "true" : "false") + '"' +
-    ' aria-label="Open work item ' + esc(it.work_item_id || "") +
-    (execLabel ? " (" + esc(execLabel) + ")" : "") + '"' +
+    (ambiguous ? " q-ambiguous" : "") + '"' +
     ' data-thread="' + esc(it.thread_id || "") +
     '" data-work-item="' + esc(it.work_item_id || "") + '">' +
-    '<div class="q-title">' + title + "</div>" +
+    '<button type="button" class="q-open" ' +
+    'aria-pressed="' + (selected ? "true" : "false") + '"' +
+    ' aria-label="Open work item ' + esc(it.work_item_id || "") +
+    (execLabel ? " (executor " + esc(execLabel) + ")" : "") + '"' +
+    ' data-work-item="' + esc(it.work_item_id || "") + '">' +
+    '<span class="q-title">' + title + "</span>" +
     '<div class="q-meta">' + bits.join("") + opFlag +
     // Item 10: phase and executor state are DIFFERENT facts and are labelled
     // separately, so "PHASE: VERIFICATION / EXECUTOR: IN COUNCIL" can never be
@@ -1202,7 +1218,7 @@ function queueCard(it) {
       esc(phaseLabel) + "</span>" : "") +
     (execLabel ? '<span class="q-exec mono" title="executor state, derived from ' +
       'runner_state only">Executor ' + esc(execLabel) + "</span>" : "") +
-    "</div>" + ids + warn +
+    "</div></button>" + ids + warn +
     "</div>";
 }
 
@@ -1468,14 +1484,14 @@ function applyComposerFocus() {
 
 // Keyboard activation for queue rows (Phase 1, item 7). Enter or Space opens
 // the row exactly as a click does; the existing click handler is untouched.
+// The primary control is a real <button>, so Enter and Space already activate
+// it and fire click. This listener remains only to keep Space from scrolling
+// the page while that button has focus; it never navigates on its own, which
+// avoids a second, divergent activation path.
 document.addEventListener("keydown", (e) => {
-  if (e.key !== "Enter" && e.key !== " ") return;
-  const row = e.target && e.target.closest && e.target.closest(".q-row[data-work-item]");
-  if (!row) return;
-  if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
-  e.preventDefault();
-  const wid = row.getAttribute("data-work-item");
-  if (wid) navigateToWorkItem(wid);
+  if (e.key !== " ") return;
+  const btn = e.target && e.target.closest && e.target.closest(".q-open");
+  if (btn) e.preventDefault();
 });
 
 // --------------------------------------------------------------------------
@@ -1484,22 +1500,12 @@ document.addEventListener("keydown", (e) => {
 // RUNNING is never derived from message-post activity. An inbound operator
 // message proves only that the OPERATOR acted; it is no evidence that an
 // executor resumed, consumed it, or is working. Such an item is reported as
-// OPERATOR_MESSAGE_POSTED, which is exactly what the durable record supports.
+// a state the durable record can actually support, never an
+// inference from message-post activity.
 //
 // States requiring executor acknowledgement or wake telemetry
 // (EXECUTOR_RESUMED, MESSAGE_ACKNOWLEDGED, WAKE_PENDING) are NOT produced here
 // and are NOT simulated. They are deferred to the Phase 2 executor wake bridge.
-const EXECUTION_STATE_LABELS = {
-  claimed: "CLAIMED",
-  waiting_for_operator: "WAITING_FOR_OPERATOR",
-  operator_message_posted: "OPERATOR_MESSAGE_POSTED",
-  paused: "PAUSED",
-  executor_active: "EXECUTOR_ACTIVE",
-  in_council: "IN_COUNCIL",
-  blocked: "BLOCKED",
-  complete: "COMPLETE"
-};
-
 // Evidence-backed only. `it` is the derived work item from /api/work-items.
 // LIFECYCLE PHASE: where the governed work item sits in its own lifecycle.
 // Derived from `status`, whose observed domain is open|planning|verification|
@@ -1562,10 +1568,6 @@ function truthfulExecutionState(it) {
   if (p === "blocked") return "blocked";
   if (r === "claimed_idle" || it.claimed_by) return "claimed";
   return "";
-}
-
-function executionStateLabel(it) {
-  return EXECUTION_STATE_LABELS[truthfulExecutionState(it)] || "";
 }
 
 // --------------------------------------------------------------------------
@@ -2067,8 +2069,10 @@ function applyWorkHashRoute() {
     // Say what actually happens next. Restoration DOES continue, so claiming
     // "nothing is selected" would be false a moment later.
     routeErrorReported = true;
+    // Restoration may legitimately find no active work, so the message states
+    // only what has already happened and leaves the outcome to be observed.
     showRestoreStatus("That link could not be read, so it was removed. " +
-                      "Showing your highest-priority active work instead.");
+                      "Nothing is selected from it.");
     return;
   }
   // Validate here too. This function is also the hashchange path, so without
@@ -3682,9 +3686,14 @@ function wire() {
     if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
     const row = e.target.closest(".q-row");
     if (!row) return;
-    const thread = row.getAttribute("data-thread");
     const workItem = row.getAttribute("data-work-item");
-    if (thread || workItem) selectTask(thread, workItem);
+    // Mouse activation goes through the SAME navigation as the keyboard so the
+    // canonical #work= route is always written. Calling selectTask() directly
+    // here left the previous route in the URL, which is precisely the stale-hash
+    // symptom this correction exists to remove.
+    if (workItem) { navigateToWorkItem(workItem); return; }
+    const thread = row.getAttribute("data-thread");
+    if (thread) selectTask(thread, null);
   });
 
   // Context-aware task actions are READ-ONLY navigation only: they switch view

@@ -344,10 +344,70 @@ class RouteErrorPersistenceTest(unittest.TestCase):
         # Assert on the OPERATOR-FACING string, not the surrounding commentary,
         # which legitimately quotes the phrase being avoided.
         call = branch[branch.index("showRestoreStatus("):]
-        self.assertNotIn("nothing is selected", call)
-        self.assertIn("highest-priority active work", call,
-                      "the message must not promise the operator's previous item: "
-                      "the persisted selection is cleared before restoration runs")
+        # The message must not promise ANY outcome: restoration may legitimately
+        # find no active work at all, so it states only what already happened.
+        self.assertNotIn("highest-priority", call)
+        self.assertNotIn("Restoring your active work", call)
+        self.assertIn("could not be read", call)
+
+
+class UnifiedActivationTest(unittest.TestCase):
+    """Council finding: mouse and keyboard activation diverged.
+
+    The click handler called selectTask() directly and never wrote the hash,
+    while keyboard activation used navigateToWorkItem(). Ordinary mouse
+    selection therefore left the PREVIOUS route in the URL -- exactly the
+    stale-hash symptom this correction exists to remove -- and the four-way
+    destination agreement could not be established for the common interaction.
+    """
+
+    def test_mouse_activation_goes_through_navigation(self):
+        i = APP.index('getElementById("queue-groups").addEventListener("click"')
+        handler = APP[i:i + 900]
+        self.assertIn("navigateToWorkItem(workItem)", handler)
+        self.assertNotIn("selectTask(thread, workItem)", handler,
+                         "the direct path skipped writing the canonical route")
+
+    def test_there_is_one_navigation_operation(self):
+        """Only navigateToWorkItem writes the route, and every activation
+        path routes through it."""
+        self.assertEqual(APP.count("location.hash = " + '"#work="'), 1,
+                         "exactly one place may write the work route")
+        m = re.search(r"function navigateToWorkItem[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        self.assertIn('location.hash = "#work="', m.group(0))
+
+    def test_keyboard_uses_native_button_semantics(self):
+        """A real <button> already activates on Enter and Space, so the
+        hand-rolled key handler is reduced to preventing Space-scroll and can
+        no longer become a second, divergent activation path."""
+        i = APP.index('document.addEventListener("keydown"')
+        handler = APP[i:i + 500]
+        self.assertNotIn("navigateToWorkItem", handler)
+        self.assertIn("q-open", handler)
+
+
+class StrictRouteProofTest(unittest.TestCase):
+    """Council finding: absent and malformed routes bypassed the check.
+
+    An unreadable URL is not evidence that the URL agrees with the selection,
+    yet both cases previously fell through and permitted the send.
+    """
+
+    def test_an_absent_route_refuses(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        body = m.group(0)
+        self.assertIn("if (!route)", body)
+        self.assertIn("carries no work route", body)
+
+    def test_a_malformed_route_refuses(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        body = m.group(0)
+        self.assertIn("route.malformed", body)
+        self.assertIn("unreadable work route", body)
+
+    def test_the_check_no_longer_requires_a_non_malformed_route_to_apply(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        self.assertNotIn("!route.malformed && route.work_item_id", m.group(0))
 
 
 class CanonicalIdentityTest(unittest.TestCase):
@@ -421,8 +481,12 @@ class QueueTileIdentityTest(unittest.TestCase):
     def test_copying_does_not_also_open_the_item(self):
         self.assertIn("function eventTargetsInnerControl", APP)
         # One definition plus exactly two guarded entry points: click and key.
-        self.assertEqual(APP.count("if (eventTargetsInnerControl(e)) return;"), 2,
-                         "both the click and keyboard paths must be guarded")
+        # Only the click path needs the guard now: the primary control is a
+        # real button, so a Copy click never reaches a row-level activation.
+        self.assertEqual(APP.count("if (eventTargetsInnerControl(e)) return;"), 1,
+                         "the click path must be guarded")
+        i = APP.index('getElementById("queue-groups").addEventListener("click"')
+        self.assertIn("eventTargetsInnerControl(e)", APP[i:i + 400])
 
 
 class IdentifierTerminologyTest(unittest.TestCase):
@@ -1031,20 +1095,30 @@ class TruthfulExecutionStateTest(unittest.TestCase):
         self.assertIn('r === "active_runner"', body)
 
     def test_unsupported_states_are_not_simulated(self):
-        labels = re.search(r"EXECUTION_STATE_LABELS = \{(.*?)\n\}", APP, re.S).group(1)
+        labels = re.search(r"const EXECUTOR_LABELS = \{(.*?)\};", APP, re.S).group(1)
         for deferred in ("EXECUTOR_RESUMED", "MESSAGE_ACKNOWLEDGED", "WAKE_PENDING"):
             self.assertNotIn(deferred, labels,
                              deferred + " requires the Phase 2 wake bridge and "
                              "must not be rendered from current evidence")
 
-    def test_supported_states_are_available(self):
-        labels = re.search(r"EXECUTION_STATE_LABELS = \{(.*?)\n\}", APP, re.S).group(1)
-        for supported in ("CLAIMED", "WAITING_FOR_OPERATOR", "OPERATOR_MESSAGE_POSTED",
-                          "PAUSED", "EXECUTOR_ACTIVE", "IN_COUNCIL", "BLOCKED", "COMPLETE"):
-            self.assertIn(supported, labels)
+    def test_the_obsolete_vocabulary_is_removed_not_left_dead(self):
+        """EXECUTION_STATE_LABELS advertised operator_message_posted, a state
+        nothing can produce, and executionStateLabel had no remaining caller."""
+        self.assertNotIn("EXECUTION_STATE_LABELS", APP)
+        self.assertNotIn("function executionStateLabel", APP)
+        self.assertNotIn("OPERATOR_MESSAGE_POSTED", APP)
 
-    def test_state_is_surfaced_on_the_queue_row(self):
-        self.assertIn("executionStateLabel(it)", APP)
+    def test_state_is_actually_RENDERED_on_the_queue_row(self):
+        """Scoped to queueCard. Asserting the identifier appeared anywhere in
+        app.js was a false positive: the function DECLARATION satisfied it, so
+        the test passed while proving nothing about the rendered row."""
+        m = re.search(RE_CARD, APP)
+        self.assertIsNotNone(m, "queueCard not found")
+        body = m.group(0)
+        self.assertIn("executorStateLabel(it)", body)
+        self.assertIn("lifecyclePhaseLabel(it)", body)
+        self.assertIn("Phase ", body)
+        self.assertIn("Executor ", body)
 
 
 class ConsistentDemotionTest(unittest.TestCase):
@@ -1089,14 +1163,27 @@ class AccessibilityTest(unittest.TestCase):
     """Item 7: keyboard operation and focus visibility."""
 
     def test_queue_rows_are_real_controls(self):
-        self.assertIn('role="button"', APP)
-        self.assertIn('tabindex="0"', APP)
-        self.assertIn("aria-pressed=", APP)
+        # The row is a plain CONTAINER holding a real primary button, because
+        # nesting <button> copy controls inside an element that itself claimed
+        # role="button" is an invalid interactive pattern.
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        self.assertIn('<button type="button" class="q-open"', body)
+        self.assertIn("aria-pressed=", body)
+        self.assertNotIn('role="button" tabindex="0"', body,
+                         "the row must not claim button semantics itself")
 
-    def test_queue_rows_activate_on_enter_and_space(self):
-        m = re.search(r'if \(e\.key !== "Enter" && e\.key !== " "\)[\s\S]{0,4000}?\n\}\);', APP)
-        self.assertIsNotNone(m, "queue rows need Enter/Space activation")
-        self.assertIn("navigateToWorkItem", m.group(0))
+    def test_queue_rows_activate_via_a_native_button(self):
+        """Enter and Space now come from native <button> semantics rather than
+        a hand-rolled key handler, which also removes the second activation
+        path that could diverge from the mouse path."""
+        m = re.search(RE_CARD, APP)
+        self.assertIn('<button type="button" class="q-open"', m.group(0))
+        k = APP.index('document.addEventListener("keydown"')
+        handler = APP[k:k + 400]
+        # The listener only stops Space from scrolling; it must not navigate.
+        self.assertIn("q-open", handler)
+        self.assertNotIn("navigateToWorkItem", handler)
 
     def test_existing_send_shortcuts_are_preserved(self):
         """Ctrl+Enter sends; Shift+Enter still inserts a newline."""
@@ -1105,7 +1192,7 @@ class AccessibilityTest(unittest.TestCase):
 
     def test_focus_rings_exist_for_new_controls(self):
         for rule in (".copy-id:focus-visible", ".jump-to-latest:focus-visible",
-                     '.q-row[role="button"]:focus-visible'):
+                     '.q-open:focus-visible'):
             self.assertIn(rule, CSS)
 
 

@@ -1182,3 +1182,18 @@ body.history-open .mission { display: none !important; }
 .q-row.q-ambiguous { border-left: 3px solid var(--warn, #d08a00); }
 /* History: an absent binding is stated, not substituted. */
 .ledger-none { font-style: italic; opacity: .7; }
+
+/* The queue tile's primary control. The row itself is a plain container, so
+   this button carries the click target, the pressed state and the focus ring,
+   and real copy buttons can sit beside it without nesting inside a control. */
+.q-open {
+  display: block; width: 100%; text-align: left;
+  background: none; border: 0; padding: 0; margin: 0;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.q-open:focus-visible {
+  outline: 2px solid var(--blue-soft);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.q-open[aria-pressed="true"] .q-title { font-weight: 700; }

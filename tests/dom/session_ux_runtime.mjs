@@ -573,6 +573,62 @@ for (const bad of ["#work=%", "#work=%E0%A4%A", "#work=abc&msg=%", "#work=%%%"])
 }
 
 // --------------------------------------------------------------------------
+// 3f. MOUSE ACTIVATION must write the canonical route, exactly as the keyboard
+//     path does. The click handler previously called selectTask() directly, so
+//     ordinary mouse selection left the PREVIOUS route in the URL.
+// --------------------------------------------------------------------------
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "#work=message%3Amsg-stale", ["conv-scroll", "conversation"]);
+  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live",' +
+              ' thread_id: "thr-live", presentation_state: "needs_operator" }];');
+
+  // navigateToWorkItem is the ONE operation that writes the route.
+  ctx.navigateToWorkItem("message:msg-live");
+  ok(ctx.location.hash.indexOf("message%3Amsg-live") !== -1 ||
+     ctx.location.hash.indexOf("message:msg-live") !== -1,
+     "activation writes the canonical work route");
+  ok(ctx.location.hash.indexOf("msg-stale") === -1,
+     "the previous route does not survive activation (stale-hash symptom)");
+  eq(evalIn(ctx, "selectedWorkItemId"), "message:msg-live",
+     "activation binds the canonical work item");
+  eq(evalIn(ctx, "selectedConvThread"), "thr-live",
+     "activation binds the queue-backed durable thread");
+}
+
+// 3g. STRICT ROUTE PROOF. An absent or unreadable route is not evidence that
+//     the URL agrees with the selection, so a work-item-bound send must refuse.
+{
+  const reg = baseRegistry();
+  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
+  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live",' +
+              ' thread_id: "thr-live", presentation_state: "needs_operator" }];' +
+              'selectedWorkItemId = "message:msg-live"; selectedConvThread = "thr-live";');
+
+  // The target itself is well formed...
+  const target = ctx.convComposerTarget();
+  eq([target.work_item_id, target.thread_id], ["message:msg-live", "thr-live"],
+     "the composer target is bound");
+
+  // ...but with NO route in the URL there is nothing proving agreement.
+  ctx.location.hash = "";
+  ok(ctx.parseWorkRoute(ctx.location.hash) === null,
+     "an absent route parses as no route at all");
+
+  // ...and an unreadable route is likewise not proof.
+  ctx.location.hash = "#work=%";
+  const bad = ctx.parseWorkRoute(ctx.location.hash);
+  ok(bad !== null && bad.malformed === true,
+     "an unreadable route is classified malformed, not ignored");
+
+  // A matching canonical route IS proof.
+  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-live");
+  const good = ctx.parseWorkRoute(ctx.location.hash);
+  eq([good.malformed, good.work_item_id], [false, "message:msg-live"],
+     "a canonical route proves which work item the URL names");
+}
+
+// --------------------------------------------------------------------------
 // 4. Composer target fails closed without a durable thread.
 // --------------------------------------------------------------------------
 {

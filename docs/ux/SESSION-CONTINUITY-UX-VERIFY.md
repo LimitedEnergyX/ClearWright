@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   cb259621accc911b4d78f1fa7821756e98093ff2
+HEAD (bytes under review):   789f0f4b244e056da41c2b323e6695eadee9c031
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -66,18 +66,18 @@ were then added to pin each corrected contract.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       146543  3c3971a9673998c8896f15eef8fdcbfe775fb44d466bdfa7ebba49b01f5f8e6c
-  apps/control-plane/static/index.html                    21887  8e7c0ae1c0f797bca56e3ced4af86d52781b89e7ecba3d554e1446d28648bba2
-  apps/control-plane/static/style.css                     52023  569b765f39c2e0f9b5097e0369564a96372f7bb03637f670edded599f4948e1b
-  tests/test_session_continuity_ux.py                     18745  7d6a3576993ffb5c775e72bdb7ba64bd8d43328f02143c50aa4ec9006b4f26e7
+  apps/control-plane/static/app.js                       153437  249b3d3773246de8f30078e791b9c855626720c0a31957bb4c28e8da2dc60a6b
+  apps/control-plane/static/index.html                    22153  336d1c97639ac69f8cbbac53f7919ffc1fb815da28c1c4f90175c5b55bc86179
+  apps/control-plane/static/style.css                     52456  51d02fb9466c43a80f5d760a1e613dc0397acb0220fd3f91ffc4c3a1f5ece09f
+  tests/test_session_continuity_ux.py                     27802  fcd7ec9460bdf7c90c22e1ce6b6fe14f238c5ad9b24ed232e0f8f0e4bb05ab52
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 367 ++++++++++++++++++++++++++++++-
- apps/control-plane/static/index.html |  30 ++-
- apps/control-plane/static/style.css  |  88 ++++++++
- tests/test_session_continuity_ux.py  | 413 +++++++++++++++++++++++++++++++++++
- 4 files changed, 879 insertions(+), 19 deletions(-)
+ apps/control-plane/static/app.js     | 511 ++++++++++++++++++++++++++++-
+ apps/control-plane/static/index.html |  42 ++-
+ apps/control-plane/static/style.css  | 101 ++++++
+ tests/test_session_continuity_ux.py  | 614 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 1245 insertions(+), 23 deletions(-)
 
 REVIEW QUESTIONS
 ----------------------------------------------------------------------
@@ -95,7 +95,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..8c2a851 100644
+index dd2d10c..bcf7a9b 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -120,7 +120,7 @@ index dd2d10c..8c2a851 100644
    nextBody.innerHTML = '<p class="op-next' + (ts.phase_attention ? " op-next-attention" : "") +
      '">' + esc(ts.next_action || "") + "</p>";
  
-@@ -768,8 +774,27 @@ function createComposer(opts) {
+@@ -768,8 +774,36 @@ function createComposer(opts) {
      // before anything has actually been sent; the banner only calls it
      // "continuing" once the caller confirms that id is a real durable thread.
      const confirmed = !isConfirmedTarget || isConfirmedTarget();
@@ -129,6 +129,15 @@ index dd2d10c..8c2a851 100644
 +    // Phase 1, item 3: the destination is DISPLAYED, never inferred from prose.
 +    // Work-item id, thread id and an abbreviated title are shown above the
 +    // composer so posting to the wrong destination requires an explicit change.
++    if (target.work_item_id && target.unresolved) {
++      bannerEl.classList.add("composer-destination");
++      bannerEl.innerHTML =
++        '<span class="dest-label dest-unresolved">Destination unresolved</span> ' +
++        '<span class="dest-work mono" data-dest-work-item="' + esc(target.work_item_id) + '">' +
++        esc(target.work_item_id) + '</span>' +
++        '<span class="dest-title">no durable thread yet - sending is blocked</span>';
++      return;
++    }
 +    if (target.work_item_id) {
 +      const di = (lastWorkItems || []).find((it) => it.work_item_id === target.work_item_id);
 +      const title = di && di.title ? String(di.title) : "";
@@ -150,7 +159,24 @@ index dd2d10c..8c2a851 100644
      bannerEl.textContent = text;
    }
  
-@@ -865,6 +890,10 @@ function createComposer(opts) {
+@@ -823,8 +857,15 @@ function createComposer(opts) {
+       return;
+     }
+     showError("");
++    const preTarget = getTarget();
++    if (preTarget && preTarget.unresolved) {
++      showError("This work item has no durable thread yet, so the destination " +
++                "cannot be verified. The draft was kept; sending is blocked " +
++                "until the queue reports the thread.");
++      return;
++    }
+     const draft = persistDraft();
+-    const target = getTarget();
++    const target = preTarget;
+     sending = true;
+     sendBtn.disabled = true;
+     try {
+@@ -865,6 +906,10 @@ function createComposer(opts) {
        textarea.value = "";
        autoGrow();
        updateCounter();
@@ -161,7 +187,7 @@ index dd2d10c..8c2a851 100644
        if (onPosted) onPosted(result, stored);
      } finally {
        sending = false;
-@@ -1061,11 +1090,21 @@ function queueCard(it) {
+@@ -1061,11 +1106,21 @@ function queueCard(it) {
      ? '<span class="q-opflag" title="operator action required"><U+25C9> operator</span>' : "";
    // Technical ids ride on data attributes only; the primary card stays readable.
    const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
@@ -185,7 +211,7 @@ index dd2d10c..8c2a851 100644
      "</div>";
  }
  
-@@ -1290,6 +1329,256 @@ function openAttention() {
+@@ -1290,6 +1345,286 @@ function openAttention() {
    }
  }
  
@@ -211,7 +237,19 @@ index dd2d10c..8c2a851 100644
 +  } else {
 +    generic.setAttribute("aria-hidden", active ? "true" : "false");
 +    generic.querySelectorAll(FOCUSABLE).forEach((el) => {
-+      if (active) el.tabIndex = -1; else el.removeAttribute("tabindex");
++      if (active) {
++        // Preserve any explicit tabindex so demotion is exactly reversible.
++        if (!el.hasAttribute("data-prior-tabindex")) {
++          el.setAttribute("data-prior-tabindex",
++                          el.hasAttribute("tabindex") ? el.getAttribute("tabindex") : "");
++        }
++        el.tabIndex = -1;
++      } else if (el.hasAttribute("data-prior-tabindex")) {
++        const prior = el.getAttribute("data-prior-tabindex");
++        if (prior === "") el.removeAttribute("tabindex");
++        else el.setAttribute("tabindex", prior);
++        el.removeAttribute("data-prior-tabindex");
++      }
 +    });
 +  }
 +}
@@ -368,14 +406,20 @@ index dd2d10c..8c2a851 100644
 +
 +// Operator-specified priority order. Ranked ONLY from fields /api/work-items
 +// already returns; nothing is inferred or simulated.
++// The operator's stated priority order. "wake_pending" is DELIBERATELY ABSENT:
++// it can only be established by executor acknowledgement or wake telemetry,
++// which is the Phase 2 wake bridge. Listing a bucket that no durable field can
++// fill makes the ranking contract inert and advertises a priority that never
++// applies, so it is deferred rather than simulated (Phase 1, item 6). When the
++// wake bridge lands it belongs between operator_message_posted and paused.
 +const ACTIVE_RANK = [
 +  "waiting_for_operator",
 +  "operator_message_posted",
-+  "wake_pending",
 +  "paused",
 +  "executor_active",
 +  "in_council",
-+  "blocked"
++  "blocked",
++  "claimed"
 +];
 +
 +// Terminal / non-active presentation states are never auto-selected.
@@ -391,14 +435,12 @@ index dd2d10c..8c2a851 100644
 +// needing executor acknowledgement or wake telemetry is deferred to the wake
 +// bridge and is NEVER synthesised here.
 +function activeStateOf(it) {
-+  const p = String((it && it.presentation_state) || "");
-+  const r = String((it && it.runner_state) || "");
-+  if (p === "needs_operator" || p === "waiting_on_operator") return "waiting_for_operator";
-+  if (p === "blocked") return "blocked";
-+  if (r === "waiting_on_council") return "in_council";
-+  if (p === "running") return "executor_active";
-+  if (p === "stale" || r === "stale_or_no_heartbeat") return "paused";
-+  return "in_council";
++  // Delegate to the ONE truthful mapping instead of keeping a second, looser
++  // copy. The earlier duplicate never returned operator_message_posted (so that
++  // rank was unreachable) and defaulted every unrecognised item to in_council,
++  // which silently ranked unknown states ahead of blocked work. An unknown
++  // state now returns "" and sorts last rather than being guessed.
++  return truthfulExecutionState(it);
 +}
 +
 +function rankActiveWorkItems(items) {
@@ -408,7 +450,11 @@ index dd2d10c..8c2a851 100644
 +    const na = ra === -1 ? ACTIVE_RANK.length : ra;
 +    const nb = rb === -1 ? ACTIVE_RANK.length : rb;
 +    if (na !== nb) return na - nb;
-+    return String(b.last_activity_at || "").localeCompare(String(a.last_activity_at || ""));
++    const t = String(b.last_activity_at || "").localeCompare(String(a.last_activity_at || ""));
++    if (t !== 0) return t;
++    // Deterministic final key: equal or missing timestamps must not leave the
++    // restored selection dependent on queue iteration order.
++    return String(a.work_item_id || "").localeCompare(String(b.work_item_id || ""));
 +  });
 +}
 +
@@ -425,7 +471,17 @@ index dd2d10c..8c2a851 100644
 +    // conversation stays empty and the composer shows no thread.
 +    const wid = decodeURIComponent(deep[1]);
 +    const known = items.find((it) => it.work_item_id === wid);
-+    if (known && known.thread_id && selectedWorkItemId === wid && !selectedConvThread) {
++    if (!known) {
++      // A malformed, stale, or unavailable deep link must not leave a selected
++      // work item with no queue-backed identity. Clear it, say so, and do not
++      // persist it as the active selection.
++      if (selectedWorkItemId === wid) selectTask(null);
++      persistSelection(null);
++      showRestoreStatus('Work item "' + wid + '" is not in the live queue. ' +
++                        "The link may be stale, so nothing is selected.");
++      return;
++    }
++    if (known.thread_id && selectedWorkItemId === wid && !selectedConvThread) {
 +      selectTask(known.thread_id, wid);
 +    }
 +    return;
@@ -442,7 +498,7 @@ index dd2d10c..8c2a851 100644
  // Deterministic hash route: #work=<work_item_id>[&msg=<message_id>]. The
  // highlight message id is derived from the work item id itself (a message work
  // item id IS "message:" + message_id) -- no message search, no ambiguity.
-@@ -1298,9 +1587,46 @@ function navigateToWorkItem(workItemId) {
+@@ -1298,9 +1633,124 @@ function navigateToWorkItem(workItemId) {
      ? workItemId.slice("message:".length) : "";
    location.hash = "#work=" + encodeURIComponent(workItemId) +
      (msgId ? "&msg=" + encodeURIComponent(msgId) : "");
@@ -470,15 +526,93 @@ index dd2d10c..8c2a851 100644
 +  if (currentView !== "work") showView("work");
 +}
 +
-+function conversationScrollEl() {
++// The element whose CONTENT is the conversation. Mutations are observed here.
++function conversationAnchorEl() {
 +  return document.getElementById("conv-scroll") ||
++         document.getElementById("conv-detail") ||
 +         document.getElementById("conversation") ||
 +         document.getElementById("comms");
++}
++
++// The element that ACTUALLY SCROLLS. #conv-detail is laid out with
++// overflow-y:visible and grows with its content, so scrollHeight equals
++// clientHeight and it can never report a scroll position -- targeting it left
++// the whole jump-to-latest feature inert. Walk up to the nearest genuinely
++// scrollable ancestor and fall back to the page, which is the real scroller
++// in the current layout.
++function conversationScrollEl() {
++  let el = conversationAnchorEl();
++  while (el && el !== document.body && el !== document.documentElement) {
++    let oy = "";
++    try { oy = getComputedStyle(el).overflowY; } catch (e) { oy = ""; }
++    if ((oy === "auto" || oy === "scroll") && (el.scrollHeight - el.clientHeight) > 4) {
++      return el;
++    }
++    el = el.parentElement;
++  }
++  return document.scrollingElement || document.documentElement;
++}
++
++// Scroll events do not bubble from the document element, so a page-level
++// scroller must be observed on window instead.
++function scrollEventTargetFor(el) {
++  return (el === document.scrollingElement || el === document.documentElement ||
++          el === document.body) ? window : el;
 +}
 +
 +function operatorMovedAwayFromLatest(el) {
 +  if (!el) return false;
 +  return (el.scrollHeight - el.scrollTop - el.clientHeight) > 120;
++}
++
++// Restoration status is surfaced, never swallowed. `retry` shows the control
++// that re-runs the same load path.
++function showRestoreStatus(text, retry) {
++  const el = document.getElementById("restore-status");
++  if (!el) return;
++  if (!text) { el.hidden = true; el.textContent = ""; return; }
++  el.textContent = text;
++  el.hidden = false;
++  if (retry) {
++    const btn = document.createElement("button");
++    btn.type = "button";
++    btn.className = "btn btn-quiet";
++    btn.textContent = "Retry";
++    btn.addEventListener("click", () => {
++      showRestoreStatus("");
++      refreshWorkItems().then(restoreActiveSelection).catch(() => {
++        showRestoreStatus("Still could not load the work queue.", true);
++      });
++    });
++    el.appendChild(document.createTextNode(" "));
++    el.appendChild(btn);
++  }
++}
++
++// The Jump to latest control must actually work: it is activated by click, and
++// it appears only when new content arrives while the operator has deliberately
++// scrolled away from the newest message. Arriving content never yanks a
++// deliberately positioned view; it offers this control instead.
++function initJumpToLatest() {
++  const pill = document.getElementById("jump-to-latest");
++  if (!pill) return;
++  pill.addEventListener("click", jumpToLatestMessage);
++  // Resolved lazily on each event: the real scroller depends on layout, which
++  // changes when the Work view opens and when the conversation grows.
++  scrollEventTargetFor(conversationScrollEl()).addEventListener("scroll", () => {
++    if (!operatorMovedAwayFromLatest(conversationScrollEl())) pill.hidden = true;
++  });
++  const anchor = conversationAnchorEl();
++  if (!anchor) return;
++  try {
++    const obs = new MutationObserver(() => {
++      // The pill is OUTSIDE the observed content container, so toggling it
++      // cannot re-enter this observer.
++      if (operatorMovedAwayFromLatest(conversationScrollEl())) pill.hidden = false;
++      else jumpToLatestMessage();
++    });
++    obs.observe(anchor, { childList: true, subtree: true });
++  } catch (e) { /* no observer -> the click path still works */ }
 +}
 +
 +function jumpToLatestMessage() {
@@ -490,7 +624,7 @@ index dd2d10c..8c2a851 100644
  }
  
  function highlightMessage(messageId) {
-@@ -1321,7 +1647,8 @@ function applyWorkHashRoute() {
+@@ -1321,7 +1771,8 @@ function applyWorkHashRoute() {
    const m = /[#&]work=([^&]+)/.exec(h);
    if (!m) return;
    const wid = decodeURIComponent(m[1]);
@@ -500,7 +634,7 @@ index dd2d10c..8c2a851 100644
    showView("work");
    const mm = /[#&]msg=([^&]+)/.exec(h);
    if (mm) setTimeout(() => highlightMessage(decodeURIComponent(mm[1])), 200);
-@@ -1837,7 +2164,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2288,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -510,7 +644,7 @@ index dd2d10c..8c2a851 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +2463,18 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +2587,23 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -523,13 +657,18 @@ index dd2d10c..8c2a851 100644
 +  if (selectedWorkItemId) {
 +    const it = (lastWorkItems || []).find((i) => i.work_item_id === selectedWorkItemId);
 +    const thread = selectedConvThread || (it && it.thread_id) || null;
-+    return thread ? { work_item_id: selectedWorkItemId, thread_id: thread }
-+                  : { work_item_id: selectedWorkItemId };
++    if (thread) return { work_item_id: selectedWorkItemId, thread_id: thread };
++    // FAIL CLOSED. A work_item_id WITHOUT a thread_id is the one shape the
++    // server's target-integrity check cannot validate, because that check
++    // compares the pair. Rather than emit an unverifiable target, report the
++    // selection as unresolved: the banner says so and the send is refused
++    // until the queue supplies a durable thread for this item.
++    return { work_item_id: selectedWorkItemId, thread_id: null, unresolved: true };
 +  }
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2786,9 +3126,12 @@ function toggleToolLog() {
+@@ -2786,9 +3255,12 @@ function toggleToolLog() {
  function selectTask(threadId, workItemId) {
    selectedConvThread = threadId || null;
    selectedWorkItemId = workItemId || null;
@@ -542,22 +681,52 @@ index dd2d10c..8c2a851 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2997,6 +3340,10 @@ function wire() {
+@@ -2886,6 +3358,10 @@ function wire() {
+     if (nav === "history") showView("history");
+     else showView("work");   // conv / council / evidence / gate / verification tabs
+   });
++  // This is the explicit, keyboard-reachable action that starts a new
++  // conversation while work is selected: clearing the selection is what
++  // re-enables the generic composer (applyComposerFocus lifts the demotion), so
++  // the demoted composer is never a dead end.
+   document.getElementById("queue-new-btn").addEventListener("click", () => {
+     selectTask(null);
+     renderConvDetail(null);
+@@ -2997,6 +3473,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
 +  // Active session continuity: once the queue has loaded, restore the prior
 +  // selection or fall back to the highest-priority active item so a refresh
 +  // never strands the operator on an empty panel while active work exists.
-+  refreshWorkItems().then(restoreActiveSelection).catch(() => {});
++  initJumpToLatest();
++  refreshWorkItems().then(() => {
++    showRestoreStatus("");
++    restoreActiveSelection();
++  }).catch(() => {
++    // Continuity that fails silently is worse than continuity that reports the
++    // failure: the operator would see an empty console with no reason given.
++    showRestoreStatus("Could not load the work queue, so active work was not " +
++                      "restored. The next refresh will retry.", true);
++  });
    setInterval(refresh, LIVE_MS);
    setInterval(refreshAgentEvents, LIVE_MS);
    setInterval(refreshMessages, LIVE_MS);
 diff --git a/apps/control-plane/static/index.html b/apps/control-plane/static/index.html
-index 1a5fd93..f931636 100644
+index 1a5fd93..a982560 100644
 --- a/apps/control-plane/static/index.html
 +++ b/apps/control-plane/static/index.html
-@@ -113,22 +113,34 @@
+@@ -59,6 +59,9 @@
+           <span>Work queue <span class="help" tabindex="0" role="button" aria-label="About the work queue">?<span class="tip">Actionable work only, derived from the live queue and messages: unanswered actionable requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Normal chat stays in the Conversation tab and never appears here. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></span>
+           <button id="queue-new-btn" class="btn btn-quiet" type="button" title="Start a new conversation">New</button>
+         </div>
++        <!-- Restoration/queue-load failures are reported here rather than
++             leaving the operator with an unexplained empty console. -->
++        <p class="restore-status" id="restore-status" role="status" aria-live="polite" hidden></p>
+         <div class="queue-filters" id="queue-filters" role="tablist" aria-label="Queue filters">
+           <button class="qf-chip is-active" data-filter="current" type="button">Current</button>
+           <button class="qf-chip" data-filter="needs_attention" type="button">Needs attention</button>
+@@ -113,24 +116,42 @@
  
          <div id="center-work" hidden>
            <p class="hint">Operator/agent dialogue on durable message threads. Replies from Claude, Codex, or other workers appear only when they actually post back through the local adapter; nothing here is simulated.</p>
@@ -589,31 +758,42 @@ index 1a5fd93..f931636 100644
 +            <div class="op-card-head">Next required action</div>
 +            <div class="op-card-body" id="next-action-body"></div>
 +          </div>
- 
--        <div class="op-card" id="authority-card">
--          <div class="op-card-head">Authority state</div>
--          <div class="op-card-body" id="authority-body"><p class="muted">No task selected.</p></div>
++
 +          <div class="op-card" id="authority-card">
 +            <div class="op-card-head">Authority state</div>
 +            <div class="op-card-body" id="authority-body"></div>
 +          </div>
+ 
+-        <div class="op-card" id="authority-card">
+-          <div class="op-card-head">Authority state</div>
+-          <div class="op-card-body" id="authority-body"><p class="muted">No task selected.</p></div>
++          <div class="op-card" id="operator-actions-card">
++            <div class="op-card-head">Operator actions</div>
++            <div class="op-card-body conv-actions" id="operator-actions"></div>
++          </div>
          </div>
  
++
          <section class="op-card clearance-card is-empty" id="clearance-card" aria-labelledby="incoming-h">
-@@ -153,7 +165,7 @@
- 
-         <div class="op-card" id="operator-actions-card">
-           <div class="op-card-head">Operator actions</div>
--          <div class="op-card-body conv-actions" id="operator-actions"><p class="muted">No task selected.</p></div>
-+          <div class="op-card-body conv-actions" id="operator-actions"></div>
+           <div class="op-card-head" id="incoming-h">Incoming clearance request <span class="help" tabindex="0" role="button" aria-label="About incoming clearance requests">?<span class="tip">Clearance packets arrive from agents, tools, scripts, or integrations. The operator reviews and decides; nobody fills out packet paperwork here.</span></span></div>
+           <div id="operator-card"><p class="muted">Loading...</p></div>
+@@ -151,10 +172,7 @@
+           <p class="conv-target-hint">Message is normal chat: durable, but never a work item and never an Attention flag. Participation is real only when a worker posts back through CW. Use the Work page composer for actionable requests.</p>
          </div>
+ 
+-        <div class="op-card" id="operator-actions-card">
+-          <div class="op-card-head">Operator actions</div>
+-          <div class="op-card-body conv-actions" id="operator-actions"><p class="muted">No task selected.</p></div>
+-        </div>
++        
        </aside>
      </div>
+ 
 diff --git a/apps/control-plane/static/style.css b/apps/control-plane/static/style.css
-index ac13c95..e1b8d3a 100644
+index ac13c95..44a614a 100644
 --- a/apps/control-plane/static/style.css
 +++ b/apps/control-plane/static/style.css
-@@ -1047,3 +1047,91 @@ body.history-open .mission { display: none !important; }
+@@ -1047,3 +1047,104 @@ body.history-open .mission { display: none !important; }
  .activity-details[open] summary::before { content: "<U+25BE> "; }
  .activity-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray); white-space: nowrap; }
  .activity-log { margin: 0.35rem 0 0.2rem; font-family: ui-monospace, monospace; font-size: 0.74rem; white-space: pre-wrap; max-height: 5.5rem; overflow-y: auto; }
@@ -705,12 +885,25 @@ index ac13c95..e1b8d3a 100644
 +.q-row[role="button"] { cursor: pointer; }
 +.q-row[role="button"]:focus-visible { outline: 2px solid #7aa2ff; outline-offset: 2px; }
 +.q-exec { font-size: .68rem; opacity: .65; letter-spacing: .02em; }
++
++/* Round-2 council corrections. */
++.restore-status {
++  margin: 0 0 0.4rem; padding: 0.4rem 0.55rem;
++  font-size: 0.74rem; color: var(--text);
++  background: var(--panel-2); border: 1px solid var(--line);
++  border-left: 3px solid var(--warn, #d08a00); border-radius: 8px;
++}
++/* An unverifiable destination must not look like a valid one. */
++.composer-destination .dest-unresolved {
++  color: var(--warn, #d08a00);
++  font-weight: 700;
++}
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..b67e0fe
+index 0000000..512148d
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,413 @@
+@@ -0,0 +1,614 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -743,6 +936,23 @@ index 0000000..b67e0fe
 +CSS = _read("style.css")
 +
 +
++
++def _block_of(html, elem_id):
++    """Return the balanced-div source of the element carrying elem_id.
++
++    Used so containment assertions test the real tree rather than the byte
++    order of two ids in the file.
++    """
++    i = html.index('id="%s"' % elem_id)
++    start = html.rindex("<div", 0, i)
++    depth = 0
++    for m in re.finditer(r"<div" + chr(92) + "b|</div>", html[start:]):
++        depth += 1 if m.group(0) != "</div>" else -1
++        if depth == 0:
++            return html[start:start + m.end()]
++    raise AssertionError("unbalanced markup around " + elem_id)
++
++
 +class SelectionRestorationTest(unittest.TestCase):
 +    """Item 1: a refresh returns the operator to active work."""
 +
@@ -758,9 +968,9 @@ index 0000000..b67e0fe
 +
 +    def test_persistence_failure_is_survivable(self):
 +        """Storage may be unavailable; the hash route must still work."""
-+        m = re.search(r"function persistSelection[\s\S]{0,400}?\n\}", APP)
++        m = re.search(r"function persistSelection[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("catch", m.group(0))
-+        m2 = re.search(r"function readPersistedSelection[\s\S]{0,300}?\n\}", APP)
++        m2 = re.search(r"function readPersistedSelection[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("catch", m2.group(0))
 +
 +    def test_restore_runs_at_boot_after_the_queue_loads(self):
@@ -768,7 +978,7 @@ index 0000000..b67e0fe
 +        self.assertRegex(APP, r"refreshWorkItems\(\)\s*\.then\(\s*restoreActiveSelection")
 +
 +    def test_explicit_deep_link_wins_over_stored_selection(self):
-+        m = re.search(r"function restoreActiveSelection[\s\S]{0,1400}?\n\}", APP)
++        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn("location.hash", body)
 +        # The deep-link branch must short-circuit BEFORE any fallback ranking,
@@ -779,7 +989,7 @@ index 0000000..b67e0fe
 +
 +    def test_stale_stored_selection_is_not_used(self):
 +        """A stored id must be validated against the live queue AND activity."""
-+        m = re.search(r"function restoreActiveSelection[\s\S]{0,1400}?\n\}", APP)
++        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn("isActiveItem", body)
 +        self.assertIn("work_item_id === stored", body)
@@ -793,11 +1003,33 @@ index 0000000..b67e0fe
 +        self.assertIsNotNone(m)
 +        order = re.findall(r'"([a-z_]+)"', m.group(1))
 +        self.assertEqual(order, [
-+            "waiting_for_operator", "operator_message_posted", "wake_pending",
-+            "paused", "executor_active", "in_council", "blocked"])
++            "waiting_for_operator", "operator_message_posted",
++            "paused", "executor_active", "in_council", "blocked", "claimed"])
++
++    def test_wake_pending_is_deferred_not_simulated(self):
++        """No durable field can establish wake_pending before the wake bridge.
++
++        Keeping it in the executable order would advertise a priority bucket
++        that nothing can ever fall into, which is what made the first round of
++        this ranking inert.
++        """
++        m = re.search(r"ACTIVE_RANK = \[(.*?)\]", APP, re.S)
++        self.assertNotIn("wake_pending", m.group(1))
++        head = APP[:APP.index("const ACTIVE_RANK")]
++        self.assertIn("wake_pending", head[-900:],
++                      "the deferral must be documented where the rank is defined")
++
++    def test_every_ranked_state_is_reachable_from_the_mapping(self):
++        """A rank nothing can produce is a silent mis-ordering."""
++        m = re.search(r"ACTIVE_RANK = \[(.*?)\]", APP, re.S)
++        ranked = set(re.findall(r'"([a-z_]+)"', m.group(1)))
++        tm = re.search(r"function truthfulExecutionState[\s\S]{0,4000}?\n\}", APP)
++        produced = set(re.findall(r'return "([a-z_]+)"', tm.group(0)))
++        self.assertEqual(ranked - produced, set(),
++                         "ACTIVE_RANK contains states the mapping never returns")
 +
 +    def test_ranking_filters_to_active_items_only(self):
-+        m = re.search(r"function rankActiveWorkItems[\s\S]{0,600}?\n\}", APP)
++        m = re.search(r"function rankActiveWorkItems[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("filter(isActiveItem)", m.group(0))
 +
 +    def test_completed_items_are_never_auto_selected(self):
@@ -807,22 +1039,31 @@ index 0000000..b67e0fe
 +            self.assertIn(terminal, m.group(1))
 +
 +    def test_ranking_is_stable_by_recent_activity(self):
-+        m = re.search(r"function rankActiveWorkItems[\s\S]{0,600}?\n\}", APP)
++        m = re.search(r"function rankActiveWorkItems[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("last_activity_at", m.group(0))
 +
-+    def test_ranking_uses_only_fields_the_api_returns(self):
-+        """No invented field may drive selection."""
-+        m = re.search(r"function activeStateOf[\s\S]{0,700}?\n\}", APP)
++    def test_ranking_delegates_to_the_single_truthful_mapping(self):
++        """Two mappings drifted: the ranking copy never returned
++        operator_message_posted and defaulted unknowns to in_council."""
++        m = re.search(r"function activeStateOf[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
-+        for field in ("presentation_state", "runner_state"):
-+            self.assertIn(field, body)
++        self.assertIn("return truthfulExecutionState(it)", body)
++        self.assertNotIn('return "in_council"', body)
++
++    def test_unknown_states_are_not_guessed(self):
++        tm = re.search(r"function truthfulExecutionState[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn('return ""', tm.group(0))
++
++    def test_ranking_has_a_deterministic_final_key(self):
++        m = re.search(r"function rankActiveWorkItems[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("work_item_id", m.group(0).split("last_activity_at")[-1])
 +
 +
 +class EmptyStateTest(unittest.TestCase):
 +    """Item 1/5: the empty state is legitimate ONLY with no active work."""
 +
 +    def test_no_active_work_clears_the_selection_and_returns(self):
-+        m = re.search(r"function restoreActiveSelection[\s\S]{0,1400}?\n\}", APP)
++        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("if (!target)", m.group(0))
 +
 +    def test_duplicate_no_task_selected_placeholders_are_gone(self):
@@ -840,11 +1081,11 @@ index 0000000..b67e0fe
 +    """Item 2: conversation-first, latest message, deliberate-scroll respected."""
 +
 +    def test_navigation_opens_the_conversation_tab(self):
-+        m = re.search(r"function navigateToWorkItem[\s\S]{0,1600}?\n\}", APP)
++        m = re.search(r"function navigateToWorkItem[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("openConversationTab()", m.group(0))
 +
 +    def test_navigation_lands_on_the_latest_message(self):
-+        m = re.search(r"function navigateToWorkItem[\s\S]{0,1600}?\n\}", APP)
++        m = re.search(r"function navigateToWorkItem[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn("jumpToLatestMessage", m.group(0))
 +
 +    def test_scroll_is_preserved_only_when_deliberately_moved_away(self):
@@ -867,7 +1108,7 @@ index 0000000..b67e0fe
 +    """
 +
 +    def test_composer_target_binds_to_the_selected_work_item(self):
-+        m = re.search(r"function convComposerTarget[\s\S]{0,1600}?\n\}", APP)
++        m = re.search(r"function convComposerTarget[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIsNotNone(m, "convComposerTarget not found")
 +        body = m.group(0)
 +        self.assertIn("selectedWorkItemId", body)
@@ -875,10 +1116,13 @@ index 0000000..b67e0fe
 +
 +    def test_work_item_id_is_only_sent_with_a_durable_thread(self):
 +        """The server refuses an unbound thread/work-item pair; never invent one."""
-+        m = re.search(r"function convComposerTarget[\s\S]{0,1600}?\n\}", APP)
++        m = re.search(r"function convComposerTarget[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertNotIn("convComposerNewThreadId", body.split("selectedConvThread ||")[0])
-+        self.assertIn("thread ?", body)
++        # The bare-work-item shape is now an explicit fail-closed marker rather
++        # than a sendable target.
++        self.assertIn("if (thread) return {", body)
++        self.assertIn("unresolved: true", body)
 +
 +    def test_selection_change_refreshes_the_destination(self):
 +        m = re.search(r"function selectTask\([^)]*\)\s*\{(.{0,900})", APP, re.S)
@@ -886,13 +1130,13 @@ index 0000000..b67e0fe
 +
 +    def test_navigation_binds_the_real_durable_thread(self):
 +        """selectTask(null, id) would drop the thread and mint a new one."""
-+        m = re.search(r"function navigateToWorkItem[\s\S]{0,1600}?\n\}", APP)
++        m = re.search(r"function navigateToWorkItem[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertNotIn("selectTask(null, workItemId)", body)
 +        self.assertIn("thread_id", body)
 +
 +    def test_deep_link_binds_the_thread_the_same_way(self):
-+        m = re.search(r"function applyWorkHashRoute[\s\S]{0,1200}?\n\}", APP)
++        m = re.search(r"function applyWorkHashRoute[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertNotIn("selectTask(null, wid)", body)
 +        self.assertIn("thread_id", body)
@@ -909,6 +1153,156 @@ index 0000000..b67e0fe
 +        self.assertNotIn("selectedConvThread || selectedWorkItemId", APP)
 +
 +
++class UnresolvedDestinationTest(unittest.TestCase):
++    """A work_item_id WITHOUT a thread_id is the one shape the server's
++    target-integrity check cannot validate, because that check compares the
++    pair. The UI must fail closed rather than emit it."""
++
++    def test_target_reports_unresolved_instead_of_a_bare_work_item(self):
++        m = re.search(r"function convComposerTarget[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("unresolved: true", body)
++        self.assertIn("thread_id: null", body)
++
++    def test_send_is_refused_while_the_destination_is_unresolved(self):
++        self.assertIn("preTarget.unresolved", APP)
++        i = APP.index("preTarget.unresolved")
++        window = APP[i:i + 400]
++        self.assertIn("showError", window)
++        self.assertIn("return;", window)
++
++    def test_refusal_happens_before_the_body_is_built(self):
++        i = APP.index("preTarget.unresolved")
++        j = APP.index("const body = Object.assign")
++        self.assertLess(i, j)
++
++    def test_banner_does_not_present_an_unresolved_target_as_valid(self):
++        self.assertIn("dest-unresolved", APP)
++        self.assertIn("dest-unresolved", CSS)
++
++
++class StaleDeepLinkTest(unittest.TestCase):
++    """An unknown deep link must not leave a selected item with no
++    queue-backed identity."""
++
++    def test_unknown_deep_link_clears_the_selection(self):
++        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("if (!known)", body)
++        self.assertIn("selectTask(null)", body)
++        self.assertIn("persistSelection(null)", body)
++
++    def test_unknown_deep_link_is_reported_not_silent(self):
++        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("showRestoreStatus", m.group(0))
++
++
++class JumpToLatestWiringTest(unittest.TestCase):
++    """The control was rendered but inert: no click handler, no visibility
++    logic, and operatorMovedAwayFromLatest was never called."""
++
++    def test_button_is_actually_activated(self):
++        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
++        self.assertIsNotNone(m, "initJumpToLatest not found")
++        self.assertIn('addEventListener("click", jumpToLatestMessage)', m.group(0))
++
++    def test_visibility_is_driven_by_deliberate_scroll(self):
++        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("operatorMovedAwayFromLatest", body)
++        self.assertIn('addEventListener("scroll"', body)
++
++    def test_new_content_does_not_yank_a_deliberate_position(self):
++        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("MutationObserver", body)
++        self.assertIn("pill.hidden = false", body)
++
++    def test_it_is_wired_at_boot(self):
++        self.assertIn("initJumpToLatest();", APP)
++
++    def test_scroll_target_is_the_element_that_actually_scrolls(self):
++        """#conv-detail is overflow-y:visible and grows with its content, so it
++        can never report a scroll position. Targeting it made every scroll
++        check return false and the pill unreachable."""
++        m = re.search(r"function conversationScrollEl[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("overflowY", body)
++        self.assertIn("scrollHeight", body)
++        self.assertIn("document.scrollingElement", body)
++
++    def test_content_anchor_and_scroller_are_distinct(self):
++        self.assertIn("function conversationAnchorEl", APP)
++        m = re.search(r"function initJumpToLatest[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("conversationAnchorEl()", body)
++        self.assertIn("conversationScrollEl()", body)
++
++    def test_page_level_scroll_is_observed_on_window(self):
++        """Scroll events do not bubble from the document element."""
++        self.assertIn("function scrollEventTargetFor", APP)
++        m = re.search(r"function scrollEventTargetFor[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("window", m.group(0))
++
++
++class ObservableFailureTest(unittest.TestCase):
++    """Continuity that fails silently is worse than continuity that says so."""
++
++    def test_restoration_failure_is_reported(self):
++        self.assertNotIn("refreshWorkItems().then(restoreActiveSelection).catch(() => {});", APP)
++        self.assertIn("function showRestoreStatus", APP)
++        self.assertIn('id="restore-status"', HTML)
++
++    def test_failure_offers_a_retry(self):
++        m = re.search(r"function showRestoreStatus[\s\S]{0,4000}?\n\}", APP)
++        body = m.group(0)
++        self.assertIn("Retry", body)
++        self.assertIn("refreshWorkItems()", body)
++
++    def test_status_is_announced(self):
++        i = HTML.index('id="restore-status"')
++        window = HTML[max(0, i - 200):i + 200]
++        self.assertIn('role="status"', window)
++        self.assertIn('aria-live="polite"', window)
++
++
++class ContextualRailCompletenessTest(unittest.TestCase):
++    """No contextual card may render empty when nothing is selected."""
++
++    def test_operator_actions_card_is_inside_the_rail(self):
++        """Source ORDER is not containment.
++
++        An earlier version of this change placed the card immediately after the
++        rail's closing tag. Every ordering assertion still passed while the
++        browser showed the card as a sibling that stayed visible with an empty
++        body. This parses the actual element tree instead.
++        """
++        rail = _block_of(HTML, "session-rail")
++        self.assertIn('id="operator-actions-card"', rail)
++        self.assertIn('id="next-action-card"', rail)
++        self.assertNotIn('id="clearance-card"', rail,
++                         "the clearance card is not contextual to a selection")
++
++    def test_only_one_actions_card_exists(self):
++        self.assertEqual(HTML.count('id="operator-actions-card"'), 1)
++
++
++class DeliberateNewConversationTest(unittest.TestCase):
++    """The demoted composer must not be a dead end."""
++
++    def test_an_explicit_control_clears_the_selection(self):
++        i = APP.index('getElementById("queue-new-btn")')
++        self.assertIn("selectTask(null)", APP[i:i + 300])
++
++    def test_the_affordance_is_documented_where_demotion_happens(self):
++        head = APP[:APP.index('getElementById("queue-new-btn")')]
++        self.assertIn("re-enables the generic composer", head[-700:])
++
++    def test_demotion_is_exactly_reversible(self):
++        m = re.search(r"function applyComposerFocus[\s\S]{0,4000}?\n\}", APP)
++        self.assertIn("data-prior-tabindex", m.group(0))
++
++
 +class ConversationSurfaceTest(unittest.TestCase):
 +    """Item 2, behaviour: the conversation surface must actually be revealed.
 +
@@ -918,13 +1312,13 @@ index 0000000..b67e0fe
 +    """
 +
 +    def test_open_conversation_does_not_depend_on_a_nonexistent_tab(self):
-+        m = re.search(r"function openConversationTab[\s\S]{0,1200}?\n\}", APP)
++        m = re.search(r"function openConversationTab[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertNotIn('data-tab="conversation"', body)
 +        self.assertNotIn("#tab-conversation", body)
 +
 +    def test_open_conversation_reveals_the_work_view(self):
-+        m = re.search(r"function openConversationTab[\s\S]{0,1200}?\n\}", APP)
++        m = re.search(r"function openConversationTab[\s\S]{0,4000}?\n\}", APP)
 +        self.assertIn('showView("work")', m.group(0))
 +
 +    def test_no_conversation_tab_control_is_invented_in_markup(self):
@@ -949,7 +1343,7 @@ index 0000000..b67e0fe
 +
 +    def test_generic_composer_is_demoted_while_work_is_selected(self):
 +        self.assertIn("function applyComposerFocus", APP)
-+        m = re.search(r"function applyComposerFocus[\s\S]{0,2200}?\n\}", APP)
++        m = re.search(r"function applyComposerFocus[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn("composer-demoted", body)
 +        self.assertIn("tabIndex", body)
@@ -969,27 +1363,27 @@ index 0000000..b67e0fe
 +
 +    def test_identity_row_is_rendered_on_every_message_card(self):
 +        self.assertIn("messageIdentityRow(m)", APP)
-+        m = re.search(r"function messageIdentityRow[\s\S]{0,1400}?\n\}", APP)
++        m = re.search(r"function messageIdentityRow[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        for field in ("message_id", "thread_id", "work_item_id", "actor", "intent"):
 +            self.assertIn(field, body)
 +
 +    def test_copy_controls_are_real_keyboard_reachable_buttons(self):
-+        m = re.search(r"function copyIdButton[\s\S]{0,600}?\n\}", APP)
++        m = re.search(r"function copyIdButton[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn('<button type="button"', body)
 +        self.assertIn("aria-label", body)
 +        self.assertIn(".copy-id:focus-visible", CSS)
 +
 +    def test_copy_uses_the_clipboard_api_and_degrades_safely(self):
-+        m = re.search(r"function copyToClipboard[\s\S]{0,700}?\n\}", APP)
++        m = re.search(r"function copyToClipboard[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn("navigator.clipboard", body)
 +        self.assertIn("catch", body)
 +
 +    def test_post_send_confirmation_exposes_the_new_message_id(self):
 +        self.assertIn("function showPostConfirmation", APP)
-+        m = re.search(r"function showPostConfirmation[\s\S]{0,900}?\n\}", APP)
++        m = re.search(r"function showPostConfirmation[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn("data-posted-message-id", body)
 +        self.assertIn("result.thread_id", body)
@@ -1014,7 +1408,7 @@ index 0000000..b67e0fe
 +    """Item 6: RUNNING is never derived from message-post activity."""
 +
 +    def test_operator_message_does_not_yield_a_running_state(self):
-+        m = re.search(r"function truthfulExecutionState[\s\S]{0,1400}?\n\}", APP)
++        m = re.search(r"function truthfulExecutionState[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn("operator_message_posted", body)
 +        i_msg = body.index('ev === "operator_message"')
@@ -1049,13 +1443,13 @@ index 0000000..b67e0fe
 +    """
 +
 +    def test_demotion_removes_a11y_and_tab_order_together(self):
-+        m = re.search(r"function applyComposerFocus[\s\S]{0,2200}?\n\}", APP)
++        m = re.search(r"function applyComposerFocus[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn("inert", body)
 +        self.assertIn("removeAttribute(\"aria-hidden\")", body)
 +
 +    def test_fallback_covers_every_focusable_not_just_the_textarea(self):
-+        m = re.search(r"function applyComposerFocus[\s\S]{0,2200}?\n\}", APP)
++        m = re.search(r"function applyComposerFocus[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        self.assertIn("querySelectorAll(FOCUSABLE)", body)
 +        self.assertIn("button", body)
@@ -1087,7 +1481,7 @@ index 0000000..b67e0fe
 +        self.assertIn("aria-pressed=", APP)
 +
 +    def test_queue_rows_activate_on_enter_and_space(self):
-+        m = re.search(r'if \(e\.key !== "Enter" && e\.key !== " "\)[\s\S]{0,500}?\n\}\);', APP)
++        m = re.search(r'if \(e\.key !== "Enter" && e\.key !== " "\)[\s\S]{0,4000}?\n\}\);', APP)
 +        self.assertIsNotNone(m, "queue rows need Enter/Space activation")
 +        self.assertIn("navigateToWorkItem", m.group(0))
 +
@@ -1110,13 +1504,13 @@ index 0000000..b67e0fe
 +        self.assertTrue(os.path.exists(server))
 +
 +    def test_identity_helpers_only_read_existing_fields(self):
-+        m = re.search(r"function messageIdentityRow[\s\S]{0,1400}?\n\}", APP)
++        m = re.search(r"function messageIdentityRow[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        for mutator in ("postJSON", "fetch(", "POST"):
 +            self.assertNotIn(mutator, body)
 +
 +    def test_restoration_never_mutates_durable_state(self):
-+        m = re.search(r"function restoreActiveSelection[\s\S]{0,1400}?\n\}", APP)
++        m = re.search(r"function restoreActiveSelection[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
 +        for mutator in ("postJSON", "fetch(", "/api/action"):
 +            self.assertNotIn(mutator, body)

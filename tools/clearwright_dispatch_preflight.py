@@ -10,11 +10,13 @@ These are ADDITIVE, fail-closed-preserving helpers used by the council engine:
      secrets or raw provider bodies - only one of NORMALIZED_FAILURE_CLASSES.
 
   B. dispatch_eligibility(): a DETERMINISTIC pre-allocation check over signals
-     that are known before any adapter call. It can only REFUSE earlier and more
-     informatively than the downstream egress guard - it never authorizes a
-     dispatch the guard would block, so no fail-closed control is weakened. When
-     it refuses, the caller records the normalized reason and consumes NO council
-     id or reviewer attempt.
+     that are known before any adapter call. It never authorizes a dispatch the
+     guard would block, so no fail-closed control is weakened. For MIRRORED
+     signals it refuses earlier than the guard and can never newly deny; the
+     separate classifier_unresolved policy is an intentional NEW fail-closed
+     denial accepted by the operator (see production_signals). When it refuses,
+     the caller records the normalized reason and consumes NO council id or
+     reviewer attempt.
 
 Pure module: no imports from the council engine (avoids a cycle); the engine
 imports these.
@@ -24,7 +26,8 @@ NORMALIZED_FAILURE_CLASSES = (
     "policy_denial", "repo_not_approved", "provenance_unresolved",
     "sensitive_content_prohibited", "tripwire_refusal",
     "composition_or_hash_mismatch", "provider_unavailable", "auth_failure",
-    "rate_limit", "timeout", "malformed_response", "adapter_failure", "unknown",
+    "rate_limit", "timeout", "malformed_response", "adapter_failure",
+    "classifier_unresolved", "unknown",
 )
 
 # Ordered (specific -> general) keyword rules over the safe signal text. Each rule
@@ -103,6 +106,9 @@ _ELIGIBILITY_CHECKS = (
     ("sensitive_prohibited", False, "sensitive_content_prohibited"),
     ("composition_bound", True, "composition_or_hash_mismatch"),
     ("exact_bytes_ok", True, "composition_or_hash_mismatch"),
+    # ordered BEFORE tripwire_clear: an unresolved classifier must report its own
+    # distinct reason and must never be reported as a tripwire hit.
+    ("classifier_resolved", True, "classifier_unresolved"),
     ("tripwire_clear", True, "tripwire_refusal"),
     ("provider_ready", True, "provider_unavailable"),
     ("auth_ok", True, "auth_failure"),
@@ -120,6 +126,108 @@ def dispatch_eligibility(signals):
         if bool(signals[key]) != expected:
             return (False, reason)
     return (True, None)
+
+
+def production_signals(*, dispatch_lane, review_profile, artifact_count,
+                       lineage_bound, raw_provenance_standard, tripwire_clear,
+                       classifier_resolved=True):
+    """Derive AUTHORITATIVE pre-allocation signals from production preflight
+    outputs. Callers pass already-computed facts; this function invents nothing.
+
+    TWO CLASSES OF SIGNAL, deliberately not conflated:
+
+    (A) MIRRORED signals. Each of these mirrors an EXISTING UNCONDITIONAL,
+        DETERMINISTIC refusal that the engine or the egress guard already
+        performs, so refusing on them can only refuse EARLIER and can never deny
+        a packet that would otherwise have dispatched:
+
+      - lane_authorized      mirrors run_round's internal_technical refusals of
+                             artifacts and of any non-code review profile;
+      - composition_bound    mirrors run_round's refusal of a missing lineage
+                             graph or candidate on that lane;
+      - provenance_resolved  mirrors run_round's refusal of a RAW node without
+                             STANDARD provenance on that lane;
+      - tripwire_clear       mirrors the guard's unconditional tripwire_hit block
+                             for a "hit" verdict. authorize() computes
+                             final_scan() over the FULL outbound bytes and raises
+                             EgressBlocked("tripwire_hit") on a hit with NO
+                             branching on finding category and BEFORE the
+                             sensitive-tier branch, and classify() shares
+                             final_scan()'s _scan_text detector core.
+
+    (B) A NEW FAIL-CLOSED POLICY, explicitly accepted by the operator and NOT a
+        mirrored refusal:
+
+      - classifier_resolved  the classifier returned a verdict this gate
+                             UNDERSTANDS. Exactly two verdicts are known,
+                             "clear" and "hit". Anything else -- unresolved,
+                             malformed, missing, non-string, non-dict, an
+                             exception, or a verdict added in future -- sets this
+                             False and refuses with the DISTINCT reason
+                             classifier_unresolved.
+
+        This CAN newly refuse: the gate does not claim the send-time guard would
+        also have blocked an unrecognised verdict. It is an intentional new
+        pre-allocation denial, chosen because an unknown verdict must never be
+        treated as authorization. It is deliberately NOT described as a mirrored
+        tripwire refusal, and it reports its own reason so that a classifier
+        contract change cannot hide behind a proven-looking one.
+
+    Accordingly the can-only-refuse-earlier property is scoped to class (A) and
+    is NOT claimed for class (B).
+
+    STRICT FACTS: every boolean fact must be an exact bool and artifact_count an
+    exact non-negative int. There is NO permissive coercion, so a truthy
+    non-boolean such as "false", "yes", 1 or an arbitrary object cannot become an
+    allow-shaped signal; any malformed fact fails closed as classifier_unresolved.
+
+    DELIBERATELY EXCLUDED: provider readiness and credential presence. Those are
+    DYNAMIC ENVIRONMENTAL conditions, not deterministic content properties: a
+    dispatch may legitimately proceed through an injected or differently-resolved
+    adapter, so refusing on them could newly deny a packet that would otherwise
+    dispatch. That would break the invariant above. Readiness is already gated by
+    the start-time preflight, and a genuinely absent provider still surfaces as a
+    normal reviewer_unavailable outcome.
+
+    TRIPWIRE SCOPE, narrowed to what is actually proven: the caller can only
+    scan the packet CONTEXT it loaded, because the complete outbound byte set is
+    not assembled until after a council exists. This module therefore claims only
+    that a "hit" on that loaded content implies the guard would block at send,
+    which follows from the shared detector core and the unconditional raise
+    above. It does NOT claim that the scanned bytes are byte-identical to, or
+    provably contained in, the final outbound packet: that relationship is the
+    intended construction but is not verified here or by the current tests. The
+    egress guard remains the complete and authoritative check over the exact
+    outbound bytes at send.
+
+    The internal_technical-only signals are OMITTED on other lanes. An absent
+    signal is treated as eligible by dispatch_eligibility, so a lane that does
+    not perform a given check never acquires a new blocker from it.
+    """
+    # STRICT fact validation (no permissive coercion). An authoritative signal is
+    # accepted ONLY as an exact bool; a malformed or truthy non-boolean value is
+    # an unresolved state, never allow-shaped authorization. Note bool is a
+    # subclass of int, so artifact_count is checked for exact int-ness too.
+    facts = {"lineage_bound": lineage_bound,
+             "raw_provenance_standard": raw_provenance_standard,
+             "tripwire_clear": tripwire_clear,
+             "classifier_resolved": classifier_resolved}
+    malformed = [k for k, v in facts.items() if v is not True and v is not False]
+    if (type(artifact_count) is not int) or artifact_count < 0:
+        malformed.append("artifact_count")
+    if malformed:
+        # Fail closed with the DISTINCT unresolved reason. tripwire_clear is also
+        # set refusing so the outcome holds even if the check order changed.
+        return {"classifier_resolved": False, "tripwire_clear": False}
+
+    signals = {"tripwire_clear": tripwire_clear,
+               "classifier_resolved": classifier_resolved}
+    if dispatch_lane == "internal_technical":
+        signals["lane_authorized"] = (artifact_count == 0
+                                      and review_profile == "code")
+        signals["composition_bound"] = lineage_bound
+        signals["provenance_resolved"] = raw_provenance_standard
+    return signals
 
 
 def refused_dispatch_record(*, phase, dispatch_lane, normalized_reason, detail=""):

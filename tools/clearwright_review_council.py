@@ -327,6 +327,23 @@ def _guidance_header(review_profile, round_no):
            "=== End review guidance ===\n\n"
 
 
+def resolve_lane(data_sensitivity):
+    """Fail-closed content-class -> (data_sensitivity, dispatch_lane) mapping.
+
+    SINGLE source of truth, shared by create_council and the pre-allocation
+    eligibility check, so the lane a packet is judged against can never drift
+    from the lane it is dispatched on. Anything other than an explicit
+    "standard" or "internal_technical" is "sensitive" and dispatches on the
+    "user" lane.
+    """
+    _ds = str(data_sensitivity or "").strip().lower()
+    if _ds == "standard":
+        return "standard", "user"
+    if _ds == "internal_technical":
+        return "internal_technical", "internal_technical"
+    return "sensitive", "user"
+
+
 def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
                    phase="plan", min_rounds=DEFAULT_MIN_ROUNDS,
                    max_rounds=DEFAULT_MAX_ROUNDS, model=None, council_id=None,
@@ -344,13 +361,7 @@ def create_council(root, *, thread_id, work_item_id=None, packet_id=None,
     # other class dispatches in the "user" lane and can NEVER carry ITS-resolved
     # content. The lane only ENABLES ITS for clean technical ancestry; it never
     # relabels SENSITIVE ancestry (the guard re-enforces at send).
-    _ds = str(data_sensitivity or "").strip().lower()
-    if _ds == "standard":
-        data_sensitivity, dispatch_lane = "standard", "user"
-    elif _ds == "internal_technical":
-        data_sensitivity, dispatch_lane = "internal_technical", "internal_technical"
-    else:
-        data_sensitivity, dispatch_lane = "sensitive", "user"
+    data_sensitivity, dispatch_lane = resolve_lane(data_sensitivity)
     council_id = council_id or new_council_id()
     council = {
         "council_id": council_id,

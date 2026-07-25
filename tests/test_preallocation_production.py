@@ -245,6 +245,79 @@ class PreAllocationRefusalIntegrationTest(unittest.TestCase):
         self.assertEqual(payload.get("normalized_reason"), "tripwire_refusal")
         self.assertEqual(self._council_count(), 0)
 
+    def test_non_confusable_hit_category_is_also_refused(self):
+        """Codex round-1 blocking finding: the gate collapses ANY non-clear
+        classify() verdict into tripwire_refusal. That is SOUND, not
+        over-refusal, because egress_guard.authorize() raises
+        EgressBlocked("tripwire_hit") for any non-clear verdict over the FULL
+        outbound bytes with NO branching on finding category, and before the
+        sensitive-tier branch, so it applies on every lane. This pins that
+        behaviour for a category other than unicode_confusable."""
+        import clearwright_egress_guard as eg
+        orig = eg.classify
+        eg.classify = lambda text, *a, **kw: {
+            "findings": {"contextual_identity": 1}, "verdict": "hit",
+            "policy_version": "test", "policy_sha256": "x", "input_sha256": "y"}
+        try:
+            code, out = self._run(self._plan("ordinary ascii packet\n"))
+        finally:
+            eg.classify = orig
+        payload = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(payload.get("normalized_reason"), "tripwire_refusal")
+        self.assertEqual(self._council_count(), 0)
+
+    def test_exception_and_structured_hit_are_distinct_paths(self):
+        """Codex round-1 required_changes[1]: failing closed on an EXCEPTION and
+        refusing on a structured non-clear VERDICT are different code paths.
+        Both must refuse, and neither may silently dispatch."""
+        import clearwright_egress_guard as eg
+        seen = []
+        orig = eg.classify
+
+        def _verdict(text, *a, **kw):
+            seen.append("verdict")
+            return {"findings": {"unicode_confusable": 1}, "verdict": "hit",
+                    "policy_version": "t", "policy_sha256": "x", "input_sha256": "y"}
+
+        def _raise(text, *a, **kw):
+            seen.append("exception")
+            raise RuntimeError("scanner exploded")
+
+        for fn in (_verdict, _raise):
+            eg.classify = fn
+            try:
+                code, out = self._run(self._plan("ordinary ascii packet\n"))
+            finally:
+                eg.classify = orig
+            payload = json.loads(out.strip().splitlines()[-1])
+            self.assertEqual(payload.get("normalized_reason"), "tripwire_refusal")
+            self.assertEqual(self._council_count(), 0)
+        self.assertEqual(seen, ["verdict", "exception"])
+
+    def test_gate_and_create_council_use_the_same_sensitivity_source(self):
+        """GPT round-1 required_changes[1]: prove the pre-allocation path derives
+        its lane from EXACTLY the same source and value create_council is given,
+        so the judged lane cannot differ from the dispatched lane."""
+        captured = {}
+        orig_create = cwrc.create_council
+
+        def _spy(root, **kw):
+            captured["data_sensitivity"] = kw.get("data_sensitivity")
+            raise RuntimeError("stop before allocation")
+
+        cwrc.create_council = _spy
+        try:
+            with self.assertRaises(RuntimeError):
+                self._run(self._plan("plain ascii packet\n"))
+        finally:
+            cwrc.create_council = orig_create
+        # the value handed to create_council is the SAME function+argument the
+        # gate uses, for the same work item (None here -> fail-closed sensitive)
+        expected = ucw._data_sensitivity(self.root, None)
+        self.assertEqual(captured["data_sensitivity"], expected)
+        self.assertEqual(cwrc.resolve_lane(captured["data_sensitivity"])[1],
+                         cwrc.resolve_lane(expected)[1])
+
     def test_eligible_packet_still_reaches_council_creation(self):
         """The gate must not block a packet that would dispatch today."""
         called = {}
@@ -261,6 +334,84 @@ class PreAllocationRefusalIntegrationTest(unittest.TestCase):
         finally:
             cwrc.create_council = orig
         self.assertTrue(called.get("yes"))
+
+
+class ItsLaneBlockerEndToEndTest(unittest.TestCase):
+    """GPT round-1 required_changes[0]: prove the FULL production refusal path
+    (no council directory entry, no reviewer attempt, one durable normalized
+    record) for each internal_technical blocker, not only for tripwire."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="cw-its-")
+        self.work = tempfile.mkdtemp(prefix="cw-its-w-")
+        self.mid = "msg-20260725T000000000000"
+        env = {"envelope_version": 1, "task_kind": "governed",
+               "data_sensitivity": "internal_technical", "review_profile": "code",
+               "verification_required": True, "request": "r",
+               "approved_scope": "s", "intended_actions": [],
+               "excluded_actions": [], "operator_authority_source": "o"}
+        ucw._persist_envelope(self.root, self.mid, env,
+                              {"classification": "governed",
+                               "data_sensitivity": "internal_technical"})
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def _plan(self, text="ascii packet for the internal lane\n"):
+        p = os.path.join(self.work, "packet.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def _run(self, extra=()):
+        argv = ["council", self.root, "--thread-id", "thr-its",
+                "--work-item-id", "message:" + self.mid,
+                "--plan-file", self._plan(), "--json"] + list(extra)
+        args = ucw.build_parser().parse_args(argv)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            args.func(args)
+        return json.loads(buf.getvalue().strip().splitlines()[-1])
+
+    def _councils(self):
+        d = cwrc.councils_root(self.root)
+        return len(os.listdir(d)) if os.path.isdir(d) else 0
+
+    def _refusals(self):
+        log = os.path.join(self.root, "invocation_log.jsonl")
+        if not os.path.exists(log):
+            return []
+        with open(log, encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh if l.strip()
+                    and json.loads(l).get("command") == "dispatch-refused-preallocation"]
+
+    def test_lane_resolves_internal_technical(self):
+        self.assertEqual(
+            cwrc.resolve_lane(ucw._data_sensitivity(self.root, "message:" + self.mid))[1],
+            "internal_technical")
+
+    def test_unresolved_provenance_refuses_before_allocation(self):
+        """The packet lives outside any approved repository, so its RAW node
+        cannot carry STANDARD provenance on the internal_technical lane."""
+        payload = self._run()
+        self.assertEqual(payload.get("normalized_reason"), "provenance_unresolved")
+        self.assertEqual(payload.get("council_id"), None)
+        self.assertEqual(payload.get("attempts"), {})
+        self.assertEqual(self._councils(), 0)
+        refusals = self._refusals()
+        self.assertEqual(len(refusals), 1)
+        self.assertEqual(refusals[0]["normalized_reason"], "provenance_unresolved")
+        self.assertEqual(refusals[0]["attempt"], 0)
+        self.assertNotIn("council_id", refusals[0])
+
+    def test_refusal_record_is_content_free(self):
+        self._run()
+        rec = self._refusals()[0]
+        blob = json.dumps(rec)
+        self.assertNotIn("packet", blob.lower().replace("packet.md", ""))
+        self.assertIn(rec["normalized_reason"], cwdp.NORMALIZED_FAILURE_CLASSES)
+        self.assertEqual(rec["dispatch_lane"], "internal_technical")
 
 
 if __name__ == "__main__":

@@ -592,6 +592,26 @@ def _council_body(args, phase, root, stage):
         # bytes. A hit here PROVES a hit at send (never a false refusal); a clear
         # context does NOT prove the outbound bytes are clear. The egress guard
         # remains the complete authoritative check over the exact bytes.
+        #
+        # WHY ANY NON-CLEAR VERDICT IS TREATED AS AN UNCONDITIONAL BLOCK (proof):
+        # clearwright_egress_guard.authorize() computes final_scan() over the FULL
+        # outbound bytes and raises EgressBlocked("tripwire_hit") whenever the
+        # verdict is "hit", with NO branching on the finding CATEGORY and BEFORE
+        # the sensitive-tier branch -- so it applies on every lane. classify() and
+        # final_scan() share the identical _scan_text detector core and policy.
+        # Therefore ANY non-clear classification of the context implies an
+        # unconditional block at send, and refusing here cannot over-refuse. The
+        # normalized reason is reported as tripwire_refusal for every hit category
+        # because every hit category produces the same unconditional outcome.
+        #
+        # SUBSET PROPERTY (scope of the claim): the bytes scanned here are the
+        # SAME text later bound into the outbound composition -- stamp_context()
+        # records sha256 of exactly this context and run_round refuses a stale or
+        # missing stamp, so the dispatched packet provably contains these bytes.
+        # The claim is therefore limited and honest: a hit here implies a hit at
+        # send. It does NOT claim the converse, because the outbound bytes also
+        # include scaffold and derived components not available before a council
+        # exists. The guard remains the complete check over the exact bytes.
         _tripwire_clear = True
         if _pre_ctx_loaded:
             try:

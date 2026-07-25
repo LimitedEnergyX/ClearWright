@@ -587,49 +587,34 @@ def _council_body(args, phase, root, stage):
         except Exception:
             # absent/unreadable context is handled by the existing check below
             _pre_ctx, _pre_ctx_loaded = "", False
-        # Tripwire scope is ONE-DIRECTIONAL by construction: only the context is
-        # available before a council exists, and it is a SUBSET of the outbound
-        # bytes. A hit here PROVES a hit at send (never a false refusal); a clear
-        # context does NOT prove the outbound bytes are clear. The egress guard
-        # remains the complete authoritative check over the exact bytes.
-        #
         # TWO DISTINCT JUSTIFICATIONS, deliberately not conflated:
         #
-        # (a) "hit" -> tripwire_refusal is PROVEN, not assumed.
+        # (a) "hit" -> tripwire_refusal MIRRORS an existing unconditional refusal.
         #     clearwright_egress_guard.authorize() computes final_scan() over the
-        #     FULL outbound bytes and raises EgressBlocked("tripwire_hit")
-        #     whenever the verdict is "hit", with NO branching on the finding
-        #     CATEGORY and BEFORE the sensitive-tier branch, so it applies on
-        #     every lane. classify() and final_scan() share the identical
-        #     _scan_text detector core and policy. A context "hit" therefore
-        #     implies an unconditional block at send, so refusing here for ANY hit
-        #     category cannot over-refuse.
+        #     FULL outbound bytes and raises EgressBlocked("tripwire_hit") on a
+        #     hit verdict, with NO branching on finding CATEGORY and BEFORE the
+        #     sensitive-tier branch, so it applies on every lane; classify() and
+        #     final_scan() share the identical _scan_text detector core and
+        #     policy. Refusing here for a hit therefore cannot newly deny.
         #
-        # (b) any OTHER verdict -> classifier_unresolved is a deliberate
-        #     FAIL-CLOSED POLICY, not a proven guard block. The gate does not
-        #     claim to know the classifier's complete verdict domain; it treats
-        #     exactly two verdicts as known and refuses everything else with its
-        #     own distinct reason. That is why an unrecognised verdict is never
-        #     reported as a tripwire hit: mislabelling it would hide a classifier
-        #     contract change behind a proven-looking reason.
+        # (b) any OTHER verdict -> classifier_unresolved is an INTENTIONAL NEW
+        #     FAIL-CLOSED PRE-ALLOCATION POLICY, explicitly accepted by the
+        #     operator. It is NOT a mirrored tripwire refusal and is deliberately
+        #     not described as one. It CAN newly refuse, because the gate does
+        #     not claim the send-time guard would also have blocked an
+        #     unrecognised verdict. That is the point: an unknown verdict must
+        #     never be treated as authorization, and reporting its own distinct
+        #     reason keeps a classifier contract change from hiding behind a
+        #     proven-looking one.
         #
-        # SUBSET PROPERTY (scope of the claim): the bytes scanned here are the
-        # SAME text later bound into the outbound composition -- stamp_context()
-        # records sha256 of exactly this context and run_round refuses a stale or
-        # missing stamp, so the dispatched packet provably contains these bytes.
-        # The claim is therefore limited and honest: a hit here implies a hit at
-        # send. It does NOT claim the converse, because the outbound bytes also
-        # include scaffold and derived components not available before a council
-        # exists. The guard remains the complete check over the exact bytes.
-        # THREE-WAY classifier contract, so no verdict is ever treated as
-        # authorization by default:
-        #   "clear"  -> continue through the existing eligible dispatch path;
-        #   "hit"    -> refuse before allocation with tripwire_refusal;
-        #   anything else (unknown, malformed, empty, absent, a future verdict)
-        #            -> refuse before allocation with the DISTINCT reason
-        #               classifier_unresolved, never mislabelled as a tripwire.
-        # An exception during classification takes the same unresolved path, so a
-        # scanner failure and an unrecognised verdict both fail closed.
+        # SCOPE OF THE SCANNED BYTES, narrowed to what is proven: only the
+        # context loaded here can be scanned, because the complete outbound byte
+        # set is not assembled until after a council exists. Nothing below binds
+        # or compares these bytes to the context later stamped by stamp_context,
+        # so no identity or containment relationship with the final outbound
+        # packet is claimed. That relationship is the intended construction, not
+        # a verified invariant. The egress guard remains the complete and
+        # authoritative check over the exact outbound bytes at send.
         _tripwire_clear = True
         _classifier_resolved = True
         if _pre_ctx_loaded:

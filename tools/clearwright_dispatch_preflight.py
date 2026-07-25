@@ -10,11 +10,13 @@ These are ADDITIVE, fail-closed-preserving helpers used by the council engine:
      secrets or raw provider bodies - only one of NORMALIZED_FAILURE_CLASSES.
 
   B. dispatch_eligibility(): a DETERMINISTIC pre-allocation check over signals
-     that are known before any adapter call. It can only REFUSE earlier and more
-     informatively than the downstream egress guard - it never authorizes a
-     dispatch the guard would block, so no fail-closed control is weakened. When
-     it refuses, the caller records the normalized reason and consumes NO council
-     id or reviewer attempt.
+     that are known before any adapter call. It never authorizes a dispatch the
+     guard would block, so no fail-closed control is weakened. For MIRRORED
+     signals it refuses earlier than the guard and can never newly deny; the
+     separate classifier_unresolved policy is an intentional NEW fail-closed
+     denial accepted by the operator (see production_signals). When it refuses,
+     the caller records the normalized reason and consumes NO council id or
+     reviewer attempt.
 
 Pure module: no imports from the council engine (avoids a cycle); the engine
 imports these.
@@ -132,10 +134,12 @@ def production_signals(*, dispatch_lane, review_profile, artifact_count,
     """Derive AUTHORITATIVE pre-allocation signals from production preflight
     outputs. Callers pass already-computed facts; this function invents nothing.
 
-    SAFETY INVARIANT: every signal here mirrors an EXISTING UNCONDITIONAL,
-    DETERMINISTIC refusal that the engine or the egress guard already performs,
-    so this check can only refuse EARLIER - never refuse something that would
-    otherwise have dispatched successfully:
+    TWO CLASSES OF SIGNAL, deliberately not conflated:
+
+    (A) MIRRORED signals. Each of these mirrors an EXISTING UNCONDITIONAL,
+        DETERMINISTIC refusal that the engine or the egress guard already
+        performs, so refusing on them can only refuse EARLIER and can never deny
+        a packet that would otherwise have dispatched:
 
       - lane_authorized      mirrors run_round's internal_technical refusals of
                              artifacts and of any non-code review profile;
@@ -144,17 +148,33 @@ def production_signals(*, dispatch_lane, review_profile, artifact_count,
       - provenance_resolved  mirrors run_round's refusal of a RAW node without
                              STANDARD provenance on that lane;
       - tripwire_clear       mirrors the guard's unconditional tripwire_hit block
-                             (enforced on EVERY lane). See the one-directional
-                             note below.
+                             for a "hit" verdict. authorize() computes
+                             final_scan() over the FULL outbound bytes and raises
+                             EgressBlocked("tripwire_hit") on a hit with NO
+                             branching on finding category and BEFORE the
+                             sensitive-tier branch, and classify() shares
+                             final_scan()'s _scan_text detector core.
+
+    (B) A NEW FAIL-CLOSED POLICY, explicitly accepted by the operator and NOT a
+        mirrored refusal:
+
       - classifier_resolved  the classifier returned a verdict this gate
-                             UNDERSTANDS. The classifier contract is treated as
-                             exactly two known verdicts, "clear" and "hit".
-                             Anything else -- unknown, malformed, empty, absent,
-                             or a verdict added in future -- sets this False and
-                             refuses with the DISTINCT reason
-                             classifier_unresolved. An unrecognised verdict is
-                             NEVER treated as authorization, and is never
-                             mislabelled as a tripwire hit.
+                             UNDERSTANDS. Exactly two verdicts are known,
+                             "clear" and "hit". Anything else -- unresolved,
+                             malformed, missing, non-string, non-dict, an
+                             exception, or a verdict added in future -- sets this
+                             False and refuses with the DISTINCT reason
+                             classifier_unresolved.
+
+        This CAN newly refuse: the gate does not claim the send-time guard would
+        also have blocked an unrecognised verdict. It is an intentional new
+        pre-allocation denial, chosen because an unknown verdict must never be
+        treated as authorization. It is deliberately NOT described as a mirrored
+        tripwire refusal, and it reports its own reason so that a classifier
+        contract change cannot hide behind a proven-looking one.
+
+    Accordingly the can-only-refuse-earlier property is scoped to class (A) and
+    is NOT claimed for class (B).
 
     STRICT FACTS: every boolean fact must be an exact bool and artifact_count an
     exact non-negative int. There is NO permissive coercion, so a truthy
@@ -169,13 +189,16 @@ def production_signals(*, dispatch_lane, review_profile, artifact_count,
     the start-time preflight, and a genuinely absent provider still surfaces as a
     normal reviewer_unavailable outcome.
 
-    TRIPWIRE SCOPE (one-directional, by construction): the caller can only scan
-    the packet CONTEXT, because the complete outbound byte set is not assembled
-    until after a council exists. The context is a SUBSET of those bytes, so a
-    hit on the context PROVES a hit at send (no false refusal), while a clear
-    context does NOT prove the outbound bytes are clear. This gate therefore
-    catches the common case early and never over-refuses; the egress guard
-    remains the complete and authoritative check over the exact outbound bytes.
+    TRIPWIRE SCOPE, narrowed to what is actually proven: the caller can only
+    scan the packet CONTEXT it loaded, because the complete outbound byte set is
+    not assembled until after a council exists. This module therefore claims only
+    that a "hit" on that loaded content implies the guard would block at send,
+    which follows from the shared detector core and the unconditional raise
+    above. It does NOT claim that the scanned bytes are byte-identical to, or
+    provably contained in, the final outbound packet: that relationship is the
+    intended construction but is not verified here or by the current tests. The
+    egress guard remains the complete and authoritative check over the exact
+    outbound bytes at send.
 
     The internal_technical-only signals are OMITTED on other lanes. An absent
     signal is treated as eligible by dispatch_eligibility, so a lane that does

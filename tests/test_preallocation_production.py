@@ -247,17 +247,15 @@ class PreAllocationRefusalIntegrationTest(unittest.TestCase):
         self.assertEqual(self._council_count(), 0)
 
     def test_non_confusable_hit_category_is_also_refused(self):
-        """A "hit" of ANY finding category is a tripwire refusal, because
-        egress_guard.authorize() raises EgressBlocked("tripwire_hit") for a hit
-        verdict over the FULL outbound bytes with NO branching on category and
-        before the sensitive-tier branch, so it applies on every lane. That is a
-        PROVEN guard block. Unknown verdicts do NOT take this path; they are
-        classifier_unresolved under a separate fail-closed policy.
-        over-refusal, because egress_guard.authorize() raises
-        EgressBlocked("tripwire_hit") for any non-clear verdict over the FULL
-        outbound bytes with NO branching on finding category, and before the
-        sensitive-tier branch, so it applies on every lane. This pins that
-        behaviour for a category other than unicode_confusable."""
+        """A "hit" of ANY finding category is a tripwire refusal. That MIRRORS an
+        existing unconditional refusal: egress_guard.authorize() raises
+        EgressBlocked("tripwire_hit") on a hit verdict over the FULL outbound
+        bytes, with no branching on finding category and before the
+        sensitive-tier branch, so it applies on every lane.
+
+        Unknown verdicts do NOT take this path. They are classifier_unresolved
+        under a separate, intentional new fail-closed policy, which is never
+        described as a mirrored tripwire refusal."""
         import clearwright_egress_guard as eg
         orig = eg.classify
         eg.classify = lambda text, *a, **kw: {
@@ -564,6 +562,61 @@ class ItsLaneBlockerEndToEndTest(unittest.TestCase):
         self.assertEqual(recs[0]["normalized_reason"], "policy_denial")
         self.assertEqual(recs[0]["attempt"], 0)
         self.assertEqual(recs[0]["dispatch_lane"], "internal_technical")
+
+    def test_non_code_profile_blocker_end_to_end(self):
+        """Round-5 item 3: a non-code review profile on the internal_technical
+        lane refuses before allocation on the PRODUCTION path."""
+        mid = "msg-20260725T000000000001"
+        env = {"envelope_version": 1, "task_kind": "governed",
+               "data_sensitivity": "internal_technical",
+               "review_profile": "editorial", "verification_required": True,
+               "request": "r", "approved_scope": "s", "intended_actions": [],
+               "excluded_actions": [], "operator_authority_source": "o"}
+        # _review_profile reads the AUDIT block, not the top-level envelope
+        ucw._persist_envelope(self.root, mid, env,
+                              {"classification": "governed",
+                               "data_sensitivity": "internal_technical",
+                               "review_profile": "editorial"})
+        self.assertEqual(ucw._review_profile(self.root, "message:" + mid),
+                         "editorial")
+        args = ucw.build_parser().parse_args(
+            ["council", self.root, "--thread-id", "thr-its2",
+             "--work-item-id", "message:" + mid,
+             "--plan-file", self._plan(), "--json"])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            args.func(args)
+        payload = json.loads(buf.getvalue().strip().splitlines()[-1])
+        self.assertEqual(payload.get("normalized_reason"), "policy_denial")
+        self.assertIsNone(payload.get("council_id"))
+        self.assertEqual(payload.get("attempts"), {})
+        self.assertEqual(self._councils(), 0)
+        recs = self._refusals()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["normalized_reason"], "policy_denial")
+        self.assertEqual(recs[0]["attempt"], 0)
+        self.assertNotIn("council_id", recs[0])
+
+    def test_missing_composition_blocker_end_to_end(self):
+        """Round-5 item 3: a missing lineage graph or candidate refuses before
+        allocation on the PRODUCTION path with composition_or_hash_mismatch."""
+        orig = ucw._assemble_lineage
+        ucw._assemble_lineage = lambda args: ([], None, [])
+        try:
+            payload = self._run()
+        finally:
+            ucw._assemble_lineage = orig
+        self.assertEqual(payload.get("normalized_reason"),
+                         "composition_or_hash_mismatch")
+        self.assertIsNone(payload.get("council_id"))
+        self.assertEqual(payload.get("attempts"), {})
+        self.assertEqual(self._councils(), 0)
+        recs = self._refusals()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["normalized_reason"],
+                         "composition_or_hash_mismatch")
+        self.assertEqual(recs[0]["attempt"], 0)
+        self.assertNotIn("council_id", recs[0])
 
     def test_refusal_record_is_content_free(self):
         self._run()

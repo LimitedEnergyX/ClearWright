@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   cb577b1171cc63fb9b9c7e99dc4e1db84c5d0bdd
+HEAD (bytes under review):   2dba18ed02c252cb367497fd08d29dd9611649a1
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -89,9 +89,9 @@ artifacts across 1380 ledger rows.
 
 TESTS (counts measured by running them, not typed)
 ----------------------------------------------------------------------
-  focused static   139 tests  (OK)
-  runtime          101 checks (PASS)  tests/dom/session_ux_runtime.mjs
-  full suite       1343 tests  (OK, skipped=1)
+  focused static   145 tests  (OK)
+  runtime          109 checks (PASS)  tests/dom/session_ux_runtime.mjs
+  full suite       1349 tests  (OK, skipped=1)
 
 The runtime harness executes the real app.js in a Node vm against a
 controllable DOM stub and adds NO dependency: every import is a Node
@@ -104,22 +104,22 @@ evidence rather than automated coverage.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       169781  681bac53210cbc1535578add12516a6506da326a758e502abd5034eaca9288da
+  apps/control-plane/static/app.js                       170924  536f119dddfe5279df69b62fe61d80d1f33d4cd2ac05ece954d7922d751b82bb
   apps/control-plane/static/index.html                    22393  86b4ffbf452f29a46c2c7c9877a3daadfdf29b5bc3af4118bb40b55a993b02f4
-  apps/control-plane/static/style.css                     53896  449c38f854d4b8a088c885cd35738eaa38bb2e7c64c2e5cf0207fb703a8af1f2
-  tests/dom/session_ux_runtime.mjs                        29015  3dde937c43247603745e9e31ae47b7783c0e96e77bffbba83a41eb73752fdc2f
-  tests/test_session_continuity_ux.py                     52408  09baee5473ae5f32ae75ca183ddb159c1613990488a9a13bfd2964648dade19e
+  apps/control-plane/static/style.css                     54468  b4791a3f0de15bc8c9714a342a4ee2f33f26c0ece1bb85e0e0b87183ebbe499f
+  tests/dom/session_ux_runtime.mjs                        31834  e5085e168f511380372b6c7420de37c8b4d9bee5edb8947c6bde0d30d9f05894
+  tests/test_session_continuity_ux.py                     56947  6b71b25839a64a1f21f21716d0729104436b2f140b88bec61c1e8756bc8de466
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     |  866 +++++++++++++++++++++++++-
+ apps/control-plane/static/app.js     |  881 +++++++++++++++++++++++-
  apps/control-plane/static/index.html |   49 +-
- apps/control-plane/static/style.css  |  135 ++++
- tests/dom/session_ux_runtime.mjs     |  611 ++++++++++++++++++
- tests/test_session_continuity_ux.py  | 1133 ++++++++++++++++++++++++++++++++++
+ apps/control-plane/static/style.css  |  150 +++++
+ tests/dom/session_ux_runtime.mjs     |  667 +++++++++++++++++++
+ tests/test_session_continuity_ux.py  | 1220 ++++++++++++++++++++++++++++++++++
  tests/test_session_ux_runtime.py     |   40 ++
- 6 files changed, 2801 insertions(+), 33 deletions(-)
+ 6 files changed, 2971 insertions(+), 36 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -256,7 +256,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..b5c25f0 100644
+index dd2d10c..c54248c 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -281,7 +281,7 @@ index dd2d10c..b5c25f0 100644
    nextBody.innerHTML = '<p class="op-next' + (ts.phase_attention ? " op-next-attention" : "") +
      '">' + esc(ts.next_action || "") + "</p>";
  
-@@ -761,6 +767,29 @@ function createComposer(opts) {
+@@ -761,6 +767,39 @@ function createComposer(opts) {
      return name + ":" + (target.thread_id || "new") + ":" + (target.work_item_id || "");
    }
  
@@ -300,9 +300,19 @@ index dd2d10c..b5c25f0 100644
 +        known.thread_id !== target.thread_id) {
 +      return "The composer thread does not match the selected work item's thread.";
 +    }
++    // STRICT. A work-item-bound send requires a canonical route that PROVES the
++    // URL agrees. Absent and malformed routes are not evidence of agreement, so
++    // both refuse rather than silently passing the check. Every queue activation
++    // now writes the route, so a missing one means the selection was not
++    // established through navigation and must be re-made.
 +    const route = parseWorkRoute(location.hash);
-+    if (route && !route.malformed && route.work_item_id &&
-+        route.work_item_id !== selectedWorkItemId) {
++    if (!route) {
++      return "The URL carries no work route, so it cannot confirm the destination.";
++    }
++    if (route.malformed) {
++      return "The URL contains an unreadable work route.";
++    }
++    if (route.work_item_id !== selectedWorkItemId) {
 +      return "The URL points at a different work item than the one selected.";
 +    }
 +    return "";
@@ -311,7 +321,7 @@ index dd2d10c..b5c25f0 100644
    function updateBanner() {
      if (!bannerEl) return;
      const target = getTarget();
-@@ -768,8 +797,36 @@ function createComposer(opts) {
+@@ -768,8 +807,36 @@ function createComposer(opts) {
      // before anything has actually been sent; the banner only calls it
      // "continuing" once the caller confirms that id is a real durable thread.
      const confirmed = !isConfirmedTarget || isConfirmedTarget();
@@ -350,7 +360,7 @@ index dd2d10c..b5c25f0 100644
      bannerEl.textContent = text;
    }
  
-@@ -823,10 +880,29 @@ function createComposer(opts) {
+@@ -823,10 +890,29 @@ function createComposer(opts) {
        return;
      }
      showError("");
@@ -381,7 +391,7 @@ index dd2d10c..b5c25f0 100644
      try {
        const body = Object.assign(
          { message: raw, idempotency_key: draft.idempotencyKey },
-@@ -865,10 +941,18 @@ function createComposer(opts) {
+@@ -865,10 +951,18 @@ function createComposer(opts) {
        textarea.value = "";
        autoGrow();
        updateCounter();
@@ -400,7 +410,7 @@ index dd2d10c..b5c25f0 100644
      }
    }
  
-@@ -958,6 +1042,11 @@ const WORK_KIND_LABEL = {
+@@ -958,6 +1052,11 @@ const WORK_KIND_LABEL = {
  // --------------------------------------------------------------------------- //
  
  let lastWorkItems = [];
@@ -412,7 +422,7 @@ index dd2d10c..b5c25f0 100644
  let lastQueueCouncils = [];
  let lastArchiveIndex = { archived: [], count: 0 };
  
-@@ -1061,11 +1150,59 @@ function queueCard(it) {
+@@ -1061,11 +1160,65 @@ function queueCard(it) {
      ? '<span class="q-opflag" title="operator action required"><U+25C9> operator</span>' : "";
    // Technical ids ride on data attributes only; the primary card stays readable.
    const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
@@ -451,17 +461,24 @@ index dd2d10c..b5c25f0 100644
 +        '<code class="mono q-idv" title="' + esc(originId) + '">' + esc(abbrevId(originId)) +
 +        "</code>" + copyIdButton(originId, "origin message ID") + "</span>" : "") +
 +    "</div>";
++  // ACCESSIBILITY: the row is a plain CONTAINER. Nesting real <button> copy
++  // controls inside an element that itself claimed role="button" is an invalid
++  // pattern, so the primary action is now an explicit button and the copy
++  // buttons are its siblings. Enter and Space come free from native button
++  // semantics rather than a hand-rolled key handler.
    return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
 -    '" data-thread="' + esc(it.thread_id || "") +
-+    (ambiguous ? " q-ambiguous" : "") +
-+    '" role="button" tabindex="0"' +
-+    ' aria-pressed="' + (selected ? "true" : "false") + '"' +
-+    ' aria-label="Open work item ' + esc(it.work_item_id || "") +
-+    (execLabel ? " (" + esc(execLabel) + ")" : "") + '"' +
++    (ambiguous ? " q-ambiguous" : "") + '"' +
 +    ' data-thread="' + esc(it.thread_id || "") +
      '" data-work-item="' + esc(it.work_item_id || "") + '">' +
-     '<div class="q-title">' + title + "</div>" +
+-    '<div class="q-title">' + title + "</div>" +
 -    '<div class="q-meta">' + bits.join("") + opFlag + "</div>" +
++    '<button type="button" class="q-open" ' +
++    'aria-pressed="' + (selected ? "true" : "false") + '"' +
++    ' aria-label="Open work item ' + esc(it.work_item_id || "") +
++    (execLabel ? " (executor " + esc(execLabel) + ")" : "") + '"' +
++    ' data-work-item="' + esc(it.work_item_id || "") + '">' +
++    '<span class="q-title">' + title + "</span>" +
 +    '<div class="q-meta">' + bits.join("") + opFlag +
 +    // Item 10: phase and executor state are DIFFERENT facts and are labelled
 +    // separately, so "PHASE: VERIFICATION / EXECUTOR: IN COUNCIL" can never be
@@ -470,11 +487,11 @@ index dd2d10c..b5c25f0 100644
 +      esc(phaseLabel) + "</span>" : "") +
 +    (execLabel ? '<span class="q-exec mono" title="executor state, derived from ' +
 +      'runner_state only">Executor ' + esc(execLabel) + "</span>" : "") +
-+    "</div>" + ids + warn +
++    "</div></button>" + ids + warn +
      "</div>";
  }
  
-@@ -1290,17 +1427,617 @@ function openAttention() {
+@@ -1290,17 +1443,603 @@ function openAttention() {
    }
  }
  
@@ -519,14 +536,14 @@ index dd2d10c..b5c25f0 100644
 +
 +// Keyboard activation for queue rows (Phase 1, item 7). Enter or Space opens
 +// the row exactly as a click does; the existing click handler is untouched.
++// The primary control is a real <button>, so Enter and Space already activate
++// it and fire click. This listener remains only to keep Space from scrolling
++// the page while that button has focus; it never navigates on its own, which
++// avoids a second, divergent activation path.
 +document.addEventListener("keydown", (e) => {
-+  if (e.key !== "Enter" && e.key !== " ") return;
-+  const row = e.target && e.target.closest && e.target.closest(".q-row[data-work-item]");
-+  if (!row) return;
-+  if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
-+  e.preventDefault();
-+  const wid = row.getAttribute("data-work-item");
-+  if (wid) navigateToWorkItem(wid);
++  if (e.key !== " ") return;
++  const btn = e.target && e.target.closest && e.target.closest(".q-open");
++  if (btn) e.preventDefault();
 +});
 +
 +// --------------------------------------------------------------------------
@@ -535,22 +552,12 @@ index dd2d10c..b5c25f0 100644
 +// RUNNING is never derived from message-post activity. An inbound operator
 +// message proves only that the OPERATOR acted; it is no evidence that an
 +// executor resumed, consumed it, or is working. Such an item is reported as
-+// OPERATOR_MESSAGE_POSTED, which is exactly what the durable record supports.
++// a state the durable record can actually support, never an
++// inference from message-post activity.
 +//
 +// States requiring executor acknowledgement or wake telemetry
 +// (EXECUTOR_RESUMED, MESSAGE_ACKNOWLEDGED, WAKE_PENDING) are NOT produced here
 +// and are NOT simulated. They are deferred to the Phase 2 executor wake bridge.
-+const EXECUTION_STATE_LABELS = {
-+  claimed: "CLAIMED",
-+  waiting_for_operator: "WAITING_FOR_OPERATOR",
-+  operator_message_posted: "OPERATOR_MESSAGE_POSTED",
-+  paused: "PAUSED",
-+  executor_active: "EXECUTOR_ACTIVE",
-+  in_council: "IN_COUNCIL",
-+  blocked: "BLOCKED",
-+  complete: "COMPLETE"
-+};
-+
 +// Evidence-backed only. `it` is the derived work item from /api/work-items.
 +// LIFECYCLE PHASE: where the governed work item sits in its own lifecycle.
 +// Derived from `status`, whose observed domain is open|planning|verification|
@@ -613,10 +620,6 @@ index dd2d10c..b5c25f0 100644
 +  if (p === "blocked") return "blocked";
 +  if (r === "claimed_idle" || it.claimed_by) return "claimed";
 +  return "";
-+}
-+
-+function executionStateLabel(it) {
-+  return EXECUTION_STATE_LABELS[truthfulExecutionState(it)] || "";
 +}
 +
 +// --------------------------------------------------------------------------
@@ -1093,7 +1096,7 @@ index dd2d10c..b5c25f0 100644
  }
  
  function highlightMessage(messageId) {
-@@ -1317,20 +2054,45 @@ function highlightMessage(messageId) {
+@@ -1317,20 +2056,47 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -1115,8 +1118,10 @@ index dd2d10c..b5c25f0 100644
 +    // Say what actually happens next. Restoration DOES continue, so claiming
 +    // "nothing is selected" would be false a moment later.
 +    routeErrorReported = true;
++    // Restoration may legitimately find no active work, so the message states
++    // only what has already happened and leaves the outcome to be observed.
 +    showRestoreStatus("That link could not be read, so it was removed. " +
-+                      "Showing your highest-priority active work instead.");
++                      "Nothing is selected from it.");
 +    return;
 +  }
 +  // Validate here too. This function is also the hashchange path, so without
@@ -1146,7 +1151,7 @@ index dd2d10c..b5c25f0 100644
      try {
        const cd = await getJSON("/api/review-councils");
        lastQueueCouncils = cd.review_councils || [];
-@@ -1398,7 +2160,7 @@ async function loadHistory() {
+@@ -1398,7 +2164,7 @@ async function loadHistory() {
    lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
    const body = document.getElementById("ledger-body");
    if (!lastLedgerRows.length) {
@@ -1155,7 +1160,7 @@ index dd2d10c..b5c25f0 100644
      return;
    }
    body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
-@@ -1406,12 +2168,31 @@ async function loadHistory() {
+@@ -1406,12 +2172,31 @@ async function loadHistory() {
      '" data-ledger-index="' + i + '">' +
      "<td>" + esc(shortTime(row.at)) + "</td>" +
      "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
@@ -1188,7 +1193,7 @@ index dd2d10c..b5c25f0 100644
  function openLedgerDetail(index) {
    const row = lastLedgerRows[index];
    if (!row) return;
-@@ -1837,7 +2618,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2622,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -1198,7 +1203,7 @@ index dd2d10c..b5c25f0 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +2917,23 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +2921,23 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -1222,7 +1227,7 @@ index dd2d10c..b5c25f0 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2783,12 +3582,23 @@ function toggleToolLog() {
+@@ -2783,12 +3586,23 @@ function toggleToolLog() {
    if (footer) footer.hidden = !footer.hidden;
  }
  
@@ -1246,15 +1251,27 @@ index dd2d10c..b5c25f0 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2869,6 +3679,7 @@ function wire() {
+@@ -2869,11 +3683,17 @@ function wire() {
  
    // Work queue: clicking a row selects that task everywhere.
    document.getElementById("queue-groups").addEventListener("click", (e) => {
 +    if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
      const row = e.target.closest(".q-row");
      if (!row) return;
-     const thread = row.getAttribute("data-thread");
-@@ -2886,6 +3697,10 @@ function wire() {
+-    const thread = row.getAttribute("data-thread");
+     const workItem = row.getAttribute("data-work-item");
+-    if (thread || workItem) selectTask(thread, workItem);
++    // Mouse activation goes through the SAME navigation as the keyboard so the
++    // canonical #work= route is always written. Calling selectTask() directly
++    // here left the previous route in the URL, which is precisely the stale-hash
++    // symptom this correction exists to remove.
++    if (workItem) { navigateToWorkItem(workItem); return; }
++    const thread = row.getAttribute("data-thread");
++    if (thread) selectTask(thread, null);
+   });
+ 
+   // Context-aware task actions are READ-ONLY navigation only: they switch view
+@@ -2886,6 +3706,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -1265,7 +1282,7 @@ index dd2d10c..b5c25f0 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +3812,19 @@ function wire() {
+@@ -2997,6 +3821,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -1378,10 +1395,10 @@ index 1a5fd93..57b8bd6 100644
          </div>
          <div class="ledger-detail" id="ledger-detail" hidden>
 diff --git a/apps/control-plane/static/style.css b/apps/control-plane/static/style.css
-index ac13c95..133ca13 100644
+index ac13c95..a734f49 100644
 --- a/apps/control-plane/static/style.css
 +++ b/apps/control-plane/static/style.css
-@@ -1047,3 +1047,138 @@ body.history-open .mission { display: none !important; }
+@@ -1047,3 +1047,153 @@ body.history-open .mission { display: none !important; }
  .activity-details[open] summary::before { content: "<U+25BE> "; }
  .activity-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray); white-space: nowrap; }
  .activity-log { margin: 0.35rem 0 0.2rem; font-family: ui-monospace, monospace; font-size: 0.74rem; white-space: pre-wrap; max-height: 5.5rem; overflow-y: auto; }
@@ -1520,12 +1537,27 @@ index ac13c95..133ca13 100644
 +.q-row.q-ambiguous { border-left: 3px solid var(--warn, #d08a00); }
 +/* History: an absent binding is stated, not substituted. */
 +.ledger-none { font-style: italic; opacity: .7; }
++
++/* The queue tile's primary control. The row itself is a plain container, so
++   this button carries the click target, the pressed state and the focus ring,
++   and real copy buttons can sit beside it without nesting inside a control. */
++.q-open {
++  display: block; width: 100%; text-align: left;
++  background: none; border: 0; padding: 0; margin: 0;
++  font: inherit; color: inherit; cursor: pointer;
++}
++.q-open:focus-visible {
++  outline: 2px solid var(--blue-soft);
++  outline-offset: 2px;
++  border-radius: 6px;
++}
++.q-open[aria-pressed="true"] .q-title { font-weight: 700; }
 diff --git a/tests/dom/session_ux_runtime.mjs b/tests/dom/session_ux_runtime.mjs
 new file mode 100644
-index 0000000..0ce8341
+index 0000000..a7008eb
 --- /dev/null
 +++ b/tests/dom/session_ux_runtime.mjs
-@@ -0,0 +1,611 @@
+@@ -0,0 +1,667 @@
 +/*
 + * Runtime coverage for the session-continuity UX logic.
 + *
@@ -2101,6 +2133,62 @@ index 0000000..0ce8341
 +}
 +
 +// --------------------------------------------------------------------------
++// 3f. MOUSE ACTIVATION must write the canonical route, exactly as the keyboard
++//     path does. The click handler previously called selectTask() directly, so
++//     ordinary mouse selection left the PREVIOUS route in the URL.
++// --------------------------------------------------------------------------
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "#work=message%3Amsg-stale", ["conv-scroll", "conversation"]);
++  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live",' +
++              ' thread_id: "thr-live", presentation_state: "needs_operator" }];');
++
++  // navigateToWorkItem is the ONE operation that writes the route.
++  ctx.navigateToWorkItem("message:msg-live");
++  ok(ctx.location.hash.indexOf("message%3Amsg-live") !== -1 ||
++     ctx.location.hash.indexOf("message:msg-live") !== -1,
++     "activation writes the canonical work route");
++  ok(ctx.location.hash.indexOf("msg-stale") === -1,
++     "the previous route does not survive activation (stale-hash symptom)");
++  eq(evalIn(ctx, "selectedWorkItemId"), "message:msg-live",
++     "activation binds the canonical work item");
++  eq(evalIn(ctx, "selectedConvThread"), "thr-live",
++     "activation binds the queue-backed durable thread");
++}
++
++// 3g. STRICT ROUTE PROOF. An absent or unreadable route is not evidence that
++//     the URL agrees with the selection, so a work-item-bound send must refuse.
++{
++  const reg = baseRegistry();
++  const ctx = loadApp(reg, "", ["conv-scroll", "conversation"]);
++  evalIn(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-live",' +
++              ' thread_id: "thr-live", presentation_state: "needs_operator" }];' +
++              'selectedWorkItemId = "message:msg-live"; selectedConvThread = "thr-live";');
++
++  // The target itself is well formed...
++  const target = ctx.convComposerTarget();
++  eq([target.work_item_id, target.thread_id], ["message:msg-live", "thr-live"],
++     "the composer target is bound");
++
++  // ...but with NO route in the URL there is nothing proving agreement.
++  ctx.location.hash = "";
++  ok(ctx.parseWorkRoute(ctx.location.hash) === null,
++     "an absent route parses as no route at all");
++
++  // ...and an unreadable route is likewise not proof.
++  ctx.location.hash = "#work=%";
++  const bad = ctx.parseWorkRoute(ctx.location.hash);
++  ok(bad !== null && bad.malformed === true,
++     "an unreadable route is classified malformed, not ignored");
++
++  // A matching canonical route IS proof.
++  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-live");
++  const good = ctx.parseWorkRoute(ctx.location.hash);
++  eq([good.malformed, good.work_item_id], [false, "message:msg-live"],
++     "a canonical route proves which work item the URL names");
++}
++
++// --------------------------------------------------------------------------
 +// 4. Composer target fails closed without a durable thread.
 +// --------------------------------------------------------------------------
 +{
@@ -2139,10 +2227,10 @@ index 0000000..0ce8341
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..ad814fc
+index 0000000..454f00a
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,1133 @@
+@@ -0,0 +1,1220 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -2489,10 +2577,70 @@ index 0000000..ad814fc
 +        # Assert on the OPERATOR-FACING string, not the surrounding commentary,
 +        # which legitimately quotes the phrase being avoided.
 +        call = branch[branch.index("showRestoreStatus("):]
-+        self.assertNotIn("nothing is selected", call)
-+        self.assertIn("highest-priority active work", call,
-+                      "the message must not promise the operator's previous item: "
-+                      "the persisted selection is cleared before restoration runs")
++        # The message must not promise ANY outcome: restoration may legitimately
++        # find no active work at all, so it states only what already happened.
++        self.assertNotIn("highest-priority", call)
++        self.assertNotIn("Restoring your active work", call)
++        self.assertIn("could not be read", call)
++
++
++class UnifiedActivationTest(unittest.TestCase):
++    """Council finding: mouse and keyboard activation diverged.
++
++    The click handler called selectTask() directly and never wrote the hash,
++    while keyboard activation used navigateToWorkItem(). Ordinary mouse
++    selection therefore left the PREVIOUS route in the URL -- exactly the
++    stale-hash symptom this correction exists to remove -- and the four-way
++    destination agreement could not be established for the common interaction.
++    """
++
++    def test_mouse_activation_goes_through_navigation(self):
++        i = APP.index('getElementById("queue-groups").addEventListener("click"')
++        handler = APP[i:i + 900]
++        self.assertIn("navigateToWorkItem(workItem)", handler)
++        self.assertNotIn("selectTask(thread, workItem)", handler,
++                         "the direct path skipped writing the canonical route")
++
++    def test_there_is_one_navigation_operation(self):
++        """Only navigateToWorkItem writes the route, and every activation
++        path routes through it."""
++        self.assertEqual(APP.count("location.hash = " + '"#work="'), 1,
++                         "exactly one place may write the work route")
++        m = re.search(r"function navigateToWorkItem[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        self.assertIn('location.hash = "#work="', m.group(0))
++
++    def test_keyboard_uses_native_button_semantics(self):
++        """A real <button> already activates on Enter and Space, so the
++        hand-rolled key handler is reduced to preventing Space-scroll and can
++        no longer become a second, divergent activation path."""
++        i = APP.index('document.addEventListener("keydown"')
++        handler = APP[i:i + 500]
++        self.assertNotIn("navigateToWorkItem", handler)
++        self.assertIn("q-open", handler)
++
++
++class StrictRouteProofTest(unittest.TestCase):
++    """Council finding: absent and malformed routes bypassed the check.
++
++    An unreadable URL is not evidence that the URL agrees with the selection,
++    yet both cases previously fell through and permitted the send.
++    """
++
++    def test_an_absent_route_refuses(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        body = m.group(0)
++        self.assertIn("if (!route)", body)
++        self.assertIn("carries no work route", body)
++
++    def test_a_malformed_route_refuses(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        body = m.group(0)
++        self.assertIn("route.malformed", body)
++        self.assertIn("unreadable work route", body)
++
++    def test_the_check_no_longer_requires_a_non_malformed_route_to_apply(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        self.assertNotIn("!route.malformed && route.work_item_id", m.group(0))
 +
 +
 +class CanonicalIdentityTest(unittest.TestCase):
@@ -2566,8 +2714,12 @@ index 0000000..ad814fc
 +    def test_copying_does_not_also_open_the_item(self):
 +        self.assertIn("function eventTargetsInnerControl", APP)
 +        # One definition plus exactly two guarded entry points: click and key.
-+        self.assertEqual(APP.count("if (eventTargetsInnerControl(e)) return;"), 2,
-+                         "both the click and keyboard paths must be guarded")
++        # Only the click path needs the guard now: the primary control is a
++        # real button, so a Copy click never reaches a row-level activation.
++        self.assertEqual(APP.count("if (eventTargetsInnerControl(e)) return;"), 1,
++                         "the click path must be guarded")
++        i = APP.index('getElementById("queue-groups").addEventListener("click"')
++        self.assertIn("eventTargetsInnerControl(e)", APP[i:i + 400])
 +
 +
 +class IdentifierTerminologyTest(unittest.TestCase):
@@ -3176,20 +3328,30 @@ index 0000000..ad814fc
 +        self.assertIn('r === "active_runner"', body)
 +
 +    def test_unsupported_states_are_not_simulated(self):
-+        labels = re.search(r"EXECUTION_STATE_LABELS = \{(.*?)\n\}", APP, re.S).group(1)
++        labels = re.search(r"const EXECUTOR_LABELS = \{(.*?)\};", APP, re.S).group(1)
 +        for deferred in ("EXECUTOR_RESUMED", "MESSAGE_ACKNOWLEDGED", "WAKE_PENDING"):
 +            self.assertNotIn(deferred, labels,
 +                             deferred + " requires the Phase 2 wake bridge and "
 +                             "must not be rendered from current evidence")
 +
-+    def test_supported_states_are_available(self):
-+        labels = re.search(r"EXECUTION_STATE_LABELS = \{(.*?)\n\}", APP, re.S).group(1)
-+        for supported in ("CLAIMED", "WAITING_FOR_OPERATOR", "OPERATOR_MESSAGE_POSTED",
-+                          "PAUSED", "EXECUTOR_ACTIVE", "IN_COUNCIL", "BLOCKED", "COMPLETE"):
-+            self.assertIn(supported, labels)
++    def test_the_obsolete_vocabulary_is_removed_not_left_dead(self):
++        """EXECUTION_STATE_LABELS advertised operator_message_posted, a state
++        nothing can produce, and executionStateLabel had no remaining caller."""
++        self.assertNotIn("EXECUTION_STATE_LABELS", APP)
++        self.assertNotIn("function executionStateLabel", APP)
++        self.assertNotIn("OPERATOR_MESSAGE_POSTED", APP)
 +
-+    def test_state_is_surfaced_on_the_queue_row(self):
-+        self.assertIn("executionStateLabel(it)", APP)
++    def test_state_is_actually_RENDERED_on_the_queue_row(self):
++        """Scoped to queueCard. Asserting the identifier appeared anywhere in
++        app.js was a false positive: the function DECLARATION satisfied it, so
++        the test passed while proving nothing about the rendered row."""
++        m = re.search(RE_CARD, APP)
++        self.assertIsNotNone(m, "queueCard not found")
++        body = m.group(0)
++        self.assertIn("executorStateLabel(it)", body)
++        self.assertIn("lifecyclePhaseLabel(it)", body)
++        self.assertIn("Phase ", body)
++        self.assertIn("Executor ", body)
 +
 +
 +class ConsistentDemotionTest(unittest.TestCase):
@@ -3234,14 +3396,27 @@ index 0000000..ad814fc
 +    """Item 7: keyboard operation and focus visibility."""
 +
 +    def test_queue_rows_are_real_controls(self):
-+        self.assertIn('role="button"', APP)
-+        self.assertIn('tabindex="0"', APP)
-+        self.assertIn("aria-pressed=", APP)
++        # The row is a plain CONTAINER holding a real primary button, because
++        # nesting <button> copy controls inside an element that itself claimed
++        # role="button" is an invalid interactive pattern.
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        self.assertIn('<button type="button" class="q-open"', body)
++        self.assertIn("aria-pressed=", body)
++        self.assertNotIn('role="button" tabindex="0"', body,
++                         "the row must not claim button semantics itself")
 +
-+    def test_queue_rows_activate_on_enter_and_space(self):
-+        m = re.search(r'if \(e\.key !== "Enter" && e\.key !== " "\)[\s\S]{0,4000}?\n\}\);', APP)
-+        self.assertIsNotNone(m, "queue rows need Enter/Space activation")
-+        self.assertIn("navigateToWorkItem", m.group(0))
++    def test_queue_rows_activate_via_a_native_button(self):
++        """Enter and Space now come from native <button> semantics rather than
++        a hand-rolled key handler, which also removes the second activation
++        path that could diverge from the mouse path."""
++        m = re.search(RE_CARD, APP)
++        self.assertIn('<button type="button" class="q-open"', m.group(0))
++        k = APP.index('document.addEventListener("keydown"')
++        handler = APP[k:k + 400]
++        # The listener only stops Space from scrolling; it must not navigate.
++        self.assertIn("q-open", handler)
++        self.assertNotIn("navigateToWorkItem", handler)
 +
 +    def test_existing_send_shortcuts_are_preserved(self):
 +        """Ctrl+Enter sends; Shift+Enter still inserts a newline."""
@@ -3250,7 +3425,7 @@ index 0000000..ad814fc
 +
 +    def test_focus_rings_exist_for_new_controls(self):
 +        for rule in (".copy-id:focus-visible", ".jump-to-latest:focus-visible",
-+                     '.q-row[role="button"]:focus-visible'):
++                     '.q-open:focus-visible'):
 +            self.assertIn(rule, CSS)
 +
 +

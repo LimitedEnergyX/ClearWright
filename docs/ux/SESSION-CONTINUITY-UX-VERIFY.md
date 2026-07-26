@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   b2f5872e892984a96d04e6395631c26e57fdb3b0
+HEAD (bytes under review):   218302dc1f530225dfd8bc86065a80152a21c483
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -147,10 +147,10 @@ artifacts across 1380 ledger rows.
 
 TESTS (counts measured by running them, not typed)
 ----------------------------------------------------------------------
-  focused static   196 tests  (OK)
+  focused static   202 tests  (OK)
   runtime          109 checks (PASS)  tests/dom/session_ux_runtime.mjs
-  wired path       192 checks (PASS)  tests/dom/wired_paths.mjs
-  full suite       1403 tests  (OK, skipped=1)
+  wired path       232 checks (PASS)  tests/dom/wired_paths.mjs
+  full suite       1409 tests  (FAILED, skipped=1)
 
 The runtime and wired harnesses execute the real app.js in a Node vm.
 They add NO dependency: every import is a Node builtin or a local
@@ -165,28 +165,28 @@ rather than browser automation.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       186056  2d7672a219212ecf6794addb8a6f0ac42e526f2899b56a51a9c2de26aa0513eb
+  apps/control-plane/static/app.js                       187880  db6b1d5dd313d6e33661fb466c01875f3235f18e557d9bd30daece0b91e5444e
   apps/control-plane/static/index.html                    22393  86b4ffbf452f29a46c2c7c9877a3daadfdf29b5bc3af4118bb40b55a993b02f4
-  apps/control-plane/static/style.css                     55185  3f14d5e79f3c220d029508dd84347190d12cf061677cd023897fa0e7f4a82984
+  apps/control-plane/static/style.css                     55312  8870e44bca0b803f636ec90cf8c229f864762a850780bb1128cc947711471407
   tests/dom/mini_dom.mjs                                  15472  03b1de7aadd7cd0c81e37bcea5eba26fc5c052f0a1a05d105842f6d4cb29fa32
   tests/dom/session_ux_runtime.mjs                        31834  e5085e168f511380372b6c7420de37c8b4d9bee5edb8947c6bde0d30d9f05894
-  tests/dom/wired_paths.mjs                               49365  20791359b04e6a20a133bb0a67411ed6701b3ac4dded9f6403f30a13ec44e83c
-  tests/test_session_continuity_ux.py                     79237  a25540d2bc76b099100e49ab76e267fd61c5cf97e7d4ab2e4488ace1b0794f96
+  tests/dom/wired_paths.mjs                               52112  0290013cb51746de3111db9976d7f9464afe2d85444b540a2486937b1f00d922
+  tests/test_session_continuity_ux.py                     82294  1232e843c653e67e4984364292f4c5aecd5a1724613d8a6bc1df50a7f9956181
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
   tests/test_session_ux_wired.py                           2358  3c8647d059510f8e7c8d0207f07ff842fd962ac5f06f8fa659762af272ade56d
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 1215 ++++++++++++++++++++++++-
+ apps/control-plane/static/app.js     | 1251 +++++++++++++++++++++++-
  apps/control-plane/static/index.html |   49 +-
- apps/control-plane/static/style.css  |  164 ++++
+ apps/control-plane/static/style.css  |  166 ++++
  tests/dom/mini_dom.mjs               |  399 ++++++++
- tests/dom/session_ux_runtime.mjs     |  667 ++++++++++++++
- tests/dom/wired_paths.mjs            | 1097 ++++++++++++++++++++++
- tests/test_session_continuity_ux.py  | 1657 ++++++++++++++++++++++++++++++++++
+ tests/dom/session_ux_runtime.mjs     |  667 +++++++++++++
+ tests/dom/wired_paths.mjs            | 1157 +++++++++++++++++++++++
+ tests/test_session_continuity_ux.py  | 1724 ++++++++++++++++++++++++++++++++++
  tests/test_session_ux_runtime.py     |   40 +
  tests/test_session_ux_wired.py       |   55 ++
- 9 files changed, 5288 insertions(+), 55 deletions(-)
+ 9 files changed, 5452 insertions(+), 56 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -312,7 +312,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..ba0913d 100644
+index dd2d10c..c0e22df 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -542,16 +542,23 @@ index dd2d10c..ba0913d 100644
  function queueCard(it) {
    const ps = it.presentation_state || "waiting_on_claude";
    const selected = it.work_item_id && it.work_item_id === selectedWorkItemId;
-@@ -1061,11 +1217,86 @@ function queueCard(it) {
+@@ -1061,11 +1217,93 @@ function queueCard(it) {
      ? '<span class="q-opflag" title="operator action required"><U+25C9> operator</span>' : "";
    // Technical ids ride on data attributes only; the primary card stays readable.
    const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
-+  // Phase 1, item 7: a queue row is a real control -- role, tabindex and
-+  // aria-pressed -- so it is reachable and activatable from the keyboard
-+  // instead of being a plain div that only responds to a mouse click.
++  // The row is NOT the control. Keyboard reachability comes from the explicit
++  // .q-open button rendered below, which carries aria-current; this comment
++  // previously still described the superseded role/tabindex/aria-pressed row.
 +  const execLabel = executorStateLabel(it);
 +  const phaseLabel = lifecyclePhaseLabel(it);
 +  const wid = it.work_item_id || "";
++  // POLICY, stated because the reviewers asked. Two distinct cases:
++  //   * a record with NO usable key is EXCLUDED from reconciliation entirely
++  //     (renderQueue filters it), because several such rows would collapse onto
++  //     one empty key and reconciliation could move or focus the wrong tile;
++  //   * a record WITH a usable key but a non-canonical shape is DISPLAYED
++  //     read-only, because it is durable governed work the operator must see.
++  // Neither can ever become a sendable destination.
 +  // A non-canonical entry -- today only the packet projection
 +  // "in_progress:<packet-id>" -- is REAL work the operator must still see, so
 +  // it is not hidden. It is rendered READ-ONLY: no .q-open control, so it is
@@ -633,7 +640,7 @@ index dd2d10c..ba0913d 100644
      "</div>";
  }
  
-@@ -1117,6 +1348,108 @@ function attentionCounts(items) {
+@@ -1117,6 +1355,108 @@ function attentionCounts(items) {
    return c;
  }
  
@@ -742,7 +749,7 @@ index dd2d10c..ba0913d 100644
  function renderQueue() {
    const el = document.getElementById("queue-groups");
    if (!el) return;
-@@ -1124,21 +1457,44 @@ function renderQueue() {
+@@ -1124,21 +1464,44 @@ function renderQueue() {
    const rows = filterSortQueue(lastWorkItems, queueFilterMode, queueSearch);
    syncFilterChips();
    if (!rows.length) {
@@ -798,7 +805,7 @@ index dd2d10c..ba0913d 100644
  }
  
  function syncFilterChips() {
-@@ -1290,23 +1646,660 @@ function openAttention() {
+@@ -1290,23 +1653,674 @@ function openAttention() {
    }
  }
  
@@ -948,11 +955,25 @@ index dd2d10c..ba0913d 100644
 +// CSS.escape is deliberately NOT used here: it escapes identifiers, and
 +// its output does not round-trip inside a quoted string, so a value
 +// containing a quote, a backslash or a space would fail to match the very
-+// node it names. Within a CSS string only the backslash and the quote
-+// character itself need escaping.
++// node it names. Within a CSS string the backslash and the quote must be
++// escaped, and so must newlines, NUL and other control characters, which
++// are not permitted raw in a string token.
 +function cssAttrValue(value) {
 +  const v = String(value === null || value === undefined ? "" : value);
-+  return v.replace(/[\\"]/g, (c) => "\\" + c);
++  let out = "";
++  for (const ch of v) {
++    const code = ch.codePointAt(0);
++    if (ch === '\\' || ch === '"') { out += '\\' + ch; continue; }
++    // A CSS string token may not contain a raw newline, NUL or other control
++    // character. The general escape is a hexadecimal sequence terminated by a
++    // space, which is well defined for every code point in that range.
++    if (code < 0x20 || code === 0x7f) {
++      out += '\\' + code.toString(16) + ' ';
++      continue;
++    }
++    out += ch;
++  }
++  return out;
 +}
 +
 +// --------------------------------------------------------------------------
@@ -1462,7 +1483,7 @@ index dd2d10c..ba0913d 100644
      const node = document.querySelector(sel);
      if (node) {
        node.classList.add("msg-highlight");
-@@ -1317,27 +2310,86 @@ function highlightMessage(messageId) {
+@@ -1317,27 +2331,99 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -1518,11 +1539,25 @@ index dd2d10c..ba0913d 100644
 +  const gen = ++queueRefreshGeneration;
    try {
      const data = await getJSON("/api/work-items");
+-    lastWorkItems = data.work_items || [];
 +    // A completion that is no longer the newest may not touch ANY shared
 +    // state: not the snapshot, not loaded/confirmed, not the status. An older
 +    // success arriving after a newer failure must not restore sendability.
 +    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
-     lastWorkItems = data.work_items || [];
++    // A 200 with a malformed body is NOT authoritative. Treating a missing or
++    // non-array work_items as an empty queue would confirm a snapshot the
++    // server never actually described, and confirmed-empty is a load-bearing
++    // outcome: it makes stale destinations unsendable. So it is reported as a
++    // FAILURE, which preserves the previous snapshot and pauses sending.
++    if (!data || !Array.isArray(data.work_items)) {
++      queueConfirmed = false;
++      queueFailureReported = true;
++      showRestoreStatus("The work queue returned an unreadable response, so " +
++                        "destinations cannot be confirmed. Sending is paused " +
++                        "until it reloads.", true);
++      return REFRESH_FAILED;
++    }
++    lastWorkItems = data.work_items;
 +    workItemsLoaded = true;   // a SUCCESSFUL response, even when it is empty
 +    queueConfirmed = true;    // and it is CURRENT as of this response
 +    // Only a confirmed success clears a reported failure, because only this
@@ -1558,7 +1593,7 @@ index dd2d10c..ba0913d 100644
    }
  }
  
-@@ -1398,7 +2450,7 @@ async function loadHistory() {
+@@ -1398,7 +2484,7 @@ async function loadHistory() {
    lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
    const body = document.getElementById("ledger-body");
    if (!lastLedgerRows.length) {
@@ -1567,7 +1602,7 @@ index dd2d10c..ba0913d 100644
      return;
    }
    body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
-@@ -1406,12 +2458,31 @@ async function loadHistory() {
+@@ -1406,12 +2492,31 @@ async function loadHistory() {
      '" data-ledger-index="' + i + '">' +
      "<td>" + esc(shortTime(row.at)) + "</td>" +
      "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
@@ -1600,7 +1635,7 @@ index dd2d10c..ba0913d 100644
  function openLedgerDetail(index) {
    const row = lastLedgerRows[index];
    if (!row) return;
-@@ -1837,7 +2908,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2942,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -1610,7 +1645,7 @@ index dd2d10c..ba0913d 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +3207,27 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +3241,27 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -1638,7 +1673,7 @@ index dd2d10c..ba0913d 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2783,12 +3876,23 @@ function toggleToolLog() {
+@@ -2783,12 +3910,23 @@ function toggleToolLog() {
    if (footer) footer.hidden = !footer.hidden;
  }
  
@@ -1662,7 +1697,7 @@ index dd2d10c..ba0913d 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2869,11 +3973,18 @@ function wire() {
+@@ -2869,11 +4007,18 @@ function wire() {
  
    // Work queue: clicking a row selects that task everywhere.
    document.getElementById("queue-groups").addEventListener("click", (e) => {
@@ -1686,7 +1721,7 @@ index dd2d10c..ba0913d 100644
    });
  
    // Context-aware task actions are READ-ONLY navigation only: they switch view
-@@ -2886,6 +3997,10 @@ function wire() {
+@@ -2886,6 +4031,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -1697,7 +1732,7 @@ index dd2d10c..ba0913d 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +4112,24 @@ function wire() {
+@@ -2997,6 +4146,24 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -1815,10 +1850,10 @@ index 1a5fd93..57b8bd6 100644
          </div>
          <div class="ledger-detail" id="ledger-detail" hidden>
 diff --git a/apps/control-plane/static/style.css b/apps/control-plane/static/style.css
-index ac13c95..8fa0bfb 100644
+index ac13c95..30b369e 100644
 --- a/apps/control-plane/static/style.css
 +++ b/apps/control-plane/static/style.css
-@@ -1047,3 +1047,167 @@ body.history-open .mission { display: none !important; }
+@@ -1047,3 +1047,169 @@ body.history-open .mission { display: none !important; }
  .activity-details[open] summary::before { content: "<U+25BE> "; }
  .activity-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray); white-space: nowrap; }
  .activity-log { margin: 0.35rem 0 0.2rem; font-family: ui-monospace, monospace; font-size: 0.74rem; white-space: pre-wrap; max-height: 5.5rem; overflow-y: auto; }
@@ -1971,7 +2006,9 @@ index ac13c95..8fa0bfb 100644
 +  outline-offset: 2px;
 +  border-radius: 6px;
 +}
-+.q-open[aria-pressed="true"] .q-title { font-weight: 700; }
++/* The control uses aria-current, not a toggle state: activating it navigates
++   rather than switching something off again. */
++.q-open[aria-current="true"] .q-title { font-weight: 700; }
 +
 +/* .q-meta is a span (phrasing content, so it may sit inside the button) but
 +   still lays out as a row. */
@@ -3066,10 +3103,10 @@ index 0000000..a7008eb
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/dom/wired_paths.mjs b/tests/dom/wired_paths.mjs
 new file mode 100644
-index 0000000..73ecb23
+index 0000000..ba8549f
 --- /dev/null
 +++ b/tests/dom/wired_paths.mjs
-@@ -0,0 +1,1097 @@
+@@ -0,0 +1,1157 @@
 +/*
 + * Executable coverage through the REAL wired event paths.
 + *
@@ -4165,14 +4202,74 @@ index 0000000..73ecb23
 +     "the refusal names the live queue, not a refresh failure");
 +}
 +
++// ---------------------------------------------------------------------------
++// 10. CSS STRING ESCAPING is complete, and a MALFORMED payload is not an
++//     authoritative empty queue.
++// ---------------------------------------------------------------------------
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++
++  // Control characters are not permitted raw in a CSS string token.
++  const controls = ["a\nb", "a\rb", "a\tb", "a\u0000b", "a\u001fb", "a\u007fb"];
++  controls.forEach((v) => {
++    const out = ev(ctx, "cssAttrValue(" + JSON.stringify(v) + ")");
++    ok(out.indexOf("\n") === -1 && out.indexOf("\r") === -1,
++       "no raw newline survives escaping of " + JSON.stringify(v));
++    ok(/\\[0-9a-f]+ /.test(out),
++       "a control character is hex-escaped in " + JSON.stringify(v));
++  });
++
++  // And the ordinary cases still round-trip to the intended node.
++  const host = env.doc.createElement("div");
++  env.doc.body.appendChild(host);
++  ['a"b', "a\\b", "a b", "a]b"].forEach((v) => {
++    const el = env.doc.createElement("span");
++    el.setAttribute("data-probe", v);
++    host.appendChild(el);
++    const escd = ev(ctx, "cssAttrValue(" + JSON.stringify(v) + ")");
++    let found = null;
++    try { found = host.querySelector('[data-probe="' + escd + '"]'); } catch (e) { found = null; }
++    same(found, el, "escaping still selects the intended node for " + JSON.stringify(v));
++  });
++}
++
++// 10b. A 200 with a MALFORMED body must be a FAILURE, not a confirmed empty.
++for (const bad of [{}, { work_items: null }, { work_items: "nope" }, { work_items: 7 }]) {
++  const env = queueEnv({});
++  const ctx = loadApp(env);
++  env.queue.items = ITEMS;
++  await ctx.refreshWorkItems();
++  ok(ev(ctx, "queueConfirmed") === true, "confirmed to begin with");
++  const snapshotBefore = ev(ctx, "lastWorkItems.length");
++
++  // Return 200 with a body that is not a work-items payload.
++  env.ctx.fetch = (url, init) => {
++    const u = String(url);
++    const method = (init && init.method) || "GET";
++    if (u.indexOf("/api/work-items") === 0) {
++      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(bad) });
++    }
++    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
++  };
++  const outcome = await ctx.refreshWorkItems();
++  eq(outcome, "failed",
++     "a malformed body is FAILED, not confirmed_empty: " + JSON.stringify(bad));
++  ok(ev(ctx, "queueConfirmed") === false, "confirmation is withdrawn");
++  eq(ev(ctx, "lastWorkItems.length"), snapshotBefore,
++     "the previous snapshot is preserved, not replaced by an invented empty one");
++  ok(statusOf(env).shown, "the operator is told the response was unreadable");
++  ok(statusOf(env).text.indexOf("unreadable") !== -1, "and why");
++}
++
 +console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..c80809e
+index 0000000..2e21ef2
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,1657 @@
+@@ -0,0 +1,1724 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -4808,9 +4905,11 @@ index 0000000..c80809e
 +    def test_the_escaper_targets_string_literal_semantics(self):
 +        m = re.search(r"function cssAttrValue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
 +        body = m.group(0)
-+        # Inside a CSS string only the backslash and the quote need escaping.
-+        self.assertIn("replace(", body)
-+        self.assertIn(chr(92) + chr(92) + '"', body)
++        # Backslash and quote are escaped, and control characters are
++        # hex-escaped, because a CSS string token may not contain them raw.
++        self.assertIn("codePointAt(0)", body)
++        self.assertIn("toString(16)", body)
++        self.assertIn("0x7f", body)
 +
 +
 +class QueueFreshnessTest(unittest.TestCase):
@@ -5006,6 +5105,71 @@ index 0000000..c80809e
 +        body = m.group(0)
 +        self.assertLess(body.index("if (gen !== queueRefreshGeneration)"),
 +                        body.index("lastWorkItems = data.work_items"))
++
++
++class CssStringEscapingTest(unittest.TestCase):
++    """Council finding: escaping only backslash and quote was incomplete.
++
++    A CSS string token may not contain a raw newline, NUL or other control
++    character, so a route-supplied message id or an unexpected presentation
++    state could still have produced an invalid selector.
++    """
++
++    def test_control_characters_are_escaped(self):
++        m = re.search(r"function cssAttrValue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("0x20", body)
++        self.assertIn("0x7f", body)
++        self.assertIn("toString(16)", body,
++                      "the general escape is a hexadecimal sequence")
++
++    def test_the_comment_no_longer_overclaims(self):
++        i = APP.index("function cssAttrValue")
++        head = APP[max(0, i - 900):i]
++        self.assertNotIn("only the backslash and the quote", head)
++        self.assertIn("control characters", head)
++
++
++class RefreshPayloadValidationTest(unittest.TestCase):
++    """Council finding: `data.work_items || []` made a malformed 200 look like
++    an authoritative empty queue, and confirmed-empty is load-bearing because
++    it makes stale destinations unsendable."""
++
++    def test_the_payload_shape_is_validated(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("Array.isArray(data.work_items)", body)
++        self.assertNotIn("data.work_items || []", body)
++
++    def test_a_malformed_payload_is_a_failure(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        branch = body.split("Array.isArray(data.work_items)")[1][:600]
++        self.assertIn("queueConfirmed = false;", branch)
++        self.assertIn("return REFRESH_FAILED;", branch)
++        self.assertIn("unreadable", branch)
++
++    def test_the_previous_snapshot_survives_a_malformed_payload(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        after = body.split("Array.isArray(data.work_items)")[1]
++        branch = after[:after.index("    }")]      # the guard block only
++        self.assertNotIn("lastWorkItems =", branch,
++                         "a malformed response must not overwrite the snapshot")
++        self.assertIn("return REFRESH_FAILED;", branch)
++
++
++class RecordPolicyDocumentationTest(unittest.TestCase):
++    """Both reviewers asked for the record policy to be stated explicitly."""
++
++    def test_the_two_cases_are_documented_where_enforced(self):
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        self.assertIn("POLICY", body)
++        low = body.lower()
++        self.assertIn("no usable key", low)
++        self.assertIn("excluded from reconciliation", low)
++        self.assertIn("read-only", low)
 +
 +
 +class CanonicalIdentityTest(unittest.TestCase):

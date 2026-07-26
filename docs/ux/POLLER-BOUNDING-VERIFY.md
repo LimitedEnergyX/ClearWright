@@ -82,34 +82,38 @@ Poll intervals are unchanged and no poller is removed.
 
 ```
 base  a025edbec22764fea35623c0cab1cb2e90a9b6ec
-head  75ae94d3353e9a5bcdca86301c757289cb356a5f
+head  31efff8039084910cd7d9d9b9b1631722f981d44
+31efff8 Correct council round-1: prove the throwing follow-up, the global surface, and the controller boundary
+c16e58d docs(cw): verification packet for the console poller bounding
 75ae94d Bounded request control for the remaining console pollers
 ```
 
 ## Files changed
 
 ```
-apps/control-plane/static/app.js    | 107 ++++++++++++--
- tests/dom/wired_paths.mjs           | 282 ++++++++++++++++++++++++++++++++++++
- tests/test_console_poll_bounding.py | 183 +++++++++++++++++++++++
- 3 files changed, 563 insertions(+), 9 deletions(-)
+apps/control-plane/static/app.js    | 107 ++++-
+ docs/ux/POLLER-BOUNDING-VERIFY.md   | 834 ++++++++++++++++++++++++++++++++++++
+ tests/dom/wired_paths.mjs           | 395 +++++++++++++++++
+ tests/test_console_poll_bounding.py | 247 +++++++++++
+ 4 files changed, 1574 insertions(+), 9 deletions(-)
 ```
 
 ## Manifest (sha256 of committed bytes)
 
 ```
 apps/control-plane/static/app.js             1333b704017d21f1927d35df030d6627dabfb4cb5d247cda8d94ee4c7777ff29  194420 bytes
-tests/dom/wired_paths.mjs                    ca40986b6916cc5384c86dc6f5b488c5c93e043fa175026f81ec95d181662c52  75431 bytes
-tests/test_console_poll_bounding.py          a79558f1a97d017900f4c824f0cf3b1218366717da772f6d44e3cb502bb89e79  7501 bytes
+docs/ux/POLLER-BOUNDING-VERIFY.md            9bff57f0606c4fcf2f496a652568d949f31ecf5535452e843928c85eff1bb30b  36340 bytes
+tests/dom/wired_paths.mjs                    c0de47c046f40f2100f7cd43de066d8ec104c6e386cf55a58e4c60f2f94e6665  81455 bytes
+tests/test_console_poll_bounding.py          31e681a7e621ecca7472df8f0a3dffc4e5b655d6fe0dcba820855df163e48cc3  10842 bytes
 ```
 
 ## Tests, as reported by the suites
 
 ```
-static  (tests/test_console_poll_bounding.py)   24 tests   OK
+static  (tests/test_console_poll_bounding.py)   31 tests   OK
 runtime (tests/dom/session_ux_runtime.mjs)      109 checks  PASS
-wired   (tests/dom/wired_paths.mjs)             438 checks  PASS
-full suite                                     1442 tests   OK (skipped=1)
+wired   (tests/dom/wired_paths.mjs)             539 checks  PASS
+full suite                                     1449 tests   OK (skipped=1)
 ```
 
 Wired section 12 drives the REAL poller entry points through a transport that
@@ -351,10 +355,10 @@ index cb0c810..cf996bd 100644
  // Developer surface: the Tool Log footer is hidden by default and toggled by
  // Ctrl+Shift+L or the small gear control in the corner.
 diff --git a/tests/dom/wired_paths.mjs b/tests/dom/wired_paths.mjs
-index 193212d..819a47b 100644
+index 193212d..e54d309 100644
 --- a/tests/dom/wired_paths.mjs
 +++ b/tests/dom/wired_paths.mjs
-@@ -1360,5 +1360,287 @@ for (const bad of [{}, { work_items: null }, { work_items: "nope" }, { work_item
+@@ -1360,5 +1360,400 @@ for (const bad of [{}, { work_items: null }, { work_items: "nope" }, { work_item
    ok(calls <= 3, "no production call site bypasses the bounded entry point");
  }
  
@@ -610,14 +614,70 @@ index 193212d..819a47b 100644
 +  eq(unhandled.length, 0, "a failing /api/state poll produces ZERO unhandled rejections");
 +  ok(diag(ctx, "state").active === false, "and the slot is still released");
 +
-+  // Also prove the fire-and-forget follow-up cannot surface one.
++  // The FOLLOW-UP itself must be the thing that fails. The earlier version of
++  // this case rejected the HELD request, whose finally then started a second
++  // request that was simply left pending, so the follow-up path was never
++  // exercised at all.
 +  env.poll.modes["state"] = "defer";
++  const before = env.poll.counts["state"];       // this block already polled once
 +  const held = call(ctx, "refresh");
 +  await call(ctx, "refresh");                           // requests the follow-up
-+  env.poll.pending["state"].shift().rejectWith(new Error("probe: follow-up down"));
++  eq(env.poll.counts["state"] - before, 1, "the tick started NO second request");
++  eq(env.poll.pending["state"].length, 1, "only the held request is outstanding");
++  env.poll.pending["state"].shift().resolveWith({ ok: true });   // held SUCCEEDS
 +  await held;
 +  for (let i = 0; i < 6; i++) await settle();
-+  eq(unhandled.length, 0, "a THROWING coalesced follow-up produces zero unhandled rejections");
++  eq(env.poll.counts["state"] - before, 2, "the coalesced follow-up actually started");
++  eq(env.poll.pending["state"].length, 1, "and the FOLLOW-UP is what is now in flight");
++  env.poll.pending["state"].shift().rejectWith(new Error("probe: follow-up down"));
++  for (let i = 0; i < 6; i++) await settle();
++  eq(unhandled.length, 0,
++     "a FAILING coalesced follow-up produces zero unhandled rejections");
++  ok(diag(ctx, "state").active === false, "and the slot is released after it");
++  process.removeListener("unhandledRejection", onUnhandled);
++}
++
++// 12i-2. The controller's OWN catch: a run() that genuinely THROWS, both as the
++//        active request and as the coalesced follow-up. The wrapped pollers all
++//        handle their own transport errors internally, so this drives
++//        boundedPoll directly to exercise the defensive invariant itself.
++{
++  const env = pollEnv({});
++  const ctx = loadApp(env);
++  const unhandled = [];
++  const onUnhandled = (e) => unhandled.push(e);
++  process.on("unhandledRejection", onUnhandled);
++
++  // (a) the ACTIVE request throws.
++  ev(ctx, 'globalThis.__t1 = boundedPoll("probe-throw", async () => { throw new Error("boom"); });');
++  eq(await ev(ctx, "__t1()"), "ran", "boundedPoll RETURNS even when run() throws");
++  ok(diag(ctx, "probe-throw").active === false, "the slot is released after a throwing run");
++  for (let i = 0; i < 6; i++) await settle();
++  eq(unhandled.length, 0, "a throwing run() produces zero unhandled rejections");
++
++  // (b) the coalesced FOLLOW-UP throws. Call 1 is held open until the test
++  //     releases it; call 2 -- the follow-up started from finally and never
++  //     awaited -- throws outright.
++  ev(ctx, `
++    globalThis.__n = 0;
++    globalThis.__gate = null;
++    globalThis.__t2 = boundedPoll("probe-follow", async () => {
++      globalThis.__n += 1;
++      if (globalThis.__n === 1) { await new Promise((r) => { globalThis.__gate = r; }); return; }
++      throw new Error("follow-up boom");
++    });
++  `);
++  const held2 = ev(ctx, "__t2()");
++  eq(await ev(ctx, "__t2()"), "coalesced", "a tick during the held call coalesces");
++  ev(ctx, "__gate();");
++  eq(await held2, "ran", "the held call completes");
++  for (let i = 0; i < 8; i++) await settle();
++  eq(ev(ctx, "__n"), 2, "the coalesced follow-up RAN and it is the one that threw");
++  eq(unhandled.length, 0,
++     "a THROWING coalesced follow-up produces zero unhandled rejections");
++  ok(diag(ctx, "probe-follow").active === false,
++     "the slot is released even when the follow-up throws");
++  ok(diag(ctx, "probe-follow").followUp === false, "no phantom follow-up remains");
 +  process.removeListener("unhandledRejection", onUnhandled);
 +}
 +
@@ -631,12 +691,69 @@ index 193212d..819a47b 100644
 +    ok(src.indexOf("state.active") !== -1,
 +       p.fn + " resolves to the bounded controller wrapper, not the raw request");
 +  }
++  // Every raw body must appear EXACTLY twice in the source: its own declaration
++  // and the boundedPoll() argument. A third occurrence would be a production
++  // call site that bypasses the controller, which is the regression this
++  // assertion exists to catch. toString() checks alone cannot detect that.
++  const appSrc = fs.readFileSync(APP, "utf8");
 +  for (const raw of ["refreshStateRequest", "refreshAgentEventsRequest",
 +                     "refreshMessagesRequest", "refreshHealthRequest",
 +                     "refreshTaskStateRequest", "refreshArchiveIndexRequest",
 +                     "loadConversationsRequest"]) {
 +    ok(ev(ctx, "typeof " + raw) === "function",
 +       raw + " exists as the inner request body");
++    const hits = appSrc.split(raw).length - 1;
++    eq(hits, 2, raw + " appears exactly twice: its declaration and the boundedPoll argument");
++    ok(appSrc.indexOf("async function " + raw + "(") !== -1,
++       raw + " occurrence 1 is its declaration");
++    ok(appSrc.indexOf(", " + raw + ");") !== -1,
++       raw + " occurrence 2 is the boundedPoll argument, not a call");
++    const declHits = appSrc.split("async function " + raw + "(").length - 1;
++    const argHits = appSrc.split(", " + raw + ");").length - 1;
++    eq(declHits, 1, raw + " is declared exactly once");
++    eq(argHits, 1, raw + " is passed to boundedPoll exactly once");
++    eq(hits, declHits + argHits,
++       raw + " has NO occurrence beyond its declaration and the boundedPoll " +
++       "argument, so no production path invokes it directly");
++  }
++}
++
++// 12k. GLOBAL SURFACE. Converting `function name()` to `const name = ...` removes
++//      the window property. That is safe ONLY if nothing resolves these names
++//      through the global object. Proven here rather than asserted.
++{
++  const html = fs.readFileSync(HTML, "utf8");
++  const appSrc = fs.readFileSync(APP, "utf8");
++  const converted = ["refresh", "refreshAgentEvents", "refreshMessages", "refreshHealth",
++                     "refreshTaskState", "refreshArchiveIndex", "loadConversations"];
++
++  // No inline event attribute anywhere in the shipped markup.
++  ok(!/\son[a-z]+\s*=\s*["']/i.test(html),
++     "index.html contains NO inline event handler attributes at all");
++  // index.html is the only markup app.js is served with, and it must not name
++  // any converted poller.
++  for (const name of converted) {
++    ok(html.indexOf(name) === -1, "index.html never references " + name);
++  }
++  // No global-object access to a converted poller from the script itself.
++  for (const name of converted) {
++    for (const pattern of ["window." + name, "globalThis." + name,
++                           'window["' + name + '"]', "window['" + name + "']"]) {
++      ok(appSrc.indexOf(pattern) === -1, "app.js never accesses " + pattern);
++    }
++  }
++  // app.js is the ONLY script the page loads, so there is no second script that
++  // could hold a stale global reference.
++  const scripts = html.match(/<script[^>]*src=["']([^"']+)["']/g) || [];
++  eq(scripts.length, 1, "the page loads exactly one script");
++  ok(scripts[0].indexOf("app.js") !== -1, "and that script is app.js");
++
++  // The wrapped bindings still resolve lexically, which is how every call site
++  // inside app.js (including the setInterval registrations) reaches them.
++  const env = pollEnv({});
++  const ctx = loadApp(env);
++  for (const name of converted) {
++    eq(ev(ctx, "typeof " + name), "function", name + " still resolves lexically");
 +  }
 +}
 +
@@ -644,10 +761,10 @@ index 193212d..819a47b 100644
  process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_console_poll_bounding.py b/tests/test_console_poll_bounding.py
 new file mode 100644
-index 0000000..90229a5
+index 0000000..a1339d1
 --- /dev/null
 +++ b/tests/test_console_poll_bounding.py
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,247 @@
 +"""Bounded request control for the recurring operator-console pollers.
 +
 +Follows the established front-end test pattern in this repository: static
@@ -805,6 +922,57 @@ index 0000000..90229a5
 +        self.assertNotIn("REFRESH_COALESCED ===", body)
 +
 +
++class GlobalSurfaceCompatibility(unittest.TestCase):
++    """Converting `function name()` to `const name = ...` removes the window
++    property. That is safe only if nothing resolves these names through the
++    global object, which is proven here rather than assumed."""
++
++    def test_markup_has_no_inline_event_handlers(self):
++        html = _read("index.html")
++        self.assertIsNone(re.search(r"""\son[a-z]+\s*=\s*["']""", html, re.I))
++
++    def test_markup_never_names_a_converted_poller(self):
++        html = _read("index.html")
++        for fn in BOUNDED.values():
++            self.assertNotIn(fn, html)
++
++    def test_no_global_object_access_to_a_converted_poller(self):
++        for fn in BOUNDED.values():
++            for pattern in ("window." + fn, "globalThis." + fn,
++                            'window["%s"]' % fn, "window['%s']" % fn):
++                self.assertNotIn(pattern, APP)
++
++    def test_the_page_loads_exactly_one_script(self):
++        # No second script can be holding a stale global reference.
++        scripts = re.findall(r"""<script[^>]*src=["']([^"']+)["']""", _read("index.html"))
++        self.assertEqual(len(scripts), 1)
++        self.assertIn("app.js", scripts[0])
++
++
++class NoPollerBypassesItsController(unittest.TestCase):
++    """Each raw request body must appear exactly twice: its own declaration and
++    the boundedPoll argument. A third occurrence would be a production call
++    site that bypasses the controller."""
++
++    def test_each_raw_body_has_no_direct_call_site(self):
++        for fn in BOUNDED.values():
++            raw = "refreshStateRequest" if fn == "refresh" else fn + "Request"
++            total = APP.count(raw)
++            decl = APP.count("async function %s(" % raw)
++            arg = APP.count(", %s);" % raw)
++            self.assertEqual(decl, 1, raw + " declared exactly once")
++            self.assertEqual(arg, 1, raw + " passed to boundedPoll exactly once")
++            self.assertEqual(total, decl + arg,
++                             raw + " has no occurrence beyond its declaration "
++                                   "and the boundedPoll argument")
++
++    def test_conversation_fan_out_is_fully_awaited(self):
++        # If any inner request were unawaited the outer slot would be released
++        # before the fan-out completed, which would defeat the bounding.
++        body = _block_of("loadConversationsRequest")
++        self.assertEqual(body.count("getJSON("), body.count("await getJSON("))
++
++
 +class PollingCadenceUnchanged(unittest.TestCase):
 +    """Scope guard: bounding requests must not change the polling cadence."""
 +
@@ -821,8 +989,21 @@ index 0000000..90229a5
 +                     "setInterval(refreshArchiveIndex, LIVE_MS * 15)"):
 +            self.assertIn(call, APP)
 +
-+    def test_no_poller_was_removed(self):
-+        self.assertEqual(len(re.findall(r"setInterval\(", APP)), 9)
++    def test_the_two_conversation_intervals_survive(self):
++        # loadConversations is driven by two further intervals OUTSIDE the main
++        # setInterval block; they are why the endpoint is polled on every view.
++        self.assertIn('if (currentView === "work") loadConversations();', APP)
++        self.assertIn('if (currentView !== "work") loadConversations();', APP)
++
++    def test_every_recurring_network_poller_is_accounted_for(self):
++        # Tied to known registrations rather than a raw setInterval count, which
++        # would be brittle against unrelated timer additions and would not
++        # establish coverage. Every recurring poller is either bounded here or
++        # is the queue poller with its own controller.
++        registered = set(re.findall(r"setInterval\((\w+),", APP))
++        accounted = set(BOUNDED.values()) | {"refreshWorkItems"}
++        self.assertEqual(registered - accounted, set(),
++                         "an unaccounted recurring poller was registered")
 +
 +    def test_server_side_is_untouched_by_this_change(self):
 +        server = os.path.join(STATIC, "..", "server.py")

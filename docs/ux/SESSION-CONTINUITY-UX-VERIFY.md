@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   0a0ee29c6180f22054cb5243c337e8e1ca6a2a91
+HEAD (bytes under review):   f6de7ddf96b56fc6c7b9872e759f1c49bb476b63
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -153,10 +153,10 @@ artifacts across 1380 ledger rows.
 
 TESTS (counts measured by running them, not typed)
 ----------------------------------------------------------------------
-  focused static   171 tests  (OK)
+  focused static   182 tests  (OK)
   runtime          109 checks (PASS)  tests/dom/session_ux_runtime.mjs
-  wired path       110 checks (PASS)  tests/dom/wired_paths.mjs
-  full suite       1378 tests  (OK, skipped=1)
+  wired path       145 checks (PASS)  tests/dom/wired_paths.mjs
+  full suite       1389 tests  (OK, skipped=1)
 
 The runtime and wired harnesses execute the real app.js in a Node vm.
 They add NO dependency: every import is a Node builtin or a local
@@ -171,28 +171,28 @@ rather than browser automation.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       180020  6d142f60db84a4081b4b13518339768d56834341e2162db1abd7222fa110b3b4
+  apps/control-plane/static/app.js                       182539  4d1efa482026dc5589fef119c7ab276c3ef07d963ac9a69352aa0cf0a85b2795
   apps/control-plane/static/index.html                    22393  86b4ffbf452f29a46c2c7c9877a3daadfdf29b5bc3af4118bb40b55a993b02f4
-  apps/control-plane/static/style.css                     54663  95c975dbf6a0adf373683ca2b595527dbdd6ad01116cc6405228becf95ae0e27
-  tests/dom/mini_dom.mjs                                  14376  b3b489e5368f4262df8a26c557a319c9cc58f711abc4482dad97b594e42c5752
+  apps/control-plane/static/style.css                     55185  3f14d5e79f3c220d029508dd84347190d12cf061677cd023897fa0e7f4a82984
+  tests/dom/mini_dom.mjs                                  15472  03b1de7aadd7cd0c81e37bcea5eba26fc5c052f0a1a05d105842f6d4cb29fa32
   tests/dom/session_ux_runtime.mjs                        31834  e5085e168f511380372b6c7420de37c8b4d9bee5edb8947c6bde0d30d9f05894
-  tests/dom/wired_paths.mjs                               33149  60df5a6a5a41eab0bb26920352e87977561c750e9d2950f1ad735f67a90aba8f
-  tests/test_session_continuity_ux.py                     68954  113dbd410eb8b7bcfe722827a09926bd136bfa81b55ece58248fca32e93da7d1
+  tests/dom/wired_paths.mjs                               39937  2010785128784973a6e41bcde2401f3acb3b7d241c66a654c954be8f386ddc4e
+  tests/test_session_continuity_ux.py                     73619  6407ad8dbafbc32f26e5a8a0b98d760a26e095013cae446047e7345fd9381aa8
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
   tests/test_session_ux_wired.py                           2358  3c8647d059510f8e7c8d0207f07ff842fd962ac5f06f8fa659762af272ade56d
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 1106 +++++++++++++++++++++++++-
+ apps/control-plane/static/app.js     | 1150 ++++++++++++++++++++++++-
  apps/control-plane/static/index.html |   49 +-
- apps/control-plane/static/style.css  |  154 ++++
- tests/dom/mini_dom.mjs               |  374 +++++++++
- tests/dom/session_ux_runtime.mjs     |  667 ++++++++++++++++
- tests/dom/wired_paths.mjs            |  753 ++++++++++++++++++
- tests/test_session_continuity_ux.py  | 1449 ++++++++++++++++++++++++++++++++++
+ apps/control-plane/static/style.css  |  164 ++++
+ tests/dom/mini_dom.mjs               |  399 +++++++++
+ tests/dom/session_ux_runtime.mjs     |  667 +++++++++++++++
+ tests/dom/wired_paths.mjs            |  889 +++++++++++++++++++
+ tests/test_session_continuity_ux.py  | 1547 ++++++++++++++++++++++++++++++++++
  tests/test_session_ux_runtime.py     |   40 +
  tests/test_session_ux_wired.py       |   55 ++
- 9 files changed, 4595 insertions(+), 52 deletions(-)
+ 9 files changed, 4906 insertions(+), 54 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -318,7 +318,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..cac630a 100644
+index dd2d10c..4a6a212 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -343,7 +343,7 @@ index dd2d10c..cac630a 100644
    nextBody.innerHTML = '<p class="op-next' + (ts.phase_attention ? " op-next-attention" : "") +
      '">' + esc(ts.next_action || "") + "</p>";
  
-@@ -761,6 +767,48 @@ function createComposer(opts) {
+@@ -761,6 +767,57 @@ function createComposer(opts) {
      return name + ":" + (target.thread_id || "new") + ":" + (target.work_item_id || "");
    }
  
@@ -355,6 +355,15 @@ index dd2d10c..cac630a 100644
 +    if (!target || !target.work_item_id) return "";
 +    if (target.work_item_id !== selectedWorkItemId) {
 +      return "The composer destination and the selected work item disagree.";
++    }
++    // A CURRENTLY CONFIRMED queue is required. A snapshot that merely loaded
++    // once is not positive evidence: if the latest refresh failed, the old
++    // record and thread are still sitting in the array and would otherwise
++    // authorise a send against a destination nothing has re-confirmed.
++    if (!queueConfirmed) {
++      return "The work queue is not currently confirmed, so this destination " +
++             "cannot be verified. Wait for the queue to reload, then reselect " +
++             "the work item.";
 +    }
 +    // A LIVE canonical record is required. Guarding this on `known &&` meant
 +    // the check was skipped exactly when the item had disappeared, which is the
@@ -392,7 +401,7 @@ index dd2d10c..cac630a 100644
    function updateBanner() {
      if (!bannerEl) return;
      const target = getTarget();
-@@ -768,8 +816,36 @@ function createComposer(opts) {
+@@ -768,8 +825,36 @@ function createComposer(opts) {
      // before anything has actually been sent; the banner only calls it
      // "continuing" once the caller confirms that id is a real durable thread.
      const confirmed = !isConfirmedTarget || isConfirmedTarget();
@@ -431,7 +440,7 @@ index dd2d10c..cac630a 100644
      bannerEl.textContent = text;
    }
  
-@@ -823,10 +899,29 @@ function createComposer(opts) {
+@@ -823,10 +908,29 @@ function createComposer(opts) {
        return;
      }
      showError("");
@@ -462,7 +471,7 @@ index dd2d10c..cac630a 100644
      try {
        const body = Object.assign(
          { message: raw, idempotency_key: draft.idempotencyKey },
-@@ -865,10 +960,18 @@ function createComposer(opts) {
+@@ -865,10 +969,18 @@ function createComposer(opts) {
        textarea.value = "";
        autoGrow();
        updateCounter();
@@ -481,7 +490,7 @@ index dd2d10c..cac630a 100644
      }
    }
  
-@@ -958,6 +1061,11 @@ const WORK_KIND_LABEL = {
+@@ -958,6 +1070,16 @@ const WORK_KIND_LABEL = {
  // --------------------------------------------------------------------------- //
  
  let lastWorkItems = [];
@@ -490,10 +499,15 @@ index dd2d10c..cac630a 100644
 +// conflated the two, so after a successful empty response an unknown explicit
 +// route was retained as a provisional selection instead of being rejected.
 +let workItemsLoaded = false;
++// A SUCCESSFUL queue response is positive evidence that the snapshot is live.
++// A failed refresh is not: it leaves the previous array in place, which must
++// NOT keep authorising sends. Send authorization therefore requires a
++// currently-confirmed queue, not merely one that loaded successfully once.
++let queueConfirmed = false;
  let lastQueueCouncils = [];
  let lastArchiveIndex = { archived: [], count: 0 };
  
-@@ -1045,6 +1153,16 @@ function actionsForState(pstate, canonical) {
+@@ -1045,6 +1167,17 @@ function actionsForState(pstate, canonical) {
    }
  }
  
@@ -504,13 +518,14 @@ index dd2d10c..cac630a 100644
 +          it.runner_state, it.claimed_by, it.title || it.summary,
 +          it.last_activity_at, it.last_activity_event,
 +          it.work_item_id === selectedWorkItemId ? "sel" : "",
++          isCanonicalMessageWorkItem(it.work_item_id) ? "canon" : "noncanon",
 +          sharesThreadWithOtherWorkItems(it, lastWorkItems) ? "amb" : ""].join("\u0001");
 +}
 +
  function queueCard(it) {
    const ps = it.presentation_state || "waiting_on_claude";
    const selected = it.work_item_id && it.work_item_id === selectedWorkItemId;
-@@ -1061,11 +1179,68 @@ function queueCard(it) {
+@@ -1061,11 +1194,86 @@ function queueCard(it) {
      ? '<span class="q-opflag" title="operator action required"><U+25C9> operator</span>' : "";
    // Technical ids ride on data attributes only; the primary card stays readable.
    const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
@@ -520,6 +535,12 @@ index dd2d10c..cac630a 100644
 +  const execLabel = executorStateLabel(it);
 +  const phaseLabel = lifecyclePhaseLabel(it);
 +  const wid = it.work_item_id || "";
++  // A non-canonical entry -- today only the packet projection
++  // "in_progress:<packet-id>" -- is REAL work the operator must still see, so
++  // it is not hidden. It is rendered READ-ONLY: no .q-open control, so it is
++  // not activatable, not navigable and not selectable as a message
++  // destination. Only message-scoped work items are conversations.
++  const canonical = isCanonicalMessageWorkItem(wid);
 +  const tid = it.thread_id || "";
 +  const originId = originMessageId(wid);
 +  // Item 1: multiple canonical work items on one thread is legal but reads as
@@ -554,20 +575,33 @@ index dd2d10c..cac630a 100644
 +  // pattern, so the primary action is now an explicit button and the copy
 +  // buttons are its siblings. Enter and Space come free from native button
 +  // semantics rather than a hand-rolled key handler.
++  // aria-current, not aria-pressed: activating this control NAVIGATES to a
++  // work item, it does not toggle a state off again, so a toggle-button
++  // contract would misdescribe it to assistive technology.
++  const openStart = canonical
++    ? ('<button type="button" class="q-open" ' +
++       'aria-current="' + (selected ? "true" : "false") + '"' +
++       ' aria-label="Open work item ' + esc(wid) +
++       (execLabel ? " (executor " + esc(execLabel) + ")" : "") + '"' +
++       ' data-work-item="' + esc(wid) + '">')
++    : ('<div class="q-readonly" role="note"' +
++       ' aria-label="Packet record ' + esc(wid) + ', not a conversation">');
++  const openEnd = canonical ? "</button>" : "</div>";
++  const roBadge = canonical ? ""
++    : '<span class="q-ro-badge" title="A clearance packet shown for visibility. ' +
++      'It is not a conversation and cannot receive messages.">packet record</span>';
    return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
 -    '" data-thread="' + esc(it.thread_id || "") +
-+    (ambiguous ? " q-ambiguous" : "") + '"' +
-+    ' data-sig="' + esc(queueCardSignature(it)) + '"' +
-+    ' data-thread="' + esc(it.thread_id || "") +
-     '" data-work-item="' + esc(it.work_item_id || "") + '">' +
+-    '" data-work-item="' + esc(it.work_item_id || "") + '">' +
 -    '<div class="q-title">' + title + "</div>" +
 -    '<div class="q-meta">' + bits.join("") + opFlag + "</div>" +
-+    '<button type="button" class="q-open" ' +
-+    'aria-pressed="' + (selected ? "true" : "false") + '"' +
-+    ' aria-label="Open work item ' + esc(it.work_item_id || "") +
-+    (execLabel ? " (executor " + esc(execLabel) + ")" : "") + '"' +
-+    ' data-work-item="' + esc(it.work_item_id || "") + '">' +
-+    '<span class="q-title">' + title + "</span>" +
++    (ambiguous ? " q-ambiguous" : "") + (canonical ? "" : " q-noncanonical") + '"' +
++    ' data-sig="' + esc(queueCardSignature(it)) + '"' +
++    ' data-canonical="' + (canonical ? "true" : "false") + '"' +
++    ' data-thread="' + esc(it.thread_id || "") +
++    '" data-work-item="' + esc(wid) + '">' +
++    openStart +
++    '<span class="q-title">' + title + "</span>" + roBadge +
 +    // A button's content model is phrasing content, so the meta strip is a
 +    // span laid out as a block rather than a div inside interactive markup.
 +    '<span class="q-meta">' + bits.join("") + opFlag +
@@ -578,11 +612,11 @@ index dd2d10c..cac630a 100644
 +      esc(phaseLabel) + "</span>" : "") +
 +    (execLabel ? '<span class="q-exec mono" title="executor state, derived from ' +
 +      'runner_state only">Executor ' + esc(execLabel) + "</span>" : "") +
-+    "</span></button>" + ids + warn +
++    "</span>" + openEnd + ids + warn +
      "</div>";
  }
  
-@@ -1117,6 +1292,108 @@ function attentionCounts(items) {
+@@ -1117,6 +1325,108 @@ function attentionCounts(items) {
    return c;
  }
  
@@ -608,7 +642,7 @@ index dd2d10c..cac630a 100644
 +  if (!key) return;
 +  let btn = null;
 +  try {
-+    btn = el.querySelector('.q-open[data-work-item="' + cssEscape(key) + '"]');
++    btn = el.querySelector('.q-open[data-work-item="' + cssAttrValue(key) + '"]');
 +  } catch (e) { btn = null; }
 +  if (btn) { btn.focus(); return; }
 +  const first = el.querySelector(".q-open");
@@ -646,7 +680,7 @@ index dd2d10c..cac630a 100644
 +  order.forEach((first) => {
 +    const g = first.group;
 +    seen[g] = true;
-+    let groupEl = el.querySelector('.q-group[data-group="' + cssEscape(g) + '"]');
++    let groupEl = el.querySelector('.q-group[data-group="' + cssAttrValue(g) + '"]');
 +    if (!groupEl) {
 +      groupEl = document.createElement("div");
 +      groupEl.className = "q-group";
@@ -691,7 +725,7 @@ index dd2d10c..cac630a 100644
  function renderQueue() {
    const el = document.getElementById("queue-groups");
    if (!el) return;
-@@ -1124,21 +1401,44 @@ function renderQueue() {
+@@ -1124,21 +1434,44 @@ function renderQueue() {
    const rows = filterSortQueue(lastWorkItems, queueFilterMode, queueSearch);
    syncFilterChips();
    if (!rows.length) {
@@ -747,7 +781,7 @@ index dd2d10c..cac630a 100644
  }
  
  function syncFilterChips() {
-@@ -1290,23 +1590,650 @@ function openAttention() {
+@@ -1290,23 +1623,650 @@ function openAttention() {
    }
  }
  
@@ -890,18 +924,18 @@ index dd2d10c..cac630a 100644
 +// are disambiguated and the shared-thread condition is surfaced as an integrity
 +// warning instead.
 +
-+// ONE escaping mechanism for every dynamic selector value. CSS.escape is not
-+// universally available, and an identifier carrying a quote, backslash, bracket
-+// or space would otherwise break the selector or silently change its meaning --
-+// which in a focus or reconciliation contract degrades exactly when it matters.
-+function cssEscape(value) {
++// ONE escaping mechanism for every dynamic value interpolated into a
++// selector. Every such value in this file sits inside a QUOTED ATTRIBUTE
++// selector -- [data-work-item="..."] and friends -- so the correct
++// operation is CSS STRING-LITERAL escaping, not identifier escaping.
++// CSS.escape is deliberately NOT used here: it escapes identifiers, and
++// its output does not round-trip inside a quoted string, so a value
++// containing a quote, a backslash or a space would fail to match the very
++// node it names. Within a CSS string only the backslash and the quote
++// character itself need escaping.
++function cssAttrValue(value) {
 +  const v = String(value === null || value === undefined ? "" : value);
-+  if (typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function") {
-+    return CSS.escape(v);
-+  }
-+  // Conservative fallback: escape everything outside the identifier-safe set
-+  // rather than guessing which characters this engine treats as significant.
-+  return v.replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
++  return v.replace(/[\\"]/g, (c) => "\\" + c);
 +}
 +
 +// --------------------------------------------------------------------------
@@ -1397,11 +1431,11 @@ index dd2d10c..cac630a 100644
    try {
 -    const sel = '[data-message-id="' +
 -      (window.CSS && CSS.escape ? CSS.escape(messageId) : messageId) + '"]';
-+    const sel = '[data-message-id="' + cssEscape(messageId) + '"]';
++    const sel = '[data-message-id="' + cssAttrValue(messageId) + '"]';
      const node = document.querySelector(sel);
      if (node) {
        node.classList.add("msg-highlight");
-@@ -1317,20 +2244,47 @@ function highlightMessage(messageId) {
+@@ -1317,27 +2277,61 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -1453,10 +1487,25 @@ index dd2d10c..cac630a 100644
      const data = await getJSON("/api/work-items");
      lastWorkItems = data.work_items || [];
 +    workItemsLoaded = true;   // a SUCCESSFUL response, even when it is empty
++    queueConfirmed = true;    // and it is CURRENT as of this response
      try {
        const cd = await getJSON("/api/review-councils");
        lastQueueCouncils = cd.review_councils || [];
-@@ -1398,7 +2352,7 @@ async function loadHistory() {
+     } catch (e2) { /* councils optional for queue hints */ }
+     renderQueue();
+   } catch (e) {
+-    // Leave the prior content in place on a transient fetch error.
++    // Leave the prior content on screen so the operator is not blanked out, but
++    // withdraw its authority to authorise a send: an unrefreshed snapshot is
++    // not evidence that the destination is still live.
++    queueConfirmed = false;
++    showRestoreStatus("The work queue could not be refreshed, so destinations " +
++                      "cannot be confirmed. Sending is paused until it reloads.",
++                      true);
+   }
+ }
+ 
+@@ -1398,7 +2392,7 @@ async function loadHistory() {
    lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
    const body = document.getElementById("ledger-body");
    if (!lastLedgerRows.length) {
@@ -1465,7 +1514,7 @@ index dd2d10c..cac630a 100644
      return;
    }
    body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
-@@ -1406,12 +2360,31 @@ async function loadHistory() {
+@@ -1406,12 +2400,31 @@ async function loadHistory() {
      '" data-ledger-index="' + i + '">' +
      "<td>" + esc(shortTime(row.at)) + "</td>" +
      "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
@@ -1498,7 +1547,7 @@ index dd2d10c..cac630a 100644
  function openLedgerDetail(index) {
    const row = lastLedgerRows[index];
    if (!row) return;
-@@ -1837,7 +2810,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2850,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -1508,7 +1557,7 @@ index dd2d10c..cac630a 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +3109,27 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +3149,27 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -1536,7 +1585,7 @@ index dd2d10c..cac630a 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2783,12 +3778,23 @@ function toggleToolLog() {
+@@ -2783,12 +3818,23 @@ function toggleToolLog() {
    if (footer) footer.hidden = !footer.hidden;
  }
  
@@ -1560,7 +1609,7 @@ index dd2d10c..cac630a 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2869,11 +3875,18 @@ function wire() {
+@@ -2869,11 +3915,18 @@ function wire() {
  
    // Work queue: clicking a row selects that task everywhere.
    document.getElementById("queue-groups").addEventListener("click", (e) => {
@@ -1584,7 +1633,7 @@ index dd2d10c..cac630a 100644
    });
  
    // Context-aware task actions are READ-ONLY navigation only: they switch view
-@@ -2886,6 +3899,10 @@ function wire() {
+@@ -2886,6 +3939,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -1595,7 +1644,7 @@ index dd2d10c..cac630a 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +4014,19 @@ function wire() {
+@@ -2997,6 +4054,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -1708,10 +1757,10 @@ index 1a5fd93..57b8bd6 100644
          </div>
          <div class="ledger-detail" id="ledger-detail" hidden>
 diff --git a/apps/control-plane/static/style.css b/apps/control-plane/static/style.css
-index ac13c95..3184606 100644
+index ac13c95..8fa0bfb 100644
 --- a/apps/control-plane/static/style.css
 +++ b/apps/control-plane/static/style.css
-@@ -1047,3 +1047,157 @@ body.history-open .mission { display: none !important; }
+@@ -1047,3 +1047,167 @@ body.history-open .mission { display: none !important; }
  .activity-details[open] summary::before { content: "<U+25BE> "; }
  .activity-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray); white-space: nowrap; }
  .activity-log { margin: 0.35rem 0 0.2rem; font-family: ui-monospace, monospace; font-size: 0.74rem; white-space: pre-wrap; max-height: 5.5rem; overflow-y: auto; }
@@ -1800,8 +1849,8 @@ index ac13c95..3184606 100644
 +.session-rail { display: flex; flex-direction: column; gap: .6rem; }
 +
 +/* Item 7: queue rows are real controls, so they need a visible focus ring. */
-+.q-row[role="button"] { cursor: pointer; }
-+.q-row[role="button"]:focus-visible { outline: 2px solid #7aa2ff; outline-offset: 2px; }
++/* Queue rows are plain containers; the primary control is .q-open, which
++   carries the cursor and focus ring. The old role="button" rules are gone. */
 +.q-exec { font-size: .68rem; opacity: .65; letter-spacing: .02em; }
 +
 +/* Round-2 council corrections. */
@@ -1869,12 +1918,22 @@ index ac13c95..3184606 100644
 +/* .q-meta is a span (phrasing content, so it may sit inside the button) but
 +   still lays out as a row. */
 +.q-open .q-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
++
++/* A non-canonical entry (today only a clearance-packet projection) is shown for
++   visibility but is READ-ONLY: no activation, no navigation, no destination. */
++.q-row.q-noncanonical { opacity: .92; border-left: 3px dashed var(--line); }
++.q-readonly { display: block; cursor: default; }
++.q-ro-badge {
++  margin-left: 0.4rem; padding: 0 0.35rem; border-radius: 999px;
++  font-size: 0.6rem; font-weight: 700; letter-spacing: 0.03em;
++  color: var(--gray); border: 1px dotted var(--line); cursor: help;
++}
 diff --git a/tests/dom/mini_dom.mjs b/tests/dom/mini_dom.mjs
 new file mode 100644
-index 0000000..dd736c6
+index 0000000..d1f8ab4
 --- /dev/null
 +++ b/tests/dom/mini_dom.mjs
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,399 @@
 +/*
 + * A small but REAL DOM: parsing, tree, selectors, focus and event propagation.
 + *
@@ -2162,8 +2221,26 @@ index 0000000..dd736c6
 +  return String(sel).split(",").some((part) => matchCompoundChain(el, part.trim()));
 +}
 +
++// Whitespace-aware compound splitter that respects quoted attribute values.
++function splitCompounds(sel) {
++  const out = [];
++  let buf = "", quote = null, esc = false;
++  for (const ch of String(sel)) {
++    if (esc) { buf += ch; esc = false; continue; }
++    if (ch === "\\") { buf += ch; esc = true; continue; }
++    if (quote) { buf += ch; if (ch === quote) quote = null; continue; }
++    if (ch === '"' || ch === "'") { quote = ch; buf += ch; continue; }
++    if (/\s/.test(ch)) { if (buf) { out.push(buf); buf = ""; } continue; }
++    buf += ch;
++  }
++  if (buf) out.push(buf);
++  return out;
++}
++
 +function matchCompoundChain(el, sel) {
-+  const parts = sel.split(/\s+/).filter(Boolean);
++  // Split on descendant combinators, but NOT on whitespace inside a quoted
++  // attribute value: [data-x="a b"] is one compound, not two.
++  const parts = splitCompounds(sel);
 +  if (!parts.length) return false;
 +  if (!matchCompound(el, parts[parts.length - 1])) return false;
 +  let n = el.parentNode;
@@ -2179,12 +2256,19 @@ index 0000000..dd736c6
 +}
 +
 +function matchCompound(el, comp) {
-+  const re = /(^|\.|#)([\w-]+)|\[([\w-]+)(?:\s*=\s*"([^"]*)")?\]/g;
++  // Attribute values may contain BACKSLASH-ESCAPED characters, which is how
++  // a quote or backslash is carried inside a CSS string literal. Matching
++  // must unescape them, or a correctly escaped selector would fail here
++  // and the harness would report a false negative.
++  const re = /(^|\.|#)([\w-]+)|\[([\w-]+)(?:\s*=\s*"((?:[^"\\]|\\.)*)")?\]/g;
 +  let m, ok = true, any = false;
 +  while ((m = re.exec(comp)) !== null) {
 +    any = true;
 +    if (m[3] !== undefined) {
-+      if (m[4] !== undefined) { if (el.getAttribute(m[3]) !== m[4]) ok = false; }
++      if (m[4] !== undefined) {
++        const want = m[4].replace(/\\(.)/g, "$1");   // unescape the literal
++        if (el.getAttribute(m[3]) !== want) ok = false;
++      }
 +      else if (!el.hasAttribute(m[3])) ok = false;
 +    } else if (m[1] === ".") {
 +      if (!el.classList.contains(m[2])) ok = false;
@@ -2924,10 +3008,10 @@ index 0000000..a7008eb
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/dom/wired_paths.mjs b/tests/dom/wired_paths.mjs
 new file mode 100644
-index 0000000..d086e71
+index 0000000..5ada594
 --- /dev/null
 +++ b/tests/dom/wired_paths.mjs
-@@ -0,0 +1,753 @@
+@@ -0,0 +1,889 @@
 +/*
 + * Executable coverage through the REAL wired event paths.
 + *
@@ -3074,7 +3158,9 @@ index 0000000..d086e71
 +];
 +
 +function seed(ctx, items, env) {
-+  ev(ctx, "workItemsLoaded = true; lastWorkItems = " + JSON.stringify(items || ITEMS) + ";");
++  // A successful refresh sets BOTH: the snapshot and its confirmation.
++  ev(ctx, "workItemsLoaded = true; queueConfirmed = true; lastWorkItems = " +
++          JSON.stringify(items || ITEMS) + ";");
 +  // Keep the served payload in step, or the next poll reverts the seeded state.
 +  if (env) env.servedItems = items || ITEMS;
 +}
@@ -3664,7 +3750,7 @@ index 0000000..d086e71
 +  const ctx = loadApp(env);
 +  const hostile = ['a"b', "a\\b", "a]b", "a b", "a.b", "a#b", "a:b"];
 +  hostile.forEach((v) => {
-+    const out = ev(ctx, "cssEscape(" + JSON.stringify(v) + ")");
++    const out = ev(ctx, "cssAttrValue(" + JSON.stringify(v) + ")");
 +    ok(typeof out === "string" && out.length >= v.length,
 +       "cssEscape returns an escaped string for " + JSON.stringify(v));
 +    // The escaped value must be usable in a selector without throwing.
@@ -3675,18 +3761,152 @@ index 0000000..d086e71
 +  });
 +  // Escaping must be applied, not merely available.
 +  const src = fs.readFileSync(APP, "utf8");
-+  ok(src.indexOf("CSS.escape ? CSS.escape(") === -1,
-+     "no inline conditional escaping remains; all values go through cssEscape");
++  // Ignore comment lines: the code explains WHY CSS.escape is wrong here.
++  const codeOnly = src.split("\n").filter((l) => l.trim().indexOf("//") !== 0).join("\n");
++  ok(codeOnly.indexOf("CSS.escape") === -1,
++     "identifier escaping is not used for quoted attribute selectors");
++}
++
++// ---------------------------------------------------------------------------
++// 7. A FAILED QUEUE REFRESH withdraws send authority. A snapshot that merely
++//    loaded once is not evidence the destination is still live.
++// ---------------------------------------------------------------------------
++{
++  const { env, ctx } = sendEnv("");
++  ctx.wire();
++  ctx.renderQueue();
++  const groups = env.doc.getElementById("queue-groups");
++  groups.querySelector('.q-row[data-work-item="message:msg-alpha"] .q-open')
++    .dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha", "a live item is selected");
++
++  const before = await attemptSend(ctx, env, "BASELINE");
++  eq(before.posts, 1, "sending works while the queue is confirmed");
++
++  // The refresh now FAILS. The snapshot and the selection are untouched.
++  ev(ctx, "queueConfirmed = false;");
++  ok(ev(ctx, "lastWorkItems.length") > 0, "the stale snapshot is still present");
++  ok(ev(ctx, "workItemsLoaded") === true, "the queue still counts as loaded");
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha", "the selection survives");
++
++  const refused = await attemptSend(ctx, env, "MUST NOT SEND");
++  eq(refused.posts, 0, "a stale, unconfirmed queue emits NO request");
++  ok(refused.draft.length > 0, "the draft is preserved");
++  ok(refused.error.indexOf("not currently confirmed") !== -1,
++     "the refusal explains that the queue is unconfirmed");
++  eq(refused.settledLabel, "Send", "the button returns to Send");
++  ok(!refused.settledDisabled, "the button is re-enabled");
++
++  // RECOVERY: a successful refresh re-confirms and sending resumes.
++  seed(ctx, ITEMS, env);
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
++  const recovered = await attemptSend(ctx, env, "NOW CONFIRMED");
++  eq(recovered.posts, 1, "sending resumes after a successful refresh re-confirms");
++}
++
++// 7b. A real refreshWorkItems FAILURE marks the queue unconfirmed.
++{
++  const env = buildEnv({ responder: () => { throw new Error("network down"); } });
++  const ctx = loadApp(env);
++  seed(ctx, ITEMS, env);
++  ok(ev(ctx, "queueConfirmed") === true, "confirmed after seeding");
++  env.failAll = true;
++  // Force the failure path through the real function.
++  ctx.fetch = () => Promise.reject(new Error("network down"));
++  await ctx.refreshWorkItems();
++  ok(ev(ctx, "queueConfirmed") === false,
++     "a failed refresh withdraws queue confirmation");
++  ok(ev(ctx, "lastWorkItems.length") > 0,
++     "the previous content stays on screen rather than blanking the operator");
++}
++
++// ---------------------------------------------------------------------------
++// 8. NON-CANONICAL ENTRIES render READ-ONLY: visible, never activatable.
++// ---------------------------------------------------------------------------
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  const mixed = [
++    { work_item_id: "message:msg-real", thread_id: "thr-real", title: "Real work",
++      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council" },
++    { work_item_id: "in_progress:session-ux-cta-20260725", thread_id: null,
++      title: "CTA packet", presentation_state: "waiting_on_claude", status: "open",
++      runner_state: "unknown" },
++    { work_item_id: "totally-malformed-but-truthy", thread_id: "thr-x",
++      title: "Malformed", presentation_state: "blocked", status: "planning",
++      runner_state: "waiting_on_council" },
++  ];
++  seed(ctx, mixed, env);
++  ctx.wire();
++  ctx.renderQueue();
++  const groups = env.doc.getElementById("queue-groups");
++
++  // All three remain VISIBLE: hiding real durable records is not the fix.
++  eq(groups.querySelectorAll(".q-row[data-work-item]").length, 3,
++     "every durable record stays visible, canonical or not");
++
++  // Only the canonical one is activatable.
++  eq(groups.querySelectorAll(".q-open").length, 1,
++     "only a canonical message work item gets an activation control");
++  const proj = groups.querySelector('.q-row[data-work-item="in_progress:session-ux-cta-20260725"]');
++  eq(proj.getAttribute("data-canonical"), "false", "the projection is marked non-canonical");
++  ok(!proj.querySelector(".q-open"), "the projection has NO activation control");
++  ok(!!proj.querySelector(".q-readonly"), "the projection renders read-only");
++  ok(!!proj.querySelector(".q-ro-badge"), "the projection is labelled as a packet record");
++
++  const mal = groups.querySelector('.q-row[data-work-item="totally-malformed-but-truthy"]');
++  eq(mal.getAttribute("data-canonical"), "false", "a truthy non-canonical id is non-canonical");
++  ok(!mal.querySelector(".q-open"), "a malformed record has NO activation control");
++
++  // Clicking a read-only row navigates nowhere.
++  ev(ctx, "selectedWorkItemId = null;");
++  proj.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), null, "clicking a packet projection does not navigate");
++  mal.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), null, "clicking a malformed record does not navigate");
++
++  // The canonical one still works.
++  groups.querySelector(".q-open").dispatchEvent(
++    new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-real",
++     "the canonical record is still activatable");
++
++  // aria-current, not aria-pressed: this navigates, it does not toggle.
++  const btn = groups.querySelector(".q-open");
++  ok(btn.hasAttribute("aria-current"), "the control uses aria-current");
++  ok(!btn.hasAttribute("aria-pressed"),
++     "it does not advertise a toggle-button contract");
++}
++
++// 8b. POSITIVE selector-match proof for escaped values, not merely no-throw.
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  const host = env.doc.createElement("div");
++  env.doc.body.appendChild(host);
++  const hostile = ['a"b', "a\\b", "a]b", "a b", "a.b", "a#b", "a:b", "a[b"];
++  hostile.forEach((v, i) => {
++    const el = env.doc.createElement("span");
++    el.setAttribute("data-probe", v);
++    el.setAttribute("data-idx", String(i));
++    host.appendChild(el);
++    const escd = ev(ctx, "cssAttrValue(" + JSON.stringify(v) + ")");
++    let found = null;
++    try { found = host.querySelector('[data-probe="' + escd + '"]'); }
++    catch (e) { found = null; }
++    same(found, el, "an escaped value SELECTS THE INTENDED node for " + JSON.stringify(v));
++  });
 +}
 +
 +console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..3a3527f
+index 0000000..219f2c9
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,1449 @@
+@@ -0,0 +1,1547 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -4291,32 +4511,125 @@ index 0000000..3a3527f
 +
 +
 +class SelectorEscapingTest(unittest.TestCase):
-+    """Correction 3: one escaping mechanism, applied everywhere."""
++    """Correction 3: one escaping mechanism, correct for its actual context.
++
++    Every dynamic value in app.js is interpolated into a QUOTED ATTRIBUTE
++    selector, so the correct operation is CSS string-literal escaping, not
++    identifier escaping. CSS.escape is deliberately not used: its output does
++    not round-trip inside a quoted string, so a value containing a quote,
++    backslash or space would fail to match the very node it names. The
++    wired-path harness proves this positively by selecting the intended node.
++    """
 +
 +    def test_a_single_escaper_exists(self):
-+        self.assertIn("function cssEscape", APP)
-+        m = re.search(r"function cssEscape[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
-+        body = m.group(0)
-+        self.assertIn("CSS.escape", body)
-+        self.assertIn("replace(", body, "a fallback is required where CSS.escape is absent")
++        self.assertIn("function cssAttrValue", APP)
++        self.assertNotIn("function cssEscape", APP,
++                         "identifier escaping was wrong for this context")
 +
-+    def test_no_inline_conditional_escaping_remains(self):
-+        self.assertNotIn("CSS.escape ? CSS.escape(", APP,
-+                         "every dynamic value must go through cssEscape")
++    def test_identifier_escaping_is_not_used_in_code(self):
++        code = "\n".join(l for l in APP.split("\n")
++                          if not l.strip().startswith("//"))
++        self.assertNotIn("CSS.escape", code)
 +
 +    def test_every_dynamic_selector_is_escaped(self):
 +        for probe in ('.q-open[data-work-item="', '[data-message-id="',
 +                      '.q-group[data-group="'):
 +            i = APP.index(probe)
 +            window = APP[i:i + 160]
-+            self.assertIn("cssEscape(", window,
++            self.assertIn("cssAttrValue(", window,
 +                          "unescaped interpolation into selector " + probe)
 +
-+    def test_the_fallback_is_conservative(self):
-+        m = re.search(r"function cssEscape[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
-+        self.assertIn("a-zA-Z0-9_-", m.group(0),
-+                      "the fallback should escape everything outside the "
-+                      "identifier-safe set rather than guess")
++    def test_the_escaper_targets_string_literal_semantics(self):
++        m = re.search(r"function cssAttrValue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        # Inside a CSS string only the backslash and the quote need escaping.
++        self.assertIn("replace(", body)
++        self.assertIn(chr(92) + chr(92) + '"', body)
++
++
++class QueueFreshnessTest(unittest.TestCase):
++    """Council finding: a stale snapshot is not positive evidence.
++
++    liveQueueRecord looked up the last SUCCESSFUL snapshot, but a failed refresh
++    left that array in place with workItemsLoaded still true, so an unrefreshed
++    queue kept authorising sends.
++    """
++
++    def test_a_confirmation_flag_exists_and_is_separate_from_loaded(self):
++        self.assertIn("let queueConfirmed = false;", APP)
++        self.assertIn("let workItemsLoaded = false;", APP)
++
++    def test_a_successful_refresh_confirms_the_queue(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("queueConfirmed = true;", body)
++
++    def test_a_failed_refresh_withdraws_confirmation(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        catch = body.split("} catch (e) {")[1]
++        self.assertIn("queueConfirmed = false;", catch)
++        self.assertIn("showRestoreStatus", catch,
++                      "the operator must be told sending is paused")
++
++    def test_the_send_gate_requires_a_confirmed_queue(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        body = m.group(0)
++        self.assertIn("if (!queueConfirmed)", body)
++        self.assertIn("not currently confirmed", body)
++
++    def test_the_freshness_check_precedes_the_record_lookup(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        body = m.group(0)
++        self.assertLess(body.index("if (!queueConfirmed)"),
++                        body.index("liveQueueRecord(target.work_item_id)"),
++                        "an unconfirmed queue must refuse before any lookup")
++
++    def test_the_previous_content_is_not_blanked(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        catch = m.group(0).split("} catch (e) {")[1]
++        self.assertNotIn("lastWorkItems = []", catch,
++                         "the operator should not be blanked out on a "
++                         "transient failure")
++
++
++class ReadOnlyProjectionTest(unittest.TestCase):
++    """Council finding: non-canonical entries were reconciled as activatable
++    tiles even though they can never be destinations.
++
++    Policy, stated explicitly: a packet projection is REAL work the operator
++    must still see, so it is not hidden. It renders READ-ONLY, with no
++    activation control, so it can never be selected or navigated to.
++    """
++
++    def test_canonicality_is_decided_in_the_card(self):
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        self.assertIn("isCanonicalMessageWorkItem(wid)", body)
++        self.assertIn("data-canonical=", body)
++
++    def test_only_canonical_records_get_an_activation_control(self):
++        m = re.search(RE_CARD, APP)
++        body = m.group(0)
++        self.assertIn("canonical", body.split("const openStart")[1][:200])
++        self.assertIn("q-readonly", body)
++
++    def test_non_canonical_records_remain_visible(self):
++        """Hiding a durable record is never the fix."""
++        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertNotIn("isCanonicalMessageWorkItem", body,
++                         "renderQueue must not filter out non-canonical rows; "
++                         "they render read-only instead")
++
++    def test_the_projection_is_labelled(self):
++        m = re.search(RE_CARD, APP)
++        self.assertIn("packet record", m.group(0))
++        self.assertIn(".q-ro-badge", CSS)
++        self.assertIn(".q-noncanonical", CSS)
++
++    def test_stale_role_button_css_is_removed(self):
++        self.assertNotIn('.q-row[role="button"]', CSS)
 +
 +
 +class CanonicalIdentityTest(unittest.TestCase):
@@ -5078,7 +5391,12 @@ index 0000000..3a3527f
 +        m = re.search(RE_CARD, APP)
 +        body = m.group(0)
 +        self.assertIn('<button type="button" class="q-open"', body)
-+        self.assertIn("aria-pressed=", body)
++        # aria-current, not aria-pressed: activating this NAVIGATES, it does not
++        # toggle a state off again.
++        self.assertIn("aria-current=", body)
++        self.assertNotIn("aria-pressed=", body,
++                         "a navigation control must not advertise a toggle "
++                         "contract to assistive technology")
 +        self.assertNotIn('role="button" tabindex="0"', body,
 +                         "the row must not claim button semantics itself")
 +        self.assertIn("data-sig=", body,

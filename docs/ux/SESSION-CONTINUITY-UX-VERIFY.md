@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   2dba18ed02c252cb367497fd08d29dd9611649a1
+HEAD (bytes under review):   3c1fb45839ba06c106f8cc741695ce78a88ceddc
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -16,6 +16,57 @@ message:msg-20260725T142257787771 and thread thr-20260725T142257787771),
 which postdates the terminal result of the previous verify council by
 seven hours.
 
+THE TWO CORRECTIONS IN THIS ROUND (newest work, scrutinise first)
+----------------------------------------------------------------------
+1. QUEUE FOCUS SURVIVES POLLING. renderQueue rewrote innerHTML on every
+   poll, roughly every two seconds, destroying the focused control before
+   a human could press a key. MEASURED in the running console: focus held
+   at 0, 200, 600 and 1200 ms and the node was gone by 2500 ms, so
+   keyboard operation of the queue was impossible.
+
+   Now a no-change short circuit compares a rendered signature and returns
+   WITHOUT touching the DOM, which is the dominant polling case. When
+   something did change, reconcileQueue patches by canonical work-item key
+   and leaves an unchanged tile entirely alone, so it keeps its DOM
+   identity and its focus. Focus is captured before reconciliation and
+   restored after; a legitimately removed item moves focus to a remaining
+   tile, then the container, never the body. No stale item is retained
+   merely to preserve focus.
+
+   RE-MEASURED after the fix: focus held for the full 7 seconds across
+   multiple polling cycles, on the same node.
+
+2. NATIVE KEYBOARD ACTIVATION. The Space keydown handler is REMOVED, not
+   adjusted. On a focused button Space default action IS the activation, so
+   preventDefault suppressed the very path the control exists to provide.
+   There is now NO queue key handler at all: the native button activates on
+   Enter and Space and fires exactly one click, which the delegated listener
+   turns into one canonical navigation.
+
+3. COVERAGE NOW RUNS THE REAL WIRED PATHS. The previous harness called
+   helpers directly, which a prior round correctly said proves the helper
+   and not the wiring. tests/dom/mini_dom.mjs implements a small but real
+   DOM: markup parsing, tree, selector subset, focus, capture/target/bubble
+   propagation, and native button Enter/Space activation modelled as a
+   DEFAULT that preventDefault can suppress, so the harness can actually
+   detect the regression it exists to catch. tests/dom/wired_paths.mjs
+   installs the real wire(), renders real tiles and dispatches genuine
+   events: 49 checks covering delegated click, Enter, Space,
+   exactly-one-activation, Copy not navigating, focus and node identity
+   across polling, predictable focus movement on removal, and the real
+   send() refusing through all four destination-integrity branches with
+   zero requests and the draft kept.
+
+   STATED HONESTLY: real-browser Space activation could NOT be verified in
+   this environment. Instrumentation showed the tooling discrete key events
+   never reach the page (zero keydown events observed) while focus was
+   correctly held, so the measurement is UNAVAILABLE rather than negative.
+   Proven: focus retention in the real browser, and the activation contract
+   in the harness, with no handler remaining that could suppress the
+   default.
+
+EARLIER WORK IN THIS SAME DIFF (reviewed in prior councils)
+----------------------------------------------------------------------
 THE INVESTIGATION THAT CHANGED THE FIX (please scrutinise)
 ----------------------------------------------------------------------
 The operator reported duplicate queue tiles and asked for canonical
@@ -89,9 +140,9 @@ artifacts across 1380 ledger rows.
 
 TESTS (counts measured by running them, not typed)
 ----------------------------------------------------------------------
-  focused static   145 tests  (OK)
+  focused static   159 tests  (OK)
   runtime          109 checks (PASS)  tests/dom/session_ux_runtime.mjs
-  full suite       1349 tests  (OK, skipped=1)
+  full suite       1366 tests  (OK, skipped=1)
 
 The runtime harness executes the real app.js in a Node vm against a
 controllable DOM stub and adds NO dependency: every import is a Node
@@ -104,22 +155,28 @@ evidence rather than automated coverage.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       170924  536f119dddfe5279df69b62fe61d80d1f33d4cd2ac05ece954d7922d751b82bb
+  apps/control-plane/static/app.js                       175180  5fdddd69f5fcf7b4bb2c9f45edfb66af7ccc3b7144fd8aa3c5fe072a23a49296
   apps/control-plane/static/index.html                    22393  86b4ffbf452f29a46c2c7c9877a3daadfdf29b5bc3af4118bb40b55a993b02f4
   apps/control-plane/static/style.css                     54468  b4791a3f0de15bc8c9714a342a4ee2f33f26c0ece1bb85e0e0b87183ebbe499f
+  tests/dom/mini_dom.mjs                                  14376  b3b489e5368f4262df8a26c557a319c9cc58f711abc4482dad97b594e42c5752
   tests/dom/session_ux_runtime.mjs                        31834  e5085e168f511380372b6c7420de37c8b4d9bee5edb8947c6bde0d30d9f05894
-  tests/test_session_continuity_ux.py                     56947  6b71b25839a64a1f21f21716d0729104436b2f140b88bec61c1e8756bc8de466
+  tests/dom/wired_paths.mjs                               18522  a518ee9b25d77328907b04553d9d483b0484f0f9b470659a88fb77a3ee1c9d8c
+  tests/test_session_continuity_ux.py                     63922  bd7b92741867c255de93511be18188c2b613a2ab8f1c01ca85c3f2c7b538ea7d
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
+  tests/test_session_ux_wired.py                           2358  3c8647d059510f8e7c8d0207f07ff842fd962ac5f06f8fa659762af272ade56d
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     |  881 +++++++++++++++++++++++-
+ apps/control-plane/static/app.js     | 1000 ++++++++++++++++++++++++-
  apps/control-plane/static/index.html |   49 +-
- apps/control-plane/static/style.css  |  150 +++++
- tests/dom/session_ux_runtime.mjs     |  667 +++++++++++++++++++
- tests/test_session_continuity_ux.py  | 1220 ++++++++++++++++++++++++++++++++++
- tests/test_session_ux_runtime.py     |   40 ++
- 6 files changed, 2971 insertions(+), 36 deletions(-)
+ apps/control-plane/static/style.css  |  150 ++++
+ tests/dom/mini_dom.mjs               |  374 ++++++++++
+ tests/dom/session_ux_runtime.mjs     |  667 +++++++++++++++++
+ tests/dom/wired_paths.mjs            |  441 +++++++++++
+ tests/test_session_continuity_ux.py  | 1351 ++++++++++++++++++++++++++++++++++
+ tests/test_session_ux_runtime.py     |   40 +
+ tests/test_session_ux_wired.py       |   55 ++
+ 9 files changed, 4080 insertions(+), 47 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -256,7 +313,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..c54248c 100644
+index dd2d10c..ee62cb5 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -422,7 +479,24 @@ index dd2d10c..c54248c 100644
  let lastQueueCouncils = [];
  let lastArchiveIndex = { archived: [], count: 0 };
  
-@@ -1061,11 +1160,65 @@ function queueCard(it) {
+@@ -1045,6 +1144,16 @@ function actionsForState(pstate, canonical) {
+   }
+ }
+ 
++// Everything queueCard renders from, so an unchanged item produces an unchanged
++// signature and its node is never replaced.
++function queueCardSignature(it) {
++  return [it.work_item_id, it.thread_id, it.presentation_state, it.status,
++          it.runner_state, it.claimed_by, it.title || it.summary,
++          it.last_activity_at, it.last_activity_event,
++          it.work_item_id === selectedWorkItemId ? "sel" : "",
++          sharesThreadWithOtherWorkItems(it, lastWorkItems) ? "amb" : ""].join("\u0001");
++}
++
+ function queueCard(it) {
+   const ps = it.presentation_state || "waiting_on_claude";
+   const selected = it.work_item_id && it.work_item_id === selectedWorkItemId;
+@@ -1061,11 +1170,66 @@ function queueCard(it) {
      ? '<span class="q-opflag" title="operator action required"><U+25C9> operator</span>' : "";
    // Technical ids ride on data attributes only; the primary card stays readable.
    const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
@@ -469,6 +543,7 @@ index dd2d10c..c54248c 100644
    return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
 -    '" data-thread="' + esc(it.thread_id || "") +
 +    (ambiguous ? " q-ambiguous" : "") + '"' +
++    ' data-sig="' + esc(queueCardSignature(it)) + '"' +
 +    ' data-thread="' + esc(it.thread_id || "") +
      '" data-work-item="' + esc(it.work_item_id || "") + '">' +
 -    '<div class="q-title">' + title + "</div>" +
@@ -491,7 +566,134 @@ index dd2d10c..c54248c 100644
      "</div>";
  }
  
-@@ -1290,17 +1443,603 @@ function openAttention() {
+@@ -1117,6 +1281,83 @@ function attentionCounts(items) {
+   return c;
+ }
+ 
++// The rendered signature of the queue as last written to the DOM. Polling
++// re-runs renderQueue roughly every two seconds; when nothing material changed,
++// rewriting innerHTML destroyed every node -- including the focused control --
++// which made keyboard operation of the queue impossible. The signature lets an
++// unchanged poll become a no-op.
++let lastQueueSignature = null;
++
++// The canonical work-item key of the currently focused queue control, if any.
++function focusedQueueKey() {
++  const a = document.activeElement;
++  const btn = a && a.closest ? a.closest(".q-open") : null;
++  return btn ? btn.getAttribute("data-work-item") : null;
++}
++
++// Put focus back on the SAME durable identity after a reconciliation that had
++// to replace nodes. If that identity is legitimately gone, move predictably to
++// the first remaining tile, then to the container, rather than dropping focus
++// to the document body.
++function restoreQueueFocus(key, el) {
++  if (!key) return;
++  let btn = null;
++  try {
++    btn = el.querySelector('.q-open[data-work-item="' +
++      (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
++  } catch (e) { btn = null; }
++  if (btn) { btn.focus(); return; }
++  const first = el.querySelector(".q-open");
++  if (first) { first.focus(); return; }
++  if (el.setAttribute) el.setAttribute("tabindex", "-1");
++  if (el.focus) el.focus();
++}
++
++// Keyed reconciliation. Tiles are matched by canonical work-item id, and a tile
++// whose rendered markup is unchanged is LEFT ENTIRELY ALONE, so it keeps its
++// DOM identity, its focus and its scroll position. Only genuinely changed,
++// added or removed tiles touch the DOM.
++function reconcileQueue(el, desired) {
++  const existing = {};
++  Array.from(el.querySelectorAll(".q-row[data-work-item]")).forEach((node) => {
++    existing[node.getAttribute("data-work-item")] = node;
++  });
++  const keep = {};
++  desired.forEach((d) => { keep[d.key] = true; });
++
++  // Anything no longer in the queue goes, and only then.
++  Object.keys(existing).forEach((k) => {
++    if (!keep[k] && existing[k].parentNode) existing[k].parentNode.removeChild(existing[k]);
++  });
++
++  let groupEl = null, curGroup = null;
++  desired.forEach((d) => {
++    if (d.group !== curGroup) {
++      curGroup = d.group;
++      groupEl = el.querySelector('.q-group[data-group="' + d.group + '"]');
++      if (!groupEl) {
++        groupEl = document.createElement("div");
++        groupEl.className = "q-group";
++        groupEl.setAttribute("data-group", d.group);
++        groupEl.innerHTML = '<div class="q-group-head">' + esc(d.groupLabel) + "</div>";
++        el.appendChild(groupEl);
++      }
++    }
++    const prev = existing[d.key];
++    if (prev && prev.getAttribute("data-sig") === d.sig) {
++      // UNCHANGED: reuse the node as-is. This is the case that preserves focus.
++      if (prev.parentNode !== groupEl) groupEl.appendChild(prev);
++      return;
++    }
++    const next = document.createElement("div");
++    next.innerHTML = d.html;
++    const node = next.firstElementChild || next.children[0];
++    if (!node) return;
++    if (prev && prev.parentNode) prev.parentNode.replaceChild(node, prev);
++    else groupEl.appendChild(node);
++  });
++}
++
+ function renderQueue() {
+   const el = document.getElementById("queue-groups");
+   if (!el) return;
+@@ -1124,21 +1365,31 @@ function renderQueue() {
+   const rows = filterSortQueue(lastWorkItems, queueFilterMode, queueSearch);
+   syncFilterChips();
+   if (!rows.length) {
++    const emptySig = "EMPTY";
++    if (lastQueueSignature === emptySig) return;
++    lastQueueSignature = emptySig;
+     el.innerHTML = '<p class="muted queue-empty">Nothing here in this view. Try the History / All filter.</p>';
+     return;
+   }
+-  let html = "", curState = null;
+-  rows.forEach((it) => {
+-    if (it.presentation_state !== curState) {
+-      if (curState !== null) html += "</div>";
+-      curState = it.presentation_state;
+-      html += '<div class="q-group"><div class="q-group-head">' +
+-        esc(PSTATE_LABEL[curState] || curState) + "</div>";
+-    }
+-    html += queueCard(it);
++  const desired = rows.map((it) => {
++    const html = queueCard(it);
++    return {
++      key: it.work_item_id || "",
++      group: it.presentation_state || "",
++      groupLabel: PSTATE_LABEL[it.presentation_state] || it.presentation_state || "",
++      sig: queueCardSignature(it),
++      html: html
++    };
+   });
+-  if (curState !== null) html += "</div>";
+-  el.innerHTML = html;
++  // NO-CHANGE SHORT CIRCUIT. The dominant polling case is "nothing changed",
++  // and it must not touch the DOM at all.
++  const signature = desired.map((d) => d.group + "|" + d.key + "|" + d.sig).join("\n");
++  if (signature === lastQueueSignature) return;
++  lastQueueSignature = signature;
++
++  const focusKey = focusedQueueKey();
++  reconcileQueue(el, desired);
++  if (focusKey) restoreQueueFocus(focusKey, el);
+ }
+ 
+ function syncFilterChips() {
+@@ -1290,17 +1541,602 @@ function openAttention() {
    }
  }
  
@@ -536,15 +738,14 @@ index dd2d10c..c54248c 100644
 +
 +// Keyboard activation for queue rows (Phase 1, item 7). Enter or Space opens
 +// the row exactly as a click does; the existing click handler is untouched.
-+// The primary control is a real <button>, so Enter and Space already activate
-+// it and fire click. This listener remains only to keep Space from scrolling
-+// the page while that button has focus; it never navigates on its own, which
-+// avoids a second, divergent activation path.
-+document.addEventListener("keydown", (e) => {
-+  if (e.key !== " ") return;
-+  const btn = e.target && e.target.closest && e.target.closest(".q-open");
-+  if (btn) e.preventDefault();
-+});
++// NO keyboard handler for queue tiles, deliberately. The primary control is a
++// real <button>, so the browser already activates it on Enter and on Space and
++// fires exactly one click, which the delegated queue listener turns into one
++// canonical navigation. An earlier version called preventDefault() on Space to
++// stop page scrolling; on a focused button Space's default action IS the
++// activation, so that suppressed the very keyboard path this control exists to
++// provide. Space does not scroll the page while a button holds focus, so there
++// is nothing to suppress and nothing to add.
 +
 +// --------------------------------------------------------------------------
 +// TRUTHFUL EXECUTION STATE (Phase 1, item 6)
@@ -1096,7 +1297,7 @@ index dd2d10c..c54248c 100644
  }
  
  function highlightMessage(messageId) {
-@@ -1317,20 +2056,47 @@ function highlightMessage(messageId) {
+@@ -1317,20 +2153,47 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -1151,7 +1352,7 @@ index dd2d10c..c54248c 100644
      try {
        const cd = await getJSON("/api/review-councils");
        lastQueueCouncils = cd.review_councils || [];
-@@ -1398,7 +2164,7 @@ async function loadHistory() {
+@@ -1398,7 +2261,7 @@ async function loadHistory() {
    lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
    const body = document.getElementById("ledger-body");
    if (!lastLedgerRows.length) {
@@ -1160,7 +1361,7 @@ index dd2d10c..c54248c 100644
      return;
    }
    body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
-@@ -1406,12 +2172,31 @@ async function loadHistory() {
+@@ -1406,12 +2269,31 @@ async function loadHistory() {
      '" data-ledger-index="' + i + '">' +
      "<td>" + esc(shortTime(row.at)) + "</td>" +
      "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
@@ -1193,7 +1394,7 @@ index dd2d10c..c54248c 100644
  function openLedgerDetail(index) {
    const row = lastLedgerRows[index];
    if (!row) return;
-@@ -1837,7 +2622,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2719,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -1203,7 +1404,7 @@ index dd2d10c..c54248c 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +2921,23 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +3018,23 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -1227,7 +1428,7 @@ index dd2d10c..c54248c 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2783,12 +3586,23 @@ function toggleToolLog() {
+@@ -2783,12 +3683,23 @@ function toggleToolLog() {
    if (footer) footer.hidden = !footer.hidden;
  }
  
@@ -1251,7 +1452,7 @@ index dd2d10c..c54248c 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2869,11 +3683,17 @@ function wire() {
+@@ -2869,11 +3780,17 @@ function wire() {
  
    // Work queue: clicking a row selects that task everywhere.
    document.getElementById("queue-groups").addEventListener("click", (e) => {
@@ -1271,7 +1472,7 @@ index dd2d10c..c54248c 100644
    });
  
    // Context-aware task actions are READ-ONLY navigation only: they switch view
-@@ -2886,6 +3706,10 @@ function wire() {
+@@ -2886,6 +3803,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -1282,7 +1483,7 @@ index dd2d10c..c54248c 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +3821,19 @@ function wire() {
+@@ -2997,6 +3918,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -1552,6 +1753,386 @@ index ac13c95..a734f49 100644
 +  border-radius: 6px;
 +}
 +.q-open[aria-pressed="true"] .q-title { font-weight: 700; }
+diff --git a/tests/dom/mini_dom.mjs b/tests/dom/mini_dom.mjs
+new file mode 100644
+index 0000000..dd736c6
+--- /dev/null
++++ b/tests/dom/mini_dom.mjs
+@@ -0,0 +1,374 @@
++/*
++ * A small but REAL DOM: parsing, tree, selectors, focus and event propagation.
++ *
++ * The previous harness called app.js functions directly. Both reviewers
++ * correctly said that proves the helpers, not the wired path -- a click on a
++ * rendered control reaching the delegated listener, Enter and Space activating
++ * a native button, and focus surviving a polling cycle are exactly the things
++ * direct calls cannot demonstrate. This module supplies enough real DOM
++ * behaviour to install wire() and dispatch genuine events.
++ *
++ * Dependency-free: Node builtins only, no package manifest, no browser driver.
++ *
++ * STATED LIMITATION: this is not a browser. It implements markup parsing, the
++ * element tree, a useful subset of CSS selectors, focus tracking, capture/target/
++ * bubble event propagation, and native <button> Enter/Space activation. It does
++ * NOT implement layout, painting, or real scrolling, so geometry-dependent
++ * behaviour is still proven only against supplied values.
++ */
++
++const VOID_TAGS = new Set(["br", "hr", "img", "input", "meta", "link"]);
++
++class ClassList {
++  constructor(el) { this.el = el; }
++  _set() {
++    const v = this.el.getAttribute("class") || "";
++    return new Set(v.split(/\s+/).filter(Boolean));
++  }
++  _write(s) { this.el.setAttribute("class", Array.from(s).join(" ")); }
++  add(c) { const s = this._set(); s.add(c); this._write(s); }
++  remove(c) { const s = this._set(); s.delete(c); this._write(s); }
++  toggle(c, on) { if (on === undefined ? !this.contains(c) : on) this.add(c); else this.remove(c); }
++  contains(c) { return this._set().has(c); }
++  get value() { return this.el.getAttribute("class") || ""; }
++}
++
++export class MiniEvent {
++  constructor(type, init) {
++    init = init || {};
++    this.type = type;
++    this.bubbles = init.bubbles !== false;
++    this.cancelable = init.cancelable !== false;
++    this.key = init.key;
++    this.code = init.code;
++    this.ctrlKey = !!init.ctrlKey;
++    this.metaKey = !!init.metaKey;
++    this.shiftKey = !!init.shiftKey;
++    this.defaultPrevented = false;
++    this.isTrusted = !!init.isTrusted;
++    this.target = null;
++    this.currentTarget = null;
++    this._stopped = false;
++  }
++  preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
++  stopPropagation() { this._stopped = true; }
++}
++
++export class MiniElement {
++  constructor(tag, doc) {
++    this.tagName = String(tag).toUpperCase();
++    this.ownerDocument = doc;
++    this.childNodes = [];
++    this.parentNode = null;
++    this._attrs = {};
++    this._listeners = {};
++    this._text = "";
++    this.scrollTop = 0;
++    this.scrollHeight = 0;
++    this.clientHeight = 0;
++    this.style = {};
++    this.value = "";
++    this.disabled = false;
++    this.checked = false;
++    this._overflowY = "visible";
++  }
++
++  // --- attributes ---------------------------------------------------------
++  setAttribute(k, v) { this._attrs[k] = String(v); }
++  getAttribute(k) { return Object.prototype.hasOwnProperty.call(this._attrs, k) ? this._attrs[k] : null; }
++  hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this._attrs, k); }
++  removeAttribute(k) { delete this._attrs[k]; }
++  get classList() { return new ClassList(this); }
++  get className() { return this.getAttribute("class") || ""; }
++  set className(v) { this.setAttribute("class", v); }
++  get id() { return this.getAttribute("id") || ""; }
++  set id(v) { this.setAttribute("id", v); }
++  get hidden() { return this.hasAttribute("hidden"); }
++  set hidden(v) { if (v) this.setAttribute("hidden", ""); else this.removeAttribute("hidden"); }
++  get tabIndex() {
++    if (this.hasAttribute("tabindex")) return parseInt(this.getAttribute("tabindex"), 10);
++    return (this.tagName === "BUTTON" || this.tagName === "A" ||
++            this.tagName === "INPUT" || this.tagName === "TEXTAREA" ||
++            this.tagName === "SELECT") ? 0 : -1;
++  }
++  set tabIndex(v) { this.setAttribute("tabindex", String(v)); }
++  get inert() { return this.hasAttribute("inert"); }
++  set inert(v) { if (v) this.setAttribute("inert", ""); else this.removeAttribute("inert"); }
++  get dataset() {
++    const out = {};
++    Object.keys(this._attrs).forEach((k) => {
++      if (k.indexOf("data-") === 0) out[k.slice(5).replace(/-([a-z])/g, (m, c) => c.toUpperCase())] = this._attrs[k];
++    });
++    return out;
++  }
++
++  // --- tree ---------------------------------------------------------------
++  get children() { return this.childNodes.filter((c) => c instanceof MiniElement); }
++  get firstElementChild() { return this.children[0] || null; }
++  get parentElement() { return this.parentNode instanceof MiniElement ? this.parentNode : null; }
++  appendChild(c) {
++    if (c.parentNode) c.parentNode.removeChild(c);
++    c.parentNode = this;
++    this.childNodes.push(c);
++    return c;
++  }
++  insertBefore(c, ref) {
++    if (c.parentNode) c.parentNode.removeChild(c);
++    c.parentNode = this;
++    const i = ref ? this.childNodes.indexOf(ref) : -1;
++    if (i < 0) this.childNodes.push(c); else this.childNodes.splice(i, 0, c);
++    return c;
++  }
++  removeChild(c) {
++    const i = this.childNodes.indexOf(c);
++    if (i >= 0) this.childNodes.splice(i, 1);
++    c.parentNode = null;
++    return c;
++  }
++  replaceChild(next, prev) {
++    const i = this.childNodes.indexOf(prev);
++    if (i < 0) return prev;
++    if (next.parentNode) next.parentNode.removeChild(next);
++    this.childNodes[i] = next;
++    next.parentNode = this;
++    prev.parentNode = null;
++    return prev;
++  }
++  remove() { if (this.parentNode) this.parentNode.removeChild(this); }
++  contains(n) {
++    while (n) { if (n === this) return true; n = n.parentNode; }
++    return false;
++  }
++
++  // --- content ------------------------------------------------------------
++  set innerHTML(html) {
++    this.childNodes = [];
++    parseInto(this, String(html), this.ownerDocument);
++  }
++  get innerHTML() { return this.childNodes.map(serialize).join(""); }
++  get outerHTML() { return serialize(this); }
++  set textContent(v) { this.childNodes = [{ nodeType: 3, data: String(v) }]; }
++  get textContent() { return collectText(this); }
++  get innerText() { return this.textContent; }
++
++  // --- selectors ----------------------------------------------------------
++  matches(sel) { return selectorMatches(this, sel); }
++  closest(sel) {
++    let n = this;
++    while (n) { if (n instanceof MiniElement && selectorMatches(n, sel)) return n; n = n.parentNode; }
++    return null;
++  }
++  querySelectorAll(sel) {
++    const out = [];
++    walk(this, (n) => { if (n !== this && selectorMatches(n, sel)) out.push(n); });
++    return out;
++  }
++  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
++
++  // --- events -------------------------------------------------------------
++  addEventListener(type, fn, opts) {
++    const capture = opts === true || (opts && opts.capture);
++    (this._listeners[type] = this._listeners[type] || []).push({ fn, capture: !!capture });
++  }
++  removeEventListener(type, fn) {
++    const l = this._listeners[type];
++    if (l) this._listeners[type] = l.filter((e) => e.fn !== fn);
++  }
++  dispatchEvent(ev) {
++    ev.target = ev.target || this;
++    const path = [];
++    let n = this;
++    while (n) { path.push(n); n = n.parentNode; }
++    // capture (root -> target)
++    for (let i = path.length - 1; i >= 0 && !ev._stopped; i--) fire(path[i], ev, true);
++    // bubble (target -> root)
++    if (ev.bubbles) {
++      for (let i = 0; i < path.length && !ev._stopped; i++) fire(path[i], ev, false);
++    } else if (!ev._stopped) {
++      fire(this, ev, false);
++    }
++    return !ev.defaultPrevented;
++  }
++
++  focus() {
++    const d = this.ownerDocument;
++    if (d) d.activeElement = this;
++  }
++  blur() {
++    const d = this.ownerDocument;
++    if (d && d.activeElement === this) d.activeElement = d.body;
++  }
++  click() {
++    this.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  }
++  scrollIntoView() {}
++  getBoundingClientRect() { return { width: 100, height: 20, top: 0, left: 0 }; }
++}
++
++function fire(node, ev, capture) {
++  const l = node._listeners && node._listeners[ev.type];
++  if (!l) return;
++  ev.currentTarget = node;
++  l.slice().forEach((entry) => {
++    if (!!entry.capture === !!capture) {
++      try { entry.fn.call(node, ev); } catch (e) { /* surfaced by assertions */ }
++    }
++  });
++}
++
++function walk(node, fn) {
++  (node.childNodes || []).forEach((c) => {
++    if (c instanceof MiniElement) { fn(c); walk(c, fn); }
++  });
++}
++
++function collectText(node) {
++  if (!(node instanceof MiniElement)) return node && node.nodeType === 3 ? node.data : "";
++  return (node.childNodes || []).map(collectText).join("");
++}
++
++function serialize(node) {
++  if (!(node instanceof MiniElement)) return node && node.nodeType === 3 ? node.data : "";
++  const attrs = Object.keys(node._attrs)
++    .map((k) => " " + k + '="' + node._attrs[k] + '"').join("");
++  const tag = node.tagName.toLowerCase();
++  if (VOID_TAGS.has(tag)) return "<" + tag + attrs + ">";
++  return "<" + tag + attrs + ">" + node.childNodes.map(serialize).join("") + "</" + tag + ">";
++}
++
++// --- markup parsing ---------------------------------------------------------
++const TAG_RE = /<(\/?)([a-zA-Z][\w-]*)((?:\s+[\w:-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*)\s*(\/?)>/g;
++const ATTR_RE = /([\w:-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
++
++function parseInto(root, html, doc) {
++  const stack = [root];
++  let last = 0;
++  TAG_RE.lastIndex = 0;
++  let m;
++  while ((m = TAG_RE.exec(html)) !== null) {
++    if (m.index > last) {
++      const text = html.slice(last, m.index);
++      if (text) stack[stack.length - 1].childNodes.push({ nodeType: 3, data: text });
++    }
++    last = TAG_RE.lastIndex;
++    const closing = m[1] === "/";
++    const tag = m[2].toLowerCase();
++    if (closing) {
++      for (let i = stack.length - 1; i > 0; i--) {
++        if (stack[i].tagName === tag.toUpperCase()) { stack.length = i; break; }
++      }
++      continue;
++    }
++    const el = new MiniElement(tag, doc);
++    ATTR_RE.lastIndex = 0;
++    let a;
++    while ((a = ATTR_RE.exec(m[3] || "")) !== null) {
++      if (!a[1]) continue;
++      el.setAttribute(a[1], a[2] !== undefined ? a[2] : (a[3] !== undefined ? a[3] : (a[4] !== undefined ? a[4] : "")));
++    }
++    const parent = stack[stack.length - 1];
++    el.parentNode = parent;
++    parent.childNodes.push(el);
++    if (!VOID_TAGS.has(tag) && m[4] !== "/") stack.push(el);
++  }
++  if (last < html.length) {
++    const text = html.slice(last);
++    if (text) stack[stack.length - 1].childNodes.push({ nodeType: 3, data: text });
++  }
++}
++
++// --- selector matching ------------------------------------------------------
++// Supports: tag, #id, .class, [attr], [attr="v"], and comma groups, plus a
++// single descendant combinator. Enough for every selector app.js uses.
++function selectorMatches(el, sel) {
++  if (!(el instanceof MiniElement)) return false;
++  return String(sel).split(",").some((part) => matchCompoundChain(el, part.trim()));
++}
++
++function matchCompoundChain(el, sel) {
++  const parts = sel.split(/\s+/).filter(Boolean);
++  if (!parts.length) return false;
++  if (!matchCompound(el, parts[parts.length - 1])) return false;
++  let n = el.parentNode;
++  for (let i = parts.length - 2; i >= 0; i--) {
++    let found = false;
++    while (n) {
++      if (n instanceof MiniElement && matchCompound(n, parts[i])) { found = true; n = n.parentNode; break; }
++      n = n.parentNode;
++    }
++    if (!found) return false;
++  }
++  return true;
++}
++
++function matchCompound(el, comp) {
++  const re = /(^|\.|#)([\w-]+)|\[([\w-]+)(?:\s*=\s*"([^"]*)")?\]/g;
++  let m, ok = true, any = false;
++  while ((m = re.exec(comp)) !== null) {
++    any = true;
++    if (m[3] !== undefined) {
++      if (m[4] !== undefined) { if (el.getAttribute(m[3]) !== m[4]) ok = false; }
++      else if (!el.hasAttribute(m[3])) ok = false;
++    } else if (m[1] === ".") {
++      if (!el.classList.contains(m[2])) ok = false;
++    } else if (m[1] === "#") {
++      if (el.getAttribute("id") !== m[2]) ok = false;
++    } else {
++      if (m[2] !== "*" && el.tagName !== m[2].toUpperCase()) ok = false;
++    }
++  }
++  return any && ok;
++}
++
++// --- document ---------------------------------------------------------------
++export function createDocument() {
++  const doc = {
++    createElement(tag) { return new MiniElement(tag, doc); },
++    createTextNode(t) { return { nodeType: 3, data: String(t) }; },
++    _listeners: {},
++    addEventListener(type, fn, opts) {
++      const capture = opts === true || (opts && opts.capture);
++      (doc._listeners[type] = doc._listeners[type] || []).push({ fn, capture: !!capture });
++    },
++    removeEventListener() {},
++    getElementById(id) { return doc.documentElement.querySelector('[id="' + id + '"]'); },
++    querySelector(sel) { return doc.documentElement.querySelector(sel); },
++    querySelectorAll(sel) { return doc.documentElement.querySelectorAll(sel); },
++  };
++  doc.documentElement = new MiniElement("html", doc);
++  doc.body = new MiniElement("body", doc);
++  doc.documentElement.appendChild(doc.body);
++  doc.activeElement = doc.body;
++  doc.scrollingElement = doc.documentElement;
++  // The document participates in propagation, so delegated listeners installed
++  // on `document` (which wire() uses) actually receive dispatched events.
++  doc.documentElement.parentNode = {
++    _listeners: doc._listeners,
++    parentNode: null,
++  };
++  return doc;
++}
++
++/*
++ * NATIVE BUTTON KEYBOARD ACTIVATION.
++ *
++ * A real browser activates a focused <button> on Enter and on Space and fires
++ * exactly one click. That default is what an over-eager preventDefault() can
++ * suppress, so the harness must model the default rather than assume it, or it
++ * could not detect the regression it exists to catch.
++ */
++export function pressKey(doc, key) {
++  const target = doc.activeElement;
++  if (!target) return { activated: false, defaultPrevented: false };
++  const code = key === " " ? "Space" : (key === "Enter" ? "Enter" : key);
++  const down = new MiniEvent("keydown", { key, code, bubbles: true, cancelable: true, isTrusted: true });
++  target.dispatchEvent(down);
++  const isButton = target.tagName === "BUTTON";
++  const activating = isButton && (key === "Enter" || key === " ");
++  // The default action runs ONLY if nothing called preventDefault on keydown.
++  if (activating && !down.defaultPrevented) {
++    target.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++    return { activated: true, defaultPrevented: false };
++  }
++  return { activated: false, defaultPrevented: down.defaultPrevented };
++}
 diff --git a/tests/dom/session_ux_runtime.mjs b/tests/dom/session_ux_runtime.mjs
 new file mode 100644
 index 0000000..a7008eb
@@ -2225,12 +2806,459 @@ index 0000000..a7008eb
 +// --------------------------------------------------------------------------
 +console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " runtime checks");
 +process.exit(failures === 0 ? 0 : 1);
+diff --git a/tests/dom/wired_paths.mjs b/tests/dom/wired_paths.mjs
+new file mode 100644
+index 0000000..077ef3d
+--- /dev/null
++++ b/tests/dom/wired_paths.mjs
+@@ -0,0 +1,441 @@
++/*
++ * Executable coverage through the REAL wired event paths.
++ *
++ * This installs wire(), renders real queue tiles from representative work-item
++ * data, and dispatches genuine events. It proves what direct function calls
++ * cannot: that a click on a rendered control reaches the delegated listener,
++ * that Enter and Space activate the native button, that focus survives a
++ * polling cycle, that Copy does not navigate, and that send() refuses through
++ * every destination-integrity branch without emitting a request.
++ *
++ * Dependency-free: Node builtins plus the local mini DOM.
++ */
++import fs from "node:fs";
++import path from "node:path";
++import vm from "node:vm";
++import { fileURLToPath } from "node:url";
++import { createDocument, MiniElement, MiniEvent, pressKey } from "./mini_dom.mjs";
++
++const HERE = path.dirname(fileURLToPath(import.meta.url));
++const APP = path.join(HERE, "..", "..", "apps", "control-plane", "static", "app.js");
++const HTML = path.join(HERE, "..", "..", "apps", "control-plane", "static", "index.html");
++
++let failures = 0, checks = 0;
++function ok(cond, label) {
++  checks += 1;
++  if (!cond) { failures += 1; console.error("FAIL: " + label); }
++}
++// Elements are circular structures, so identity comparisons use reference
++// equality rather than serialisation.
++function same(a, b, label) {
++  checks += 1;
++  if (a !== b) { failures += 1; console.error("FAIL: " + label + "  (nodes differ)"); }
++}
++function eq(a, b, label) {
++  ok(JSON.stringify(a) === JSON.stringify(b),
++     label + "  (got " + JSON.stringify(a) + ", want " + JSON.stringify(b) + ")");
++}
++
++// Element ids app.js wires or reads at boot. Built from index.html so the
++// harness cannot drift from the shipped markup.
++function idsFromMarkup() {
++  const html = fs.readFileSync(HTML, "utf8");
++  const ids = new Set();
++  const re = /id="([\w-]+)"/g;
++  let m;
++  while ((m = re.exec(html)) !== null) ids.add(m[1]);
++  return Array.from(ids);
++}
++
++function buildEnv(opts) {
++  opts = opts || {};
++  const doc = createDocument();
++  idsFromMarkup().forEach((id) => {
++    const tag = /input|search/.test(id) ? "input"
++      : (/send|btn|button|close|cancel|confirm/.test(id) ? "button"
++        : (/form/.test(id) ? "form" : "div"));
++    const el = doc.createElement(tag);
++    el.setAttribute("id", id);
++    doc.body.appendChild(el);
++  });
++  // A couple of elements app.js expects to be specific tags.
++  const ta = doc.createElement("textarea");
++  ta.setAttribute("id", "conv-input");
++  const old = doc.getElementById("conv-input");
++  if (old) old.parentNode.replaceChild(ta, old); else doc.body.appendChild(ta);
++
++  const posted = [];
++  const ctx = {
++    console,
++    document: doc,
++    location: { hash: opts.hash || "", pathname: "/", search: "", href: "http://x/" },
++    history: { replaceState() { ctx.location.hash = ""; } },
++    localStorage: {
++      _m: {},
++      getItem(k) { return k in this._m ? this._m[k] : null; },
++      setItem(k, v) { this._m[k] = String(v); },
++      removeItem(k) { delete this._m[k]; },
++    },
++    getComputedStyle(el) { return { overflowY: (el && el._overflowY) || "visible", textTransform: "none" }; },
++    MutationObserver: function () { this.observe = () => {}; this.disconnect = () => {}; },
++    HTMLElement: { prototype: { inert: true } },
++    setTimeout(fn) { return 0; },
++    setInterval() { return 0; },
++    clearTimeout() {},
++    CSS: { escape: (s) => String(s).replace(/["\\]/g, "\\$&") },
++    Node: MiniElement,
++    Event: MiniEvent,
++    KeyboardEvent: MiniEvent,
++    MouseEvent: MiniEvent,
++    _posted: posted,
++    fetch(url, init) {
++      const method = (init && init.method) || "GET";
++      posted.push({ url: String(url), method, body: init && init.body });
++      const payload = opts.responder ? opts.responder(String(url), method, init) : { ok: true };
++      return Promise.resolve({
++        ok: true, status: 200,
++        json: () => Promise.resolve(payload),
++        text: () => Promise.resolve(JSON.stringify(payload)),
++      });
++    },
++    Promise, JSON, Math, String, Number, Boolean, Array, Object, Date,
++    // Node globals that are not ECMAScript built-ins, so a fresh vm context
++    // does not provide them.
++    TextEncoder, TextDecoder, URLSearchParams,
++  };
++  // window participates in event wiring: app.js installs hashchange and
++  // capture-phase scroll listeners on it.
++  ctx._winListeners = {};
++  ctx.addEventListener = function (type, fn, opts) {
++    const capture = opts === true || (opts && opts.capture);
++    (ctx._winListeners[type] = ctx._winListeners[type] || []).push({ fn, capture: !!capture });
++  };
++  ctx.removeEventListener = function () {};
++  ctx.dispatchEvent = function (e) {
++    (ctx._winListeners[e.type] || []).forEach((entry) => {
++      try { entry.fn.call(ctx, e); } catch (err) { /* surfaced by assertions */ }
++    });
++    return true;
++  };
++  ctx.window = ctx;
++  ctx.globalThis = ctx;
++  return { ctx, doc, posted };
++}
++
++function loadApp(env, { boot } = { boot: false }) {
++  let src = fs.readFileSync(APP, "utf8");
++  if (!boot) src = src.replace(/\nwire\(\);\s*\nrefresh\(\);\s*$/, "\n");
++  vm.createContext(env.ctx);
++  vm.runInContext(src, env.ctx, { filename: "app.js" });
++  return env.ctx;
++}
++const ev = (ctx, code) => vm.runInContext(code, ctx);
++
++const ITEMS = [
++  { work_item_id: "message:msg-alpha", thread_id: "thr-alpha", title: "Alpha work",
++    presentation_state: "needs_operator", status: "planning", runner_state: "waiting_on_operator",
++    claimed_by: "claude", last_activity_at: "2026-07-25T10:00:00Z", last_activity_event: "progress" },
++  { work_item_id: "message:msg-beta", thread_id: "thr-beta", title: "Beta work",
++    presentation_state: "blocked", status: "verification", runner_state: "waiting_on_council",
++    claimed_by: "claude", last_activity_at: "2026-07-25T09:00:00Z", last_activity_event: "council" },
++];
++
++function seed(ctx, items) {
++  ev(ctx, "workItemsLoaded = true; lastWorkItems = " + JSON.stringify(items || ITEMS) + ";");
++}
++
++// ---------------------------------------------------------------------------
++// 1. wire() installs the delegated handler and a REAL click navigates.
++// ---------------------------------------------------------------------------
++{
++  const env = buildEnv({ hash: "#work=message%3Amsg-stale" });
++  const ctx = loadApp(env);
++  seed(ctx);
++  ctx.wire();
++  ctx.renderQueue();
++
++  const groups = env.doc.getElementById("queue-groups");
++  const tiles = groups.querySelectorAll(".q-row[data-work-item]");
++  eq(tiles.length, 2, "wire+render produced one tile per work item");
++
++  const btn = tiles[0].querySelector(".q-open");
++  ok(!!btn, "each tile exposes a native primary button");
++  eq(String(btn.tagName), "BUTTON", "the primary control is a real button element");
++
++  // A genuine click on the rendered control, not a direct helper call.
++  btn.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha",
++     "a real delegated click selects the clicked work item");
++  eq(ev(ctx, "selectedConvThread"), "thr-alpha",
++     "the click binds the queue-backed durable thread");
++  ok(ctx.location.hash.indexOf("msg-alpha") !== -1,
++     "the click writes the canonical work route");
++  ok(ctx.location.hash.indexOf("msg-stale") === -1,
++     "the stale route does not survive a real click");
++}
++
++// ---------------------------------------------------------------------------
++// 2. ENTER and SPACE activate the focused tile through the same one path.
++// ---------------------------------------------------------------------------
++for (const key of ["Enter", " "]) {
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  seed(ctx);
++  ctx.wire();
++  ctx.renderQueue();
++
++  const groups = env.doc.getElementById("queue-groups");
++  const target = groups.querySelectorAll(".q-row[data-work-item]")[1];
++  const btn = target.querySelector(".q-open");
++
++  let clicks = 0;
++  btn.addEventListener("click", () => { clicks += 1; });
++  btn.focus();
++  same(env.doc.activeElement, btn, "the tile button can hold focus (" + key + ")");
++
++  const res = pressKey(env.doc, key);
++  ok(res.activated, "a focused button is activated by " + (key === " " ? "Space" : key));
++  ok(!res.defaultPrevented,
++     "nothing suppresses the native default for " + (key === " " ? "Space" : key));
++  eq(clicks, 1, "activation fires EXACTLY ONE click for " + (key === " " ? "Space" : key));
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-beta",
++     (key === " " ? "Space" : key) + " selects through the canonical path");
++  ok(ctx.location.hash.indexOf("msg-beta") !== -1,
++     (key === " " ? "Space" : key) + " writes the canonical route");
++}
++
++// ---------------------------------------------------------------------------
++// 3. COPY controls copy without navigating.
++// ---------------------------------------------------------------------------
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  seed(ctx);
++  ctx.wire();
++  ctx.renderQueue();
++
++  const groups = env.doc.getElementById("queue-groups");
++  const other = groups.querySelectorAll(".q-row[data-work-item]")[1];
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha";');
++  const before = ctx.location.hash;
++
++  const copy = other.querySelector(".copy-id");
++  ok(!!copy, "tiles carry Copy controls");
++  copy.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha",
++     "clicking Copy does not change the selection");
++  eq(ctx.location.hash, before, "clicking Copy does not navigate");
++}
++
++// ---------------------------------------------------------------------------
++// 4. FOCUS SURVIVES A POLLING CYCLE. This is the reported defect: renderQueue
++//    ran about every two seconds and replaced every node, destroying focus.
++// ---------------------------------------------------------------------------
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  seed(ctx);
++  ctx.wire();
++  ctx.renderQueue();
++
++  const groups = env.doc.getElementById("queue-groups");
++  const tile = groups.querySelectorAll(".q-row[data-work-item]")[0];
++  const btn = tile.querySelector(".q-open");
++  btn.focus();
++
++  // Poll repeatedly with UNCHANGED data, exactly as the live timers do.
++  for (let i = 0; i < 5; i++) ctx.renderQueue();
++
++  same(env.doc.activeElement, btn, "focus survives repeated unchanged polling");
++  ok(env.doc.documentElement.contains(btn), "the focused node is still in the document");
++  same(groups.querySelectorAll(".q-row[data-work-item]")[0].querySelector(".q-open"), btn,
++     "the tile keeps its DOM IDENTITY across polling (same node)");
++
++  // And it is still operable afterwards, which is the point.
++  let clicks = 0;
++  btn.addEventListener("click", () => { clicks += 1; });
++  const res = pressKey(env.doc, "Enter");
++  ok(res.activated && clicks === 1,
++     "the tile is still keyboard-operable after several polling cycles");
++}
++
++// 4b. A CHANGED item updates without destroying the focus of an UNCHANGED one.
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  seed(ctx);
++  ctx.wire();
++  ctx.renderQueue();
++
++  const groups = env.doc.getElementById("queue-groups");
++  const alphaBtn = groups.querySelectorAll('.q-row[data-work-item="message:msg-alpha"]')[0]
++    .querySelector(".q-open");
++  alphaBtn.focus();
++
++  const changed = JSON.parse(JSON.stringify(ITEMS));
++  changed[1].last_activity_at = "2026-07-25T23:59:00Z";   // only BETA changes
++  seed(ctx, changed);
++  ctx.renderQueue();
++
++  same(env.doc.activeElement, alphaBtn,
++     "changing one tile does not destroy focus held on another");
++  ok(env.doc.documentElement.contains(alphaBtn),
++     "the untouched tile keeps its node identity when a sibling changes");
++}
++
++// 4c. If the focused item legitimately disappears, focus moves predictably.
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  seed(ctx);
++  ctx.wire();
++  ctx.renderQueue();
++
++  const groups = env.doc.getElementById("queue-groups");
++  const betaBtn = groups.querySelectorAll('.q-row[data-work-item="message:msg-beta"]')[0]
++    .querySelector(".q-open");
++  betaBtn.focus();
++
++  seed(ctx, [ITEMS[0]]);          // beta legitimately leaves the queue
++  ctx.renderQueue();
++
++  ok(env.doc.activeElement !== env.doc.body,
++     "focus does not fall back to the document body");
++  ok(env.doc.activeElement && env.doc.activeElement.classList.contains("q-open"),
++     "focus moves predictably to a remaining tile");
++  eq(groups.querySelectorAll('.q-row[data-work-item="message:msg-beta"]').length, 0,
++     "the removed item is genuinely gone, not retained to preserve focus");
++}
++
++// ---------------------------------------------------------------------------
++// 5. THE REAL send() PATH refuses through every destination-integrity branch.
++// ---------------------------------------------------------------------------
++function sendEnv(hash) {
++  const env = buildEnv({
++    hash,
++    responder: (url) => {
++      if (url.indexOf("/api/messages?") === 0 || url.indexOf("message_id=") !== -1) {
++        return { found: true, message: { message: "PROBE" } };
++      }
++      return { ok: true, message_id: "msg-new", thread_id: "thr-alpha" };
++    },
++  });
++  const ctx = loadApp(env);
++  seed(ctx);
++  ctx.wire();
++  ctx.renderQueue();
++  return { env, ctx };
++}
++
++function attemptSend(ctx, env, text) {
++  const ta = env.doc.getElementById("conv-input");
++  ta.value = text || "PROBE";
++  const before = env.posted.filter((p) => p.method === "POST").length;
++  ev(ctx, "convComposer.send()");
++  const after = env.posted.filter((p) => p.method === "POST").length;
++  return { posts: after - before, draft: ta.value };
++}
++
++// 5a. Unresolved destination: selected item has no durable thread.
++{
++  const { env, ctx } = sendEnv("#work=message%3Amsg-nothread");
++  ev(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-nothread",' +
++          ' thread_id: null, presentation_state: "needs_operator" }];' +
++          'selectedWorkItemId = "message:msg-nothread"; selectedConvThread = null;');
++  const r = attemptSend(ctx, env);
++  eq(r.posts, 0, "unresolved destination emits NO request");
++  ok(r.draft.length > 0, "unresolved destination preserves the draft");
++  const err = env.doc.getElementById("conv-error");
++  ok(String(err.textContent).length > 0, "unresolved destination explains itself");
++}
++
++// 5b. Route names a DIFFERENT work item than the selection.
++{
++  const { env, ctx } = sendEnv("#work=message%3Amsg-beta");
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  const r = attemptSend(ctx, env);
++  eq(r.posts, 0, "route/selection disagreement emits NO request");
++  ok(r.draft.length > 0, "disagreement preserves the draft");
++  ok(String(env.doc.getElementById("conv-error").textContent).indexOf("different work item") !== -1,
++     "disagreement names the mismatch");
++}
++
++// 5c. ABSENT route: nothing proves the URL agrees.
++{
++  const { env, ctx } = sendEnv("");
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  const r = attemptSend(ctx, env);
++  eq(r.posts, 0, "an absent route emits NO request");
++  ok(String(env.doc.getElementById("conv-error").textContent).indexOf("no work route") !== -1,
++     "an absent route says the URL cannot confirm the destination");
++}
++
++// 5d. MALFORMED route is not evidence of agreement.
++{
++  const { env, ctx } = sendEnv("");
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  // Set the malformed route immediately before sending. Setting it earlier
++  // would let applyWorkHashRoute clear it first, so the send would then be
++  // refused for an ABSENT route and this branch would never be exercised.
++  ctx.location.hash = "#work=%";
++  const r = attemptSend(ctx, env);
++  eq(r.posts, 0, "a malformed route emits NO request");
++  ok(String(env.doc.getElementById("conv-error").textContent).indexOf("unreadable") !== -1,
++     "a malformed route says the URL is unreadable");
++}
++
++// 5e. VALID RETRY after a refusal succeeds, and the button state is restored.
++{
++  const { env, ctx } = sendEnv("");
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  const btn = env.doc.getElementById("conv-send");
++  const idle = btn.textContent;
++
++  const refused = attemptSend(ctx, env);
++  eq(refused.posts, 0, "the first attempt is refused");
++  eq(btn.textContent, idle, "the button label is unchanged by a refusal");
++  ok(!btn.disabled, "the button is re-enabled after a refusal");
++
++  // Correct the route and retry: the same draft must now be sendable.
++  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
++  const retry = attemptSend(ctx, env);
++  eq(retry.posts, 1, "a valid retry after a refusal DOES send");
++}
++
++// 5f. DUPLICATE submission while in flight produces exactly one POST.
++{
++  const { env, ctx } = sendEnv("#work=message%3Amsg-alpha");
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  const ta = env.doc.getElementById("conv-input");
++  const btn = env.doc.getElementById("conv-send");
++  ta.value = "PROBE";
++
++  const before = env.posted.filter((p) => p.method === "POST").length;
++  ev(ctx, "convComposer.send()");                     // in flight from here
++  const during = { label: btn.textContent, disabled: btn.disabled };
++  ev(ctx, "convComposer.send()");                     // repeat click
++  ev(ctx, "convComposer.send()");                     // and again
++  const after = env.posted.filter((p) => p.method === "POST").length;
++
++  eq(after - before, 1, "three submissions in flight produce EXACTLY ONE POST");
++  eq(during.label, "Sending...", "the button reports the in-flight state");
++  ok(during.disabled, "the button is disabled while in flight");
++}
++
++// 5g. Ctrl+Enter uses the same guarded path, not a parallel one.
++{
++  const { env, ctx } = sendEnv("#work=message%3Amsg-alpha");
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  const ta = env.doc.getElementById("conv-input");
++  ta.value = "PROBE";
++  const before = env.posted.filter((p) => p.method === "POST").length;
++  ta.dispatchEvent(new MiniEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
++  ta.dispatchEvent(new MiniEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
++  const after = env.posted.filter((p) => p.method === "POST").length;
++  eq(after - before, 1, "repeated Ctrl+Enter in flight produces EXACTLY ONE POST");
++}
++
++console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");
++process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..454f00a
+index 0000000..116a365
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,1220 @@
+@@ -0,0 +1,1351 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -2268,7 +3296,7 @@ index 0000000..454f00a
 +
 +
 +
-+RE_CARD = r"function queueCard[\s\S]{0,8000}?\n}"
++RE_CARD = r"function queueCard\([\s\S]{0,8000}?\n}"
 +RE_PARSE = r"function parseWorkRoute[\s\S]{0,4000}?\n\}"
 +
 +
@@ -2610,13 +3638,16 @@ index 0000000..454f00a
 +        self.assertIn('location.hash = "#work="', m.group(0))
 +
 +    def test_keyboard_uses_native_button_semantics(self):
-+        """A real <button> already activates on Enter and Space, so the
-+        hand-rolled key handler is reduced to preventing Space-scroll and can
-+        no longer become a second, divergent activation path."""
-+        i = APP.index('document.addEventListener("keydown"')
-+        handler = APP[i:i + 500]
-+        self.assertNotIn("navigateToWorkItem", handler)
-+        self.assertIn("q-open", handler)
++        """A real <button> activates on Enter and Space and fires exactly one
++        click, so there is NO queue key handler at all. An earlier version
++        called preventDefault() on Space, which suppressed the very activation
++        the control exists to provide."""
++        for m in re.finditer(r'addEventListener\("keydown"', APP):
++            window = APP[m.start():m.start() + 500]
++            self.assertNotIn("q-open", window,
++                             "no keydown handler may intercept the queue button")
++            self.assertNotIn("navigateToWorkItem", window,
++                             "no key handler may create a second activation path")
 +
 +
 +class StrictRouteProofTest(unittest.TestCase):
@@ -2641,6 +3672,125 @@ index 0000000..454f00a
 +    def test_the_check_no_longer_requires_a_non_malformed_route_to_apply(self):
 +        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
 +        self.assertNotIn("!route.malformed && route.work_item_id", m.group(0))
++
++
++class QueueReconciliationTest(unittest.TestCase):
++    """Correction 1: polling must not destroy DOM identity or focus.
++
++    renderQueue rewrote innerHTML on every poll, roughly every two seconds,
++    which removed the focused control before a human could press a key. That
++    made keyboard operation of the queue impossible.
++    """
++
++    def test_a_no_change_poll_does_not_touch_the_dom(self):
++        self.assertIn("let lastQueueSignature = null;", APP)
++        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("if (signature === lastQueueSignature) return;", body)
++        # The populated path must reach its short circuit without touching the
++        # DOM. The empty-queue branch above it writes one message and is itself
++        # guarded by its own signature check, so it is excluded here.
++        empty_end = body.index("const desired = rows.map")
++        populated = body[empty_end:]
++        i = populated.index("if (signature === lastQueueSignature) return;")
++        self.assertNotIn("innerHTML", populated[:i],
++                         "the DOM must not be written before the no-change check")
++        # And the empty branch short-circuits too, rather than rewriting on
++        # every poll.
++        self.assertIn("if (lastQueueSignature === emptySig) return;", body)
++
++    def test_reconciliation_is_keyed_by_canonical_work_item_id(self):
++        self.assertIn("function reconcileQueue", APP)
++        m = re.search(r"function reconcileQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("data-work-item", body)
++        self.assertIn("data-sig", body)
++
++    def test_an_unchanged_tile_is_reused_not_replaced(self):
++        m = re.search(r"function reconcileQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn('prev.getAttribute("data-sig") === d.sig', body)
++        after = body.split('prev.getAttribute("data-sig") === d.sig')[1][:400]
++        self.assertIn("return;", after,
++                      "an unchanged tile must be left entirely alone")
++
++    def test_wholesale_replacement_is_gone_from_the_render_path(self):
++        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        # The only innerHTML write left is the genuinely empty-queue message.
++        self.assertEqual(body.count("el.innerHTML ="), 1)
++        self.assertIn("queue-empty", body)
++
++    def test_focus_is_captured_and_restored_around_reconciliation(self):
++        self.assertIn("function focusedQueueKey", APP)
++        self.assertIn("function restoreQueueFocus", APP)
++        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        i = body.index("const focusKey = focusedQueueKey();")
++        j = body.index("reconcileQueue(el, desired);")
++        k = body.index("restoreQueueFocus(focusKey, el);")
++        self.assertLess(i, j, "focus must be captured before reconciliation")
++        self.assertLess(j, k, "focus must be restored after reconciliation")
++
++    def test_lost_focus_moves_predictably_not_to_the_body(self):
++        m = re.search(r"function restoreQueueFocus[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn('el.querySelector(".q-open")', body)
++        self.assertIn("el.focus()", body)
++
++    def test_no_stale_item_is_retained_to_preserve_focus(self):
++        m = re.search(r"function reconcileQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("removeChild", body)
++        self.assertIn("if (!keep[k]", body)
++
++    def test_the_signature_covers_every_rendered_field(self):
++        m = re.search(r"function queueCardSignature[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        for field in ("work_item_id", "thread_id", "presentation_state", "status",
++                      "runner_state", "claimed_by", "last_activity_at"):
++            self.assertIn(field, body,
++                          field + " is rendered, so it must affect the signature")
++
++
++class WiredPathCoverageTest(unittest.TestCase):
++    """Correction 3: coverage must run the real wired paths."""
++
++    def test_a_wired_path_harness_exists(self):
++        here = os.path.dirname(os.path.abspath(__file__))
++        for name in ("wired_paths.mjs", "mini_dom.mjs"):
++            self.assertTrue(os.path.isfile(os.path.join(here, "dom", name)), name)
++
++    def test_it_installs_the_real_wire(self):
++        here = os.path.dirname(os.path.abspath(__file__))
++        src = open(os.path.join(here, "dom", "wired_paths.mjs"), encoding="utf-8").read()
++        self.assertIn("ctx.wire()", src)
++        self.assertIn("dispatchEvent", src)
++
++    def test_it_dispatches_real_clicks_and_keys(self):
++        here = os.path.dirname(os.path.abspath(__file__))
++        src = open(os.path.join(here, "dom", "wired_paths.mjs"), encoding="utf-8").read()
++        self.assertIn('pressKey(env.doc, key)', src)
++        self.assertIn('new MiniEvent("click"', src)
++
++    def test_it_proves_focus_survives_polling(self):
++        here = os.path.dirname(os.path.abspath(__file__))
++        src = open(os.path.join(here, "dom", "wired_paths.mjs"), encoding="utf-8").read()
++        self.assertIn("focus survives repeated unchanged polling", src)
++        self.assertIn("ctx.renderQueue()", src)
++
++    def test_it_drives_the_real_send_through_refusals(self):
++        here = os.path.dirname(os.path.abspath(__file__))
++        src = open(os.path.join(here, "dom", "wired_paths.mjs"), encoding="utf-8").read()
++        self.assertIn('convComposer.send()', src)
++        for branch in ("unresolved", "different work item", "no work route", "unreadable"):
++            self.assertIn(branch, src)
++
++    def test_the_mini_dom_states_its_limitation(self):
++        here = os.path.dirname(os.path.abspath(__file__))
++        src = open(os.path.join(here, "dom", "mini_dom.mjs"), encoding="utf-8").read()
++        self.assertIn("STATED LIMITATION", src)
++        self.assertIn("not a browser", src)
 +
 +
 +class CanonicalIdentityTest(unittest.TestCase):
@@ -3405,18 +4555,27 @@ index 0000000..454f00a
 +        self.assertIn("aria-pressed=", body)
 +        self.assertNotIn('role="button" tabindex="0"', body,
 +                         "the row must not claim button semantics itself")
++        self.assertIn("data-sig=", body,
++                      "the tile carries its signature so reconciliation can "
++                      "reuse an unchanged node instead of replacing it")
 +
 +    def test_queue_rows_activate_via_a_native_button(self):
-+        """Enter and Space now come from native <button> semantics rather than
-+        a hand-rolled key handler, which also removes the second activation
-+        path that could diverge from the mouse path."""
++        """Enter and Space come from native <button> semantics.
++
++        An earlier version called preventDefault() on Space to stop page
++        scrolling. On a focused button Space's default action IS the
++        activation, so that suppressed the very keyboard path the control
++        exists to provide. There is now NO queue key handler at all.
++        """
 +        m = re.search(RE_CARD, APP)
 +        self.assertIn('<button type="button" class="q-open"', m.group(0))
-+        k = APP.index('document.addEventListener("keydown"')
-+        handler = APP[k:k + 400]
-+        # The listener only stops Space from scrolling; it must not navigate.
-+        self.assertIn("q-open", handler)
-+        self.assertNotIn("navigateToWorkItem", handler)
++        for k in re.finditer(r'addEventListener\("keydown"', APP):
++            window = APP[k.start():k.start() + 500]
++            self.assertNotIn("q-open", window,
++                             "no keydown handler may intercept the queue button")
++        # Space must not be suppressed anywhere for the queue control.
++        self.assertNotIn('e.key !== " "', APP,
++                         "the Space-suppressing handler must be gone entirely")
 +
 +    def test_existing_send_shortcuts_are_preserved(self):
 +        """Ctrl+Enter sends; Shift+Enter still inserts a newline."""
@@ -3492,6 +4651,67 @@ index 0000000..6c56262
 +        err = (proc.stderr or b"").decode("utf-8", "replace")
 +        self.assertEqual(proc.returncode, 0,
 +                         "runtime DOM checks failed:\n%s\n%s" % (out, err))
++        self.assertIn("PASS", out, out + err)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_session_ux_wired.py b/tests/test_session_ux_wired.py
+new file mode 100644
+index 0000000..7503b01
+--- /dev/null
++++ b/tests/test_session_ux_wired.py
+@@ -0,0 +1,55 @@
++"""Run the wired-path DOM harness for the session-continuity UX.
++
++Both verification reviewers said the previous harness proved helpers rather than
++the wired path: it called navigateToWorkItem() directly instead of dispatching a
++click through the delegated listener, so an integration regression in the most
++common activation path would still pass. This harness installs the real wire(),
++renders real tiles, and dispatches genuine events.
++
++It adds no dependency: every import is a Node builtin or the local mini DOM,
++there is no package manifest, and the test skips when Node is unavailable so the
++suite can never depend on a runtime the project does not otherwise require.
++"""
++import os
++import shutil
++import subprocess
++import unittest
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++HARNESS = os.path.join(HERE, "dom", "wired_paths.mjs")
++MINI_DOM = os.path.join(HERE, "dom", "mini_dom.mjs")
++
++
++class WiredPathTest(unittest.TestCase):
++
++    def test_harness_files_exist(self):
++        self.assertTrue(os.path.isfile(HARNESS), HARNESS)
++        self.assertTrue(os.path.isfile(MINI_DOM), MINI_DOM)
++
++    def test_no_dependency_is_introduced(self):
++        """Every import must resolve to a Node builtin or a local file."""
++        import re
++        for path in (HARNESS, MINI_DOM):
++            src = open(path, encoding="utf-8").read()
++            for mod in re.findall(r'from "([^"]+)"', src):
++                self.assertTrue(mod.startswith("node:") or mod.startswith("./"),
++                                "non-builtin import would add a dependency: " + mod)
++            self.assertNotIn("require(", src)
++        repo = os.path.dirname(HERE)
++        self.assertFalse(os.path.exists(os.path.join(repo, "package.json")),
++                         "no package manifest may be introduced")
++
++    def test_wired_paths(self):
++        node = shutil.which("node")
++        if not node:
++            self.skipTest("node is not available; wired-path checks skipped")
++        proc = subprocess.run([node, HARNESS], capture_output=True)
++        out = (proc.stdout or b"").decode("utf-8", "replace")
++        err = (proc.stderr or b"").decode("utf-8", "replace")
++        self.assertEqual(proc.returncode, 0,
++                         "wired-path checks failed:\n%s\n%s" % (out, err))
 +        self.assertIn("PASS", out, out + err)
 +
 +

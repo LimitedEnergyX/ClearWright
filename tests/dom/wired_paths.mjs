@@ -1612,14 +1612,70 @@ for (const p of POLLERS) {
   eq(unhandled.length, 0, "a failing /api/state poll produces ZERO unhandled rejections");
   ok(diag(ctx, "state").active === false, "and the slot is still released");
 
-  // Also prove the fire-and-forget follow-up cannot surface one.
+  // The FOLLOW-UP itself must be the thing that fails. The earlier version of
+  // this case rejected the HELD request, whose finally then started a second
+  // request that was simply left pending, so the follow-up path was never
+  // exercised at all.
   env.poll.modes["state"] = "defer";
+  const before = env.poll.counts["state"];       // this block already polled once
   const held = call(ctx, "refresh");
   await call(ctx, "refresh");                           // requests the follow-up
-  env.poll.pending["state"].shift().rejectWith(new Error("probe: follow-up down"));
+  eq(env.poll.counts["state"] - before, 1, "the tick started NO second request");
+  eq(env.poll.pending["state"].length, 1, "only the held request is outstanding");
+  env.poll.pending["state"].shift().resolveWith({ ok: true });   // held SUCCEEDS
   await held;
   for (let i = 0; i < 6; i++) await settle();
-  eq(unhandled.length, 0, "a THROWING coalesced follow-up produces zero unhandled rejections");
+  eq(env.poll.counts["state"] - before, 2, "the coalesced follow-up actually started");
+  eq(env.poll.pending["state"].length, 1, "and the FOLLOW-UP is what is now in flight");
+  env.poll.pending["state"].shift().rejectWith(new Error("probe: follow-up down"));
+  for (let i = 0; i < 6; i++) await settle();
+  eq(unhandled.length, 0,
+     "a FAILING coalesced follow-up produces zero unhandled rejections");
+  ok(diag(ctx, "state").active === false, "and the slot is released after it");
+  process.removeListener("unhandledRejection", onUnhandled);
+}
+
+// 12i-2. The controller's OWN catch: a run() that genuinely THROWS, both as the
+//        active request and as the coalesced follow-up. The wrapped pollers all
+//        handle their own transport errors internally, so this drives
+//        boundedPoll directly to exercise the defensive invariant itself.
+{
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  const unhandled = [];
+  const onUnhandled = (e) => unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+
+  // (a) the ACTIVE request throws.
+  ev(ctx, 'globalThis.__t1 = boundedPoll("probe-throw", async () => { throw new Error("boom"); });');
+  eq(await ev(ctx, "__t1()"), "ran", "boundedPoll RETURNS even when run() throws");
+  ok(diag(ctx, "probe-throw").active === false, "the slot is released after a throwing run");
+  for (let i = 0; i < 6; i++) await settle();
+  eq(unhandled.length, 0, "a throwing run() produces zero unhandled rejections");
+
+  // (b) the coalesced FOLLOW-UP throws. Call 1 is held open until the test
+  //     releases it; call 2 -- the follow-up started from finally and never
+  //     awaited -- throws outright.
+  ev(ctx, `
+    globalThis.__n = 0;
+    globalThis.__gate = null;
+    globalThis.__t2 = boundedPoll("probe-follow", async () => {
+      globalThis.__n += 1;
+      if (globalThis.__n === 1) { await new Promise((r) => { globalThis.__gate = r; }); return; }
+      throw new Error("follow-up boom");
+    });
+  `);
+  const held2 = ev(ctx, "__t2()");
+  eq(await ev(ctx, "__t2()"), "coalesced", "a tick during the held call coalesces");
+  ev(ctx, "__gate();");
+  eq(await held2, "ran", "the held call completes");
+  for (let i = 0; i < 8; i++) await settle();
+  eq(ev(ctx, "__n"), 2, "the coalesced follow-up RAN and it is the one that threw");
+  eq(unhandled.length, 0,
+     "a THROWING coalesced follow-up produces zero unhandled rejections");
+  ok(diag(ctx, "probe-follow").active === false,
+     "the slot is released even when the follow-up throws");
+  ok(diag(ctx, "probe-follow").followUp === false, "no phantom follow-up remains");
   process.removeListener("unhandledRejection", onUnhandled);
 }
 
@@ -1633,12 +1689,69 @@ for (const p of POLLERS) {
     ok(src.indexOf("state.active") !== -1,
        p.fn + " resolves to the bounded controller wrapper, not the raw request");
   }
+  // Every raw body must appear EXACTLY twice in the source: its own declaration
+  // and the boundedPoll() argument. A third occurrence would be a production
+  // call site that bypasses the controller, which is the regression this
+  // assertion exists to catch. toString() checks alone cannot detect that.
+  const appSrc = fs.readFileSync(APP, "utf8");
   for (const raw of ["refreshStateRequest", "refreshAgentEventsRequest",
                      "refreshMessagesRequest", "refreshHealthRequest",
                      "refreshTaskStateRequest", "refreshArchiveIndexRequest",
                      "loadConversationsRequest"]) {
     ok(ev(ctx, "typeof " + raw) === "function",
        raw + " exists as the inner request body");
+    const hits = appSrc.split(raw).length - 1;
+    eq(hits, 2, raw + " appears exactly twice: its declaration and the boundedPoll argument");
+    ok(appSrc.indexOf("async function " + raw + "(") !== -1,
+       raw + " occurrence 1 is its declaration");
+    ok(appSrc.indexOf(", " + raw + ");") !== -1,
+       raw + " occurrence 2 is the boundedPoll argument, not a call");
+    const declHits = appSrc.split("async function " + raw + "(").length - 1;
+    const argHits = appSrc.split(", " + raw + ");").length - 1;
+    eq(declHits, 1, raw + " is declared exactly once");
+    eq(argHits, 1, raw + " is passed to boundedPoll exactly once");
+    eq(hits, declHits + argHits,
+       raw + " has NO occurrence beyond its declaration and the boundedPoll " +
+       "argument, so no production path invokes it directly");
+  }
+}
+
+// 12k. GLOBAL SURFACE. Converting `function name()` to `const name = ...` removes
+//      the window property. That is safe ONLY if nothing resolves these names
+//      through the global object. Proven here rather than asserted.
+{
+  const html = fs.readFileSync(HTML, "utf8");
+  const appSrc = fs.readFileSync(APP, "utf8");
+  const converted = ["refresh", "refreshAgentEvents", "refreshMessages", "refreshHealth",
+                     "refreshTaskState", "refreshArchiveIndex", "loadConversations"];
+
+  // No inline event attribute anywhere in the shipped markup.
+  ok(!/\son[a-z]+\s*=\s*["']/i.test(html),
+     "index.html contains NO inline event handler attributes at all");
+  // index.html is the only markup app.js is served with, and it must not name
+  // any converted poller.
+  for (const name of converted) {
+    ok(html.indexOf(name) === -1, "index.html never references " + name);
+  }
+  // No global-object access to a converted poller from the script itself.
+  for (const name of converted) {
+    for (const pattern of ["window." + name, "globalThis." + name,
+                           'window["' + name + '"]', "window['" + name + "']"]) {
+      ok(appSrc.indexOf(pattern) === -1, "app.js never accesses " + pattern);
+    }
+  }
+  // app.js is the ONLY script the page loads, so there is no second script that
+  // could hold a stale global reference.
+  const scripts = html.match(/<script[^>]*src=["']([^"']+)["']/g) || [];
+  eq(scripts.length, 1, "the page loads exactly one script");
+  ok(scripts[0].indexOf("app.js") !== -1, "and that script is app.js");
+
+  // The wrapped bindings still resolve lexically, which is how every call site
+  // inside app.js (including the setInterval registrations) reaches them.
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  for (const name of converted) {
+    eq(ev(ctx, "typeof " + name), "function", name + " still resolves lexically");
   }
 }
 

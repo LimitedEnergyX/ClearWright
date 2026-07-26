@@ -155,6 +155,57 @@ class WorkItemPollerUntouched(unittest.TestCase):
         self.assertNotIn("REFRESH_COALESCED ===", body)
 
 
+class GlobalSurfaceCompatibility(unittest.TestCase):
+    """Converting `function name()` to `const name = ...` removes the window
+    property. That is safe only if nothing resolves these names through the
+    global object, which is proven here rather than assumed."""
+
+    def test_markup_has_no_inline_event_handlers(self):
+        html = _read("index.html")
+        self.assertIsNone(re.search(r"""\son[a-z]+\s*=\s*["']""", html, re.I))
+
+    def test_markup_never_names_a_converted_poller(self):
+        html = _read("index.html")
+        for fn in BOUNDED.values():
+            self.assertNotIn(fn, html)
+
+    def test_no_global_object_access_to_a_converted_poller(self):
+        for fn in BOUNDED.values():
+            for pattern in ("window." + fn, "globalThis." + fn,
+                            'window["%s"]' % fn, "window['%s']" % fn):
+                self.assertNotIn(pattern, APP)
+
+    def test_the_page_loads_exactly_one_script(self):
+        # No second script can be holding a stale global reference.
+        scripts = re.findall(r"""<script[^>]*src=["']([^"']+)["']""", _read("index.html"))
+        self.assertEqual(len(scripts), 1)
+        self.assertIn("app.js", scripts[0])
+
+
+class NoPollerBypassesItsController(unittest.TestCase):
+    """Each raw request body must appear exactly twice: its own declaration and
+    the boundedPoll argument. A third occurrence would be a production call
+    site that bypasses the controller."""
+
+    def test_each_raw_body_has_no_direct_call_site(self):
+        for fn in BOUNDED.values():
+            raw = "refreshStateRequest" if fn == "refresh" else fn + "Request"
+            total = APP.count(raw)
+            decl = APP.count("async function %s(" % raw)
+            arg = APP.count(", %s);" % raw)
+            self.assertEqual(decl, 1, raw + " declared exactly once")
+            self.assertEqual(arg, 1, raw + " passed to boundedPoll exactly once")
+            self.assertEqual(total, decl + arg,
+                             raw + " has no occurrence beyond its declaration "
+                                   "and the boundedPoll argument")
+
+    def test_conversation_fan_out_is_fully_awaited(self):
+        # If any inner request were unawaited the outer slot would be released
+        # before the fan-out completed, which would defeat the bounding.
+        body = _block_of("loadConversationsRequest")
+        self.assertEqual(body.count("getJSON("), body.count("await getJSON("))
+
+
 class PollingCadenceUnchanged(unittest.TestCase):
     """Scope guard: bounding requests must not change the polling cadence."""
 
@@ -171,8 +222,21 @@ class PollingCadenceUnchanged(unittest.TestCase):
                      "setInterval(refreshArchiveIndex, LIVE_MS * 15)"):
             self.assertIn(call, APP)
 
-    def test_no_poller_was_removed(self):
-        self.assertEqual(len(re.findall(r"setInterval\(", APP)), 9)
+    def test_the_two_conversation_intervals_survive(self):
+        # loadConversations is driven by two further intervals OUTSIDE the main
+        # setInterval block; they are why the endpoint is polled on every view.
+        self.assertIn('if (currentView === "work") loadConversations();', APP)
+        self.assertIn('if (currentView !== "work") loadConversations();', APP)
+
+    def test_every_recurring_network_poller_is_accounted_for(self):
+        # Tied to known registrations rather than a raw setInterval count, which
+        # would be brittle against unrelated timer additions and would not
+        # establish coverage. Every recurring poller is either bounded here or
+        # is the queue poller with its own controller.
+        registered = set(re.findall(r"setInterval\((\w+),", APP))
+        accounted = set(BOUNDED.values()) | {"refreshWorkItems"}
+        self.assertEqual(registered - accounted, set(),
+                         "an unaccounted recurring poller was registered")
 
     def test_server_side_is_untouched_by_this_change(self):
         server = os.path.join(STATIC, "..", "server.py")

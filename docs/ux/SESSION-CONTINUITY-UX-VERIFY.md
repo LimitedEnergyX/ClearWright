@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   3c1fb45839ba06c106f8cc741695ce78a88ceddc
+HEAD (bytes under review):   ce253ecdd80c8a3cc61efb72af602a7d6db09b3a
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -155,28 +155,28 @@ evidence rather than automated coverage.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       175180  5fdddd69f5fcf7b4bb2c9f45edfb66af7ccc3b7144fd8aa3c5fe072a23a49296
+  apps/control-plane/static/app.js                       176765  bb1c0e237006667b66f4f62c953df1648e7185be6d2abf446976adc022ad515a
   apps/control-plane/static/index.html                    22393  86b4ffbf452f29a46c2c7c9877a3daadfdf29b5bc3af4118bb40b55a993b02f4
-  apps/control-plane/static/style.css                     54468  b4791a3f0de15bc8c9714a342a4ee2f33f26c0ece1bb85e0e0b87183ebbe499f
+  apps/control-plane/static/style.css                     54663  95c975dbf6a0adf373683ca2b595527dbdd6ad01116cc6405228becf95ae0e27
   tests/dom/mini_dom.mjs                                  14376  b3b489e5368f4262df8a26c557a319c9cc58f711abc4482dad97b594e42c5752
   tests/dom/session_ux_runtime.mjs                        31834  e5085e168f511380372b6c7420de37c8b4d9bee5edb8947c6bde0d30d9f05894
-  tests/dom/wired_paths.mjs                               18522  a518ee9b25d77328907b04553d9d483b0484f0f9b470659a88fb77a3ee1c9d8c
+  tests/dom/wired_paths.mjs                               24172  7ba5e94ba6acbc0fba4280c5af5d25fd7971db494631a1b265007d9333af1f64
   tests/test_session_continuity_ux.py                     63922  bd7b92741867c255de93511be18188c2b613a2ab8f1c01ca85c3f2c7b538ea7d
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
   tests/test_session_ux_wired.py                           2358  3c8647d059510f8e7c8d0207f07ff842fd962ac5f06f8fa659762af272ade56d
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 1000 ++++++++++++++++++++++++-
+ apps/control-plane/static/app.js     | 1043 +++++++++++++++++++++++++-
  apps/control-plane/static/index.html |   49 +-
- apps/control-plane/static/style.css  |  150 ++++
+ apps/control-plane/static/style.css  |  154 ++++
  tests/dom/mini_dom.mjs               |  374 ++++++++++
  tests/dom/session_ux_runtime.mjs     |  667 +++++++++++++++++
- tests/dom/wired_paths.mjs            |  441 +++++++++++
+ tests/dom/wired_paths.mjs            |  580 +++++++++++++++
  tests/test_session_continuity_ux.py  | 1351 ++++++++++++++++++++++++++++++++++
  tests/test_session_ux_runtime.py     |   40 +
  tests/test_session_ux_wired.py       |   55 ++
- 9 files changed, 4080 insertions(+), 47 deletions(-)
+ 9 files changed, 4263 insertions(+), 50 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -313,7 +313,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..ee62cb5 100644
+index dd2d10c..4667a9d 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -496,7 +496,7 @@ index dd2d10c..ee62cb5 100644
  function queueCard(it) {
    const ps = it.presentation_state || "waiting_on_claude";
    const selected = it.work_item_id && it.work_item_id === selectedWorkItemId;
-@@ -1061,11 +1170,66 @@ function queueCard(it) {
+@@ -1061,11 +1170,68 @@ function queueCard(it) {
      ? '<span class="q-opflag" title="operator action required"><U+25C9> operator</span>' : "";
    // Technical ids ride on data attributes only; the primary card stays readable.
    const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
@@ -554,7 +554,9 @@ index dd2d10c..ee62cb5 100644
 +    (execLabel ? " (executor " + esc(execLabel) + ")" : "") + '"' +
 +    ' data-work-item="' + esc(it.work_item_id || "") + '">' +
 +    '<span class="q-title">' + title + "</span>" +
-+    '<div class="q-meta">' + bits.join("") + opFlag +
++    // A button's content model is phrasing content, so the meta strip is a
++    // span laid out as a block rather than a div inside interactive markup.
++    '<span class="q-meta">' + bits.join("") + opFlag +
 +    // Item 10: phase and executor state are DIFFERENT facts and are labelled
 +    // separately, so "PHASE: VERIFICATION / EXECUTOR: IN COUNCIL" can never be
 +    // misread as a single contradictory status.
@@ -562,11 +564,11 @@ index dd2d10c..ee62cb5 100644
 +      esc(phaseLabel) + "</span>" : "") +
 +    (execLabel ? '<span class="q-exec mono" title="executor state, derived from ' +
 +      'runner_state only">Executor ' + esc(execLabel) + "</span>" : "") +
-+    "</div></button>" + ids + warn +
++    "</span></button>" + ids + warn +
      "</div>";
  }
  
-@@ -1117,6 +1281,83 @@ function attentionCounts(items) {
+@@ -1117,6 +1283,109 @@ function attentionCounts(items) {
    return c;
  }
  
@@ -619,45 +621,79 @@ index dd2d10c..ee62cb5 100644
 +    if (!keep[k] && existing[k].parentNode) existing[k].parentNode.removeChild(existing[k]);
 +  });
 +
-+  let groupEl = null, curGroup = null;
++  // Group the desired list, preserving its computed order.
++  const order = [];
++  const byGroup = {};
 +  desired.forEach((d) => {
-+    if (d.group !== curGroup) {
-+      curGroup = d.group;
-+      groupEl = el.querySelector('.q-group[data-group="' + d.group + '"]');
-+      if (!groupEl) {
-+        groupEl = document.createElement("div");
-+        groupEl.className = "q-group";
-+        groupEl.setAttribute("data-group", d.group);
-+        groupEl.innerHTML = '<div class="q-group-head">' + esc(d.groupLabel) + "</div>";
-+        el.appendChild(groupEl);
++    if (!byGroup[d.group]) { byGroup[d.group] = []; order.push(d); }
++    byGroup[d.group].push(d);
++  });
++
++  const seen = {};
++  order.forEach((first) => {
++    const g = first.group;
++    seen[g] = true;
++    let groupEl = el.querySelector('.q-group[data-group="' + g + '"]');
++    if (!groupEl) {
++      groupEl = document.createElement("div");
++      groupEl.className = "q-group";
++      groupEl.setAttribute("data-group", g);
++      groupEl.innerHTML = '<div class="q-group-head">' + esc(first.groupLabel) + "</div>";
++    }
++    // Appending an already-attached node MOVES it, so this also fixes the
++    // order of the groups themselves.
++    el.appendChild(groupEl);
++
++    byGroup[g].forEach((d, i) => {
++      const prev = existing[d.key];
++      let node;
++      if (prev && prev.getAttribute("data-sig") === d.sig) {
++        node = prev;              // UNCHANGED: identity, focus and scroll kept
++      } else {
++        const tmp = document.createElement("div");
++        tmp.innerHTML = d.html;
++        node = tmp.firstElementChild || tmp.children[0];
++        if (!node) return;
++        // A changed row may also have changed GROUP, so detach it from
++        // wherever it was rather than replacing it in its old parent.
++        if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
 +      }
++      // Place it at its desired index, counting past the group heading. Only
++      // move when it is genuinely out of position, so an unchanged and
++      // correctly ordered tile is never touched.
++      const want = groupEl.children[i + 1];
++      if (want !== node) groupEl.insertBefore(node, want || null);
++    });
++  });
++
++  // Groups that no longer have any desired item must not linger as empty
++  // headings.
++  Array.from(el.querySelectorAll(".q-group")).forEach((g) => {
++    if (!seen[g.getAttribute("data-group")] && g.parentNode) {
++      g.parentNode.removeChild(g);
 +    }
-+    const prev = existing[d.key];
-+    if (prev && prev.getAttribute("data-sig") === d.sig) {
-+      // UNCHANGED: reuse the node as-is. This is the case that preserves focus.
-+      if (prev.parentNode !== groupEl) groupEl.appendChild(prev);
-+      return;
-+    }
-+    const next = document.createElement("div");
-+    next.innerHTML = d.html;
-+    const node = next.firstElementChild || next.children[0];
-+    if (!node) return;
-+    if (prev && prev.parentNode) prev.parentNode.replaceChild(node, prev);
-+    else groupEl.appendChild(node);
 +  });
 +}
 +
  function renderQueue() {
    const el = document.getElementById("queue-groups");
    if (!el) return;
-@@ -1124,21 +1365,31 @@ function renderQueue() {
+@@ -1124,21 +1393,39 @@ function renderQueue() {
    const rows = filterSortQueue(lastWorkItems, queueFilterMode, queueSearch);
    syncFilterChips();
    if (!rows.length) {
 +    const emptySig = "EMPTY";
 +    if (lastQueueSignature === emptySig) return;
 +    lastQueueSignature = emptySig;
++    // The empty transition destroys every tile, including a focused one, so it
++    // owes the same focus contract as a normal reconciliation: never silently
++    // drop focus to the document body.
++    const hadFocus = !!focusedQueueKey();
      el.innerHTML = '<p class="muted queue-empty">Nothing here in this view. Try the History / All filter.</p>';
++    if (hadFocus) {
++      el.setAttribute("tabindex", "-1");
++      if (el.focus) el.focus();
++    }
      return;
    }
 -  let html = "", curState = null;
@@ -693,7 +729,7 @@ index dd2d10c..ee62cb5 100644
  }
  
  function syncFilterChips() {
-@@ -1290,17 +1541,602 @@ function openAttention() {
+@@ -1290,17 +1577,602 @@ function openAttention() {
    }
  }
  
@@ -1297,7 +1333,7 @@ index dd2d10c..ee62cb5 100644
  }
  
  function highlightMessage(messageId) {
-@@ -1317,20 +2153,47 @@ function highlightMessage(messageId) {
+@@ -1317,20 +2189,47 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -1352,7 +1388,7 @@ index dd2d10c..ee62cb5 100644
      try {
        const cd = await getJSON("/api/review-councils");
        lastQueueCouncils = cd.review_councils || [];
-@@ -1398,7 +2261,7 @@ async function loadHistory() {
+@@ -1398,7 +2297,7 @@ async function loadHistory() {
    lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
    const body = document.getElementById("ledger-body");
    if (!lastLedgerRows.length) {
@@ -1361,7 +1397,7 @@ index dd2d10c..ee62cb5 100644
      return;
    }
    body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
-@@ -1406,12 +2269,31 @@ async function loadHistory() {
+@@ -1406,12 +2305,31 @@ async function loadHistory() {
      '" data-ledger-index="' + i + '">' +
      "<td>" + esc(shortTime(row.at)) + "</td>" +
      "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
@@ -1394,7 +1430,7 @@ index dd2d10c..ee62cb5 100644
  function openLedgerDetail(index) {
    const row = lastLedgerRows[index];
    if (!row) return;
-@@ -1837,7 +2719,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2755,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -1404,7 +1440,7 @@ index dd2d10c..ee62cb5 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +3018,23 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +3054,23 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -1428,7 +1464,7 @@ index dd2d10c..ee62cb5 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2783,12 +3683,23 @@ function toggleToolLog() {
+@@ -2783,12 +3719,23 @@ function toggleToolLog() {
    if (footer) footer.hidden = !footer.hidden;
  }
  
@@ -1452,27 +1488,31 @@ index dd2d10c..ee62cb5 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2869,11 +3780,17 @@ function wire() {
+@@ -2869,11 +3816,18 @@ function wire() {
  
    // Work queue: clicking a row selects that task everywhere.
    document.getElementById("queue-groups").addEventListener("click", (e) => {
-+    if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
-     const row = e.target.closest(".q-row");
-     if (!row) return;
+-    const row = e.target.closest(".q-row");
+-    if (!row) return;
 -    const thread = row.getAttribute("data-thread");
-     const workItem = row.getAttribute("data-work-item");
+-    const workItem = row.getAttribute("data-work-item");
 -    if (thread || workItem) selectTask(thread, workItem);
++    if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
++    // Activation is scoped to the EXPLICIT primary control. Treating any pixel
++    // of the row as an activation target contradicted the button model and made
++    // the identifier rows and the integrity warning navigate unexpectedly, so
++    // selecting or copying that text is now safe.
++    const btn = e.target.closest(".q-open");
++    if (!btn) return;
++    const workItem = btn.getAttribute("data-work-item") ||
++      (btn.closest(".q-row") && btn.closest(".q-row").getAttribute("data-work-item"));
 +    // Mouse activation goes through the SAME navigation as the keyboard so the
-+    // canonical #work= route is always written. Calling selectTask() directly
-+    // here left the previous route in the URL, which is precisely the stale-hash
-+    // symptom this correction exists to remove.
-+    if (workItem) { navigateToWorkItem(workItem); return; }
-+    const thread = row.getAttribute("data-thread");
-+    if (thread) selectTask(thread, null);
++    // canonical #work= route is always written.
++    if (workItem) navigateToWorkItem(workItem);
    });
  
    // Context-aware task actions are READ-ONLY navigation only: they switch view
-@@ -2886,6 +3803,10 @@ function wire() {
+@@ -2886,6 +3840,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -1483,7 +1523,7 @@ index dd2d10c..ee62cb5 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +3918,19 @@ function wire() {
+@@ -2997,6 +3955,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -1596,10 +1636,10 @@ index 1a5fd93..57b8bd6 100644
          </div>
          <div class="ledger-detail" id="ledger-detail" hidden>
 diff --git a/apps/control-plane/static/style.css b/apps/control-plane/static/style.css
-index ac13c95..a734f49 100644
+index ac13c95..3184606 100644
 --- a/apps/control-plane/static/style.css
 +++ b/apps/control-plane/static/style.css
-@@ -1047,3 +1047,153 @@ body.history-open .mission { display: none !important; }
+@@ -1047,3 +1047,157 @@ body.history-open .mission { display: none !important; }
  .activity-details[open] summary::before { content: "<U+25BE> "; }
  .activity-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray); white-space: nowrap; }
  .activity-log { margin: 0.35rem 0 0.2rem; font-family: ui-monospace, monospace; font-size: 0.74rem; white-space: pre-wrap; max-height: 5.5rem; overflow-y: auto; }
@@ -1753,6 +1793,10 @@ index ac13c95..a734f49 100644
 +  border-radius: 6px;
 +}
 +.q-open[aria-pressed="true"] .q-title { font-weight: 700; }
++
++/* .q-meta is a span (phrasing content, so it may sit inside the button) but
++   still lays out as a row. */
++.q-open .q-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
 diff --git a/tests/dom/mini_dom.mjs b/tests/dom/mini_dom.mjs
 new file mode 100644
 index 0000000..dd736c6
@@ -2808,10 +2852,10 @@ index 0000000..a7008eb
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/dom/wired_paths.mjs b/tests/dom/wired_paths.mjs
 new file mode 100644
-index 0000000..077ef3d
+index 0000000..24a165c
 --- /dev/null
 +++ b/tests/dom/wired_paths.mjs
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,580 @@
 +/*
 + * Executable coverage through the REAL wired event paths.
 + *
@@ -3121,6 +3165,145 @@ index 0000000..077ef3d
 +     "focus moves predictably to a remaining tile");
 +  eq(groups.querySelectorAll('.q-row[data-work-item="message:msg-beta"]').length, 0,
 +     "the removed item is genuinely gone, not retained to preserve focus");
++}
++
++// ---------------------------------------------------------------------------
++// 4d. GROUP TRANSITION. An item whose presentation_state changes must move into
++//     its new group, not be replaced inside its old one.
++// ---------------------------------------------------------------------------
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  seed(ctx);
++  ctx.wire();
++  ctx.renderQueue();
++  const groups = env.doc.getElementById("queue-groups");
++
++  const moved = JSON.parse(JSON.stringify(ITEMS));
++  moved[1].presentation_state = "needs_operator";   // beta joins alpha's group
++  seed(ctx, moved);
++  ctx.renderQueue();
++
++  const betaRow = groups.querySelector('.q-row[data-work-item="message:msg-beta"]');
++  ok(!!betaRow, "the moved item is still rendered");
++  const parentGroup = betaRow.closest(".q-group");
++  eq(parentGroup.getAttribute("data-group"), "needs_operator",
++     "a changed item lands in its DESIRED group, not its previous one");
++  eq(groups.querySelectorAll('.q-group[data-group="blocked"] .q-row').length, 0,
++     "no tile is left behind in the old group");
++}
++
++// 4e. STALE GROUP REMOVAL. A group with no remaining items must not linger as
++//     an empty heading.
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  seed(ctx);
++  ctx.wire();
++  ctx.renderQueue();
++  const groups = env.doc.getElementById("queue-groups");
++  eq(groups.querySelectorAll(".q-group").length, 2, "two groups initially");
++
++  seed(ctx, [ITEMS[0]]);            // the blocked group empties out
++  ctx.renderQueue();
++
++  eq(groups.querySelectorAll('.q-group[data-group="blocked"]').length, 0,
++     "an emptied group is removed, not left as a stale heading");
++  eq(groups.querySelectorAll(".q-group").length, 1, "only the populated group remains");
++}
++
++// 4f. REORDER-ONLY. When the sort order changes but nothing else does, the
++//     rendered order must follow.
++{
++  const env = buildEnv({});
++  const c = loadApp(env);
++  const pair = [
++    { work_item_id: "message:msg-one", thread_id: "thr-one", title: "One",
++      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council",
++      claimed_by: "claude", last_activity_at: "2026-07-25T10:00:00Z" },
++    { work_item_id: "message:msg-two", thread_id: "thr-two", title: "Two",
++      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council",
++      claimed_by: "claude", last_activity_at: "2026-07-25T09:00:00Z" },
++  ];
++  seed(c, pair);
++  c.wire();
++  c.renderQueue();
++  const groups = env.doc.getElementById("queue-groups");
++  const first = () => groups.querySelectorAll(".q-row[data-work-item]")[0]
++    .getAttribute("data-work-item");
++  const initial = first();
++
++  // Flip which one is most recent; ranking sorts by last_activity_at desc.
++  const flipped = JSON.parse(JSON.stringify(pair));
++  flipped[0].last_activity_at = "2026-07-25T08:00:00Z";
++  flipped[1].last_activity_at = "2026-07-25T11:00:00Z";
++  seed(c, flipped);
++  c.renderQueue();
++
++  ok(first() !== initial || true, "reorder path executed");
++  eq(first(), "message:msg-two",
++     "a reorder-only update is reflected in the rendered order");
++  eq(groups.querySelectorAll(".q-row[data-work-item]").length, 2,
++     "reordering does not duplicate or drop tiles");
++}
++
++// 4g. THE LAST ITEM DISAPPEARS. The empty transition owes the same focus
++//     contract: focus must not fall to the document body.
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  seed(ctx, [ITEMS[0]]);
++  ctx.wire();
++  ctx.renderQueue();
++  const groups = env.doc.getElementById("queue-groups");
++  const btn = groups.querySelector(".q-open");
++  btn.focus();
++  same(env.doc.activeElement, btn, "focus starts on the only tile");
++
++  seed(ctx, []);                    // the queue empties entirely
++  ctx.renderQueue();
++
++  ok(env.doc.activeElement !== env.doc.body,
++     "focus does not fall to the document body when the last tile goes");
++  same(env.doc.activeElement, groups,
++     "focus moves to the queue container when no tile remains");
++}
++
++// 4h. Identifier text and the integrity warning are NOT activation targets.
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  const shared = [
++    { work_item_id: "message:msg-s1", thread_id: "thr-shared", title: "S1",
++      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council",
++      claimed_by: "claude", last_activity_at: "2026-07-25T10:00:00Z" },
++    { work_item_id: "message:msg-s2", thread_id: "thr-shared", title: "S2",
++      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council",
++      claimed_by: "claude", last_activity_at: "2026-07-25T09:00:00Z" },
++  ];
++  seed(ctx, shared);
++  ctx.wire();
++  ctx.renderQueue();
++  const groups = env.doc.getElementById("queue-groups");
++
++  const warn = groups.querySelector(".q-integrity");
++  ok(!!warn, "a shared thread raises the integrity warning");
++  ev(ctx, 'selectedWorkItemId = null;');
++  warn.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), null,
++     "clicking the integrity warning does not navigate");
++
++  const idv = groups.querySelector(".q-idv");
++  ok(!!idv, "identifier values are rendered");
++  idv.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), null,
++     "clicking identifier text does not navigate; it can be selected and copied");
++
++  // The explicit control still activates.
++  groups.querySelector(".q-open").dispatchEvent(
++    new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-s1",
++     "the explicit primary control still activates");
 +}
 +
 +// ---------------------------------------------------------------------------

@@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
   const authBody = document.getElementById("authority-body");
   const actions = document.getElementById("operator-actions");
   if (!nextBody || !authBody || !actions) return;
+  // Phase 1, item 5: ONE contextual panel. With nothing selected the rail is
+  // hidden entirely rather than showing three separate "No task selected"
+  // cards; rows that have no content are omitted rather than rendered empty.
+  const rail = document.getElementById("session-rail");
   if (!ts) {
-    nextBody.innerHTML = '<p class="muted">No task selected.</p>';
-    authBody.innerHTML = '<p class="muted">No task selected.</p>';
-    actions.innerHTML = '<p class="muted">No task selected.</p>';
+    if (rail) rail.hidden = true;
+    nextBody.innerHTML = "";
+    authBody.innerHTML = "";
+    actions.innerHTML = "";
     return;
   }
+  if (rail) rail.hidden = false;
   nextBody.innerHTML = '<p class="op-next' + (ts.phase_attention ? " op-next-attention" : "") +
     '">' + esc(ts.next_action || "") + "</p>";
 
@@ -761,6 +767,57 @@ function createComposer(opts) {
     return name + ":" + (target.thread_id || "new") + ":" + (target.work_item_id || "");
   }
 
+  // Item 5: the URL, the selected tile, the bound thread and the composer
+  // destination must describe the SAME durable object before anything is sent.
+  // Any disagreement fails closed with a visible explanation rather than
+  // posting to a destination the operator did not read on screen.
+  function destinationDisagreement(target) {
+    if (!target || !target.work_item_id) return "";
+    if (target.work_item_id !== selectedWorkItemId) {
+      return "The composer destination and the selected work item disagree.";
+    }
+    // A CURRENTLY CONFIRMED queue is required. A snapshot that merely loaded
+    // once is not positive evidence: if the latest refresh failed, the old
+    // record and thread are still sitting in the array and would otherwise
+    // authorise a send against a destination nothing has re-confirmed.
+    if (!queueConfirmed) {
+      return "The work queue is not currently confirmed, so this destination " +
+             "cannot be verified. Wait for the queue to reload, then reselect " +
+             "the work item.";
+    }
+    // A LIVE canonical record is required. Guarding this on `known &&` meant
+    // the check was skipped exactly when the item had disappeared, which is the
+    // case it most needed to catch.
+    if (!isCanonicalMessageWorkItem(target.work_item_id)) {
+      return "That destination is not a message-scoped work item, so it cannot " +
+             "receive a message.";
+    }
+    const known = liveQueueRecord(target.work_item_id);
+    if (!known) {
+      return "That work item is no longer in the live queue, so the destination " +
+             "cannot be confirmed. Reselect an active work item.";
+    }
+    if (!known.thread_id || known.thread_id !== target.thread_id) {
+      return "The composer thread does not match the selected work item's thread.";
+    }
+    // STRICT. A work-item-bound send requires a canonical route that PROVES the
+    // URL agrees. Absent and malformed routes are not evidence of agreement, so
+    // both refuse rather than silently passing the check. Every queue activation
+    // now writes the route, so a missing one means the selection was not
+    // established through navigation and must be re-made.
+    const route = parseWorkRoute(location.hash);
+    if (!route) {
+      return "The URL carries no work route, so it cannot confirm the destination.";
+    }
+    if (route.malformed) {
+      return "The URL contains an unreadable work route.";
+    }
+    if (route.work_item_id !== selectedWorkItemId) {
+      return "The URL points at a different work item than the one selected.";
+    }
+    return "";
+  }
+
   function updateBanner() {
     if (!bannerEl) return;
     const target = getTarget();
@@ -768,8 +825,36 @@ function createComposer(opts) {
     // before anything has actually been sent; the banner only calls it
     // "continuing" once the caller confirms that id is a real durable thread.
     const confirmed = !isConfirmedTarget || isConfirmedTarget();
-    let text = (target.thread_id && confirmed) ? ("Continuing " + target.thread_id) : "New conversation";
-    if (target.work_item_id) text += " · " + target.work_item_id;
+    // Phase 1, item 3: the destination is DISPLAYED, never inferred from prose.
+    // Work-item id, thread id and an abbreviated title are shown above the
+    // composer so posting to the wrong destination requires an explicit change.
+    if (target.work_item_id && target.unresolved) {
+      bannerEl.classList.add("composer-destination");
+      bannerEl.innerHTML =
+        '<span class="dest-label dest-unresolved">Destination unresolved</span> ' +
+        '<span class="dest-work mono" data-dest-work-item="' + esc(target.work_item_id) + '">' +
+        esc(target.work_item_id) + '</span>' +
+        '<span class="dest-title">no durable thread yet - sending is blocked</span>';
+      return;
+    }
+    if (target.work_item_id) {
+      const di = (lastWorkItems || []).find((it) => it.work_item_id === target.work_item_id);
+      const title = di && di.title ? String(di.title) : "";
+      const short = title.length > 60 ? title.slice(0, 57) + "..." : title;
+      bannerEl.classList.add("composer-destination");
+      bannerEl.innerHTML =
+        '<span class="dest-label">Posting to</span> ' +
+        '<span class="dest-work mono" data-dest-work-item="' + esc(target.work_item_id) + '">' +
+        esc(target.work_item_id) + '</span>' +
+        (target.thread_id && confirmed
+          ? ' <span class="dest-thread mono" data-dest-thread="' + esc(target.thread_id) + '">' +
+            esc(target.thread_id) + '</span>' : '') +
+        (short ? ' <span class="dest-title">' + esc(short) + '</span>' : '');
+      return;
+    }
+    bannerEl.classList.remove("composer-destination");
+    const text = (target.thread_id && confirmed)
+      ? ("Continuing " + target.thread_id) : "New conversation";
     bannerEl.textContent = text;
   }
 
@@ -823,10 +908,29 @@ function createComposer(opts) {
       return;
     }
     showError("");
+    const preTarget = getTarget();
+    const disagreement = destinationDisagreement(preTarget);
+    if (disagreement) {
+      showError(disagreement + " Nothing was sent. Reselect the work item so " +
+                "the URL, the selection and the destination agree.");
+      return;
+    }
+    if (preTarget && preTarget.unresolved) {
+      showError("This work item has no durable thread yet, so the destination " +
+                "cannot be verified. The draft was kept; sending is blocked " +
+                "until the queue reports the thread.");
+      return;
+    }
     const draft = persistDraft();
-    const target = getTarget();
+    const target = preTarget;
+    // Item 13: the operator must never have to guess whether a send is running.
+    // `sending` already blocks re-entry from the button, Enter and Ctrl+Enter --
+    // they all call send() -- but that state was invisible.
     sending = true;
     sendBtn.disabled = true;
+    const idleLabel = sendBtn.textContent;
+    sendBtn.textContent = "Sending...";
+    sendBtn.setAttribute("aria-busy", "true");
     try {
       const body = Object.assign(
         { message: raw, idempotency_key: draft.idempotencyKey },
@@ -865,10 +969,18 @@ function createComposer(opts) {
       textarea.value = "";
       autoGrow();
       updateCounter();
+      // Phase 1, item 4: the operator must never open History or raw JSON to
+      // retrieve a durable message id. Show destination + the new id inline,
+      // with a copy control, immediately after a verified post.
+      showPostConfirmation(result);
       if (onPosted) onPosted(result, stored);
     } finally {
+      // Always restored, on success, refusal, network error and verification
+      // failure alike, so the composer can never strand in a sending state.
       sending = false;
       sendBtn.disabled = false;
+      sendBtn.textContent = idleLabel;
+      sendBtn.removeAttribute("aria-busy");
     }
   }
 
@@ -958,6 +1070,39 @@ const WORK_KIND_LABEL = {
 // --------------------------------------------------------------------------- //
 
 let lastWorkItems = [];
+// Distinguishes "the queue has not been fetched yet" from "the queue was
+// fetched successfully and is empty". Inferring this from lastWorkItems.length
+// conflated the two, so after a successful empty response an unknown explicit
+// route was retained as a provisional selection instead of being rejected.
+let workItemsLoaded = false;
+// A SUCCESSFUL queue response is positive evidence that the snapshot is live.
+// A failed refresh is not: it leaves the previous array in place, which must
+// NOT keep authorising sends. Send authorization therefore requires a
+// currently-confirmed queue, not merely one that loaded successfully once.
+let queueConfirmed = false;
+// A refresh failure the operator can still see. It is NOT transient: no boot
+// continuation, route restoration, conversation restoration, polling cycle or
+// transient-status cleanup may erase it. Only a later CONFIRMED success clears
+// it, because only that re-establishes the truth it was reporting.
+let queueFailureReported = false;
+// Monotonically increasing refresh generation. Overlapping refreshes are
+// possible (the polling timer, the boot path and the Retry control can all be
+// in flight at once) and they can complete OUT OF ORDER, so a completion may
+// only touch shared state when it belongs to the newest started refresh.
+let queueRefreshGeneration = 0;
+
+// The four outcomes a refresh can have. They are deliberately distinct:
+// "confirmed empty" is a real, authoritative answer and must never be confused
+// with "not loaded" or "failed".
+const REFRESH_CONFIRMED = "confirmed";
+const REFRESH_CONFIRMED_EMPTY = "confirmed_empty";
+const REFRESH_FAILED = "failed";
+const REFRESH_SUPERSEDED = "superseded";
+
+// True only for an outcome that re-establishes authoritative queue truth.
+function refreshSucceeded(outcome) {
+  return outcome === REFRESH_CONFIRMED || outcome === REFRESH_CONFIRMED_EMPTY;
+}
 let lastQueueCouncils = [];
 let lastArchiveIndex = { archived: [], count: 0 };
 
@@ -1045,6 +1190,17 @@ function actionsForState(pstate, canonical) {
   }
 }
 
+// Everything queueCard renders from, so an unchanged item produces an unchanged
+// signature and its node is never replaced.
+function queueCardSignature(it) {
+  return [it.work_item_id, it.thread_id, it.presentation_state, it.status,
+          it.runner_state, it.claimed_by, it.title || it.summary,
+          it.last_activity_at, it.last_activity_event,
+          it.work_item_id === selectedWorkItemId ? "sel" : "",
+          isCanonicalMessageWorkItem(it.work_item_id) ? "canon" : "noncanon",
+          sharesThreadWithOtherWorkItems(it, lastWorkItems) ? "amb" : ""].join("\u0001");
+}
+
 function queueCard(it) {
   const ps = it.presentation_state || "waiting_on_claude";
   const selected = it.work_item_id && it.work_item_id === selectedWorkItemId;
@@ -1061,11 +1217,93 @@ function queueCard(it) {
     ? '<span class="q-opflag" title="operator action required">◉ operator</span>' : "";
   // Technical ids ride on data attributes only; the primary card stays readable.
   const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
+  // The row is NOT the control. Keyboard reachability comes from the explicit
+  // .q-open button rendered below, which carries aria-current; this comment
+  // previously still described the superseded role/tabindex/aria-pressed row.
+  const execLabel = executorStateLabel(it);
+  const phaseLabel = lifecyclePhaseLabel(it);
+  const wid = it.work_item_id || "";
+  // POLICY, stated because the reviewers asked. Two distinct cases:
+  //   * a record with NO usable key is EXCLUDED from reconciliation entirely
+  //     (renderQueue filters it), because several such rows would collapse onto
+  //     one empty key and reconciliation could move or focus the wrong tile;
+  //   * a record WITH a usable key but a non-canonical shape is DISPLAYED
+  //     read-only, because it is durable governed work the operator must see.
+  // Neither can ever become a sendable destination.
+  // A non-canonical entry -- today only the packet projection
+  // "in_progress:<packet-id>" -- is REAL work the operator must still see, so
+  // it is not hidden. It is rendered READ-ONLY: no .q-open control, so it is
+  // not activatable, not navigable and not selectable as a message
+  // destination. Only message-scoped work items are conversations.
+  const canonical = isCanonicalMessageWorkItem(wid);
+  const tid = it.thread_id || "";
+  const originId = originMessageId(wid);
+  // Item 1: multiple canonical work items on one thread is legal but reads as
+  // duplication. Surface it; never hide a durable record to tidy the view.
+  const ambiguous = sharesThreadWithOtherWorkItems(it, lastWorkItems);
+  const warn = ambiguous
+    ? '<div class="q-integrity" role="note">Shared thread: more than one work ' +
+      "item is bound to this thread. These are distinct durable records, not " +
+      "duplicates - compare the work-item IDs.</div>"
+    : "";
+  // Item 3: each identifier is LABELLED by type. A thread id is never presented
+  // as a work-item id, and the shared-suffix coincidence is explained in place.
+  const suffixNote = sharesSuffix(wid, tid)
+    ? ' <span class="q-idnote" title="The thread was created together with this' +
+      " item's origin message, so their numeric suffixes match. They remain" +
+      ' different identifiers.">matching suffix</span>'
+    : "";
+  const ids =
+    '<div class="q-ids">' +
+      '<span class="q-idrow"><span class="q-idk">Work item</span>' +
+        '<code class="mono q-idv" title="' + esc(wid) + '">' + esc(abbrevId(wid)) + "</code>" +
+        copyIdButton(wid, "work-item ID") + "</span>" +
+      (tid ? '<span class="q-idrow"><span class="q-idk">Thread</span>' +
+        '<code class="mono q-idv" title="' + esc(tid) + '">' + esc(abbrevId(tid)) + "</code>" +
+        copyIdButton(tid, "thread ID") + suffixNote + "</span>" : "") +
+      (originId ? '<span class="q-idrow"><span class="q-idk">Origin message</span>' +
+        '<code class="mono q-idv" title="' + esc(originId) + '">' + esc(abbrevId(originId)) +
+        "</code>" + copyIdButton(originId, "origin message ID") + "</span>" : "") +
+    "</div>";
+  // ACCESSIBILITY: the row is a plain CONTAINER. Nesting real <button> copy
+  // controls inside an element that itself claimed role="button" is an invalid
+  // pattern, so the primary action is now an explicit button and the copy
+  // buttons are its siblings. Enter and Space come free from native button
+  // semantics rather than a hand-rolled key handler.
+  // aria-current, not aria-pressed: activating this control NAVIGATES to a
+  // work item, it does not toggle a state off again, so a toggle-button
+  // contract would misdescribe it to assistive technology.
+  const openStart = canonical
+    ? ('<button type="button" class="q-open" ' +
+       'aria-current="' + (selected ? "true" : "false") + '"' +
+       ' aria-label="Open work item ' + esc(wid) +
+       (execLabel ? " (executor " + esc(execLabel) + ")" : "") + '"' +
+       ' data-work-item="' + esc(wid) + '">')
+    : ('<div class="q-readonly" role="note"' +
+       ' aria-label="Packet record ' + esc(wid) + ', not a conversation">');
+  const openEnd = canonical ? "</button>" : "</div>";
+  const roBadge = canonical ? ""
+    : '<span class="q-ro-badge" title="A clearance packet shown for visibility. ' +
+      'It is not a conversation and cannot receive messages.">packet record</span>';
   return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
-    '" data-thread="' + esc(it.thread_id || "") +
-    '" data-work-item="' + esc(it.work_item_id || "") + '">' +
-    '<div class="q-title">' + title + "</div>" +
-    '<div class="q-meta">' + bits.join("") + opFlag + "</div>" +
+    (ambiguous ? " q-ambiguous" : "") + (canonical ? "" : " q-noncanonical") + '"' +
+    ' data-sig="' + esc(queueCardSignature(it)) + '"' +
+    ' data-canonical="' + (canonical ? "true" : "false") + '"' +
+    ' data-thread="' + esc(it.thread_id || "") +
+    '" data-work-item="' + esc(wid) + '">' +
+    openStart +
+    '<span class="q-title">' + title + "</span>" + roBadge +
+    // A button's content model is phrasing content, so the meta strip is a
+    // span laid out as a block rather than a div inside interactive markup.
+    '<span class="q-meta">' + bits.join("") + opFlag +
+    // Item 10: phase and executor state are DIFFERENT facts and are labelled
+    // separately, so "PHASE: VERIFICATION / EXECUTOR: IN COUNCIL" can never be
+    // misread as a single contradictory status.
+    (phaseLabel ? '<span class="q-phase mono" title="lifecycle phase">Phase ' +
+      esc(phaseLabel) + "</span>" : "") +
+    (execLabel ? '<span class="q-exec mono" title="executor state, derived from ' +
+      'runner_state only">Executor ' + esc(execLabel) + "</span>" : "") +
+    "</span>" + openEnd + ids + warn +
     "</div>";
 }
 
@@ -1117,6 +1355,108 @@ function attentionCounts(items) {
   return c;
 }
 
+// The rendered signature of the queue as last written to the DOM. Polling
+// re-runs renderQueue roughly every two seconds; when nothing material changed,
+// rewriting innerHTML destroyed every node -- including the focused control --
+// which made keyboard operation of the queue impossible. The signature lets an
+// unchanged poll become a no-op.
+let lastQueueSignature = null;
+
+// The canonical work-item key of the currently focused queue control, if any.
+function focusedQueueKey() {
+  const a = document.activeElement;
+  const btn = a && a.closest ? a.closest(".q-open") : null;
+  return btn ? btn.getAttribute("data-work-item") : null;
+}
+
+// Put focus back on the SAME durable identity after a reconciliation that had
+// to replace nodes. If that identity is legitimately gone, move predictably to
+// the first remaining tile, then to the container, rather than dropping focus
+// to the document body.
+function restoreQueueFocus(key, el) {
+  if (!key) return;
+  let btn = null;
+  try {
+    btn = el.querySelector('.q-open[data-work-item="' + cssAttrValue(key) + '"]');
+  } catch (e) { btn = null; }
+  if (btn) { btn.focus(); return; }
+  const first = el.querySelector(".q-open");
+  if (first) { first.focus(); return; }
+  if (el.setAttribute) el.setAttribute("tabindex", "-1");
+  if (el.focus) el.focus();
+}
+
+// Keyed reconciliation. Tiles are matched by canonical work-item id, and a tile
+// whose rendered markup is unchanged is LEFT ENTIRELY ALONE, so it keeps its
+// DOM identity, its focus and its scroll position. Only genuinely changed,
+// added or removed tiles touch the DOM.
+function reconcileQueue(el, desired) {
+  const existing = {};
+  Array.from(el.querySelectorAll(".q-row[data-work-item]")).forEach((node) => {
+    existing[node.getAttribute("data-work-item")] = node;
+  });
+  const keep = {};
+  desired.forEach((d) => { keep[d.key] = true; });
+
+  // Anything no longer in the queue goes, and only then.
+  Object.keys(existing).forEach((k) => {
+    if (!keep[k] && existing[k].parentNode) existing[k].parentNode.removeChild(existing[k]);
+  });
+
+  // Group the desired list, preserving its computed order.
+  const order = [];
+  const byGroup = {};
+  desired.forEach((d) => {
+    if (!byGroup[d.group]) { byGroup[d.group] = []; order.push(d); }
+    byGroup[d.group].push(d);
+  });
+
+  const seen = {};
+  order.forEach((first) => {
+    const g = first.group;
+    seen[g] = true;
+    let groupEl = el.querySelector('.q-group[data-group="' + cssAttrValue(g) + '"]');
+    if (!groupEl) {
+      groupEl = document.createElement("div");
+      groupEl.className = "q-group";
+      groupEl.setAttribute("data-group", g);
+      groupEl.innerHTML = '<div class="q-group-head">' + esc(first.groupLabel) + "</div>";
+    }
+    // Appending an already-attached node MOVES it, so this also fixes the
+    // order of the groups themselves.
+    el.appendChild(groupEl);
+
+    byGroup[g].forEach((d, i) => {
+      const prev = existing[d.key];
+      let node;
+      if (prev && prev.getAttribute("data-sig") === d.sig) {
+        node = prev;              // UNCHANGED: identity, focus and scroll kept
+      } else {
+        const tmp = document.createElement("div");
+        tmp.innerHTML = d.html;
+        node = tmp.firstElementChild || tmp.children[0];
+        if (!node) return;
+        // A changed row may also have changed GROUP, so detach it from
+        // wherever it was rather than replacing it in its old parent.
+        if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+      }
+      // Place it at its desired index, counting past the group heading. Only
+      // move when it is genuinely out of position, so an unchanged and
+      // correctly ordered tile is never touched.
+      const want = groupEl.children[i + 1];
+      if (want !== node) groupEl.insertBefore(node, want || null);
+    });
+  });
+
+  // Groups that no longer have any desired item must not linger as empty
+  // headings.
+  Array.from(el.querySelectorAll(".q-group")).forEach((g) => {
+    if (!seen[g.getAttribute("data-group")] && g.parentNode) {
+      g.parentNode.removeChild(g);
+    }
+  });
+}
+
 function renderQueue() {
   const el = document.getElementById("queue-groups");
   if (!el) return;
@@ -1124,21 +1464,44 @@ function renderQueue() {
   const rows = filterSortQueue(lastWorkItems, queueFilterMode, queueSearch);
   syncFilterChips();
   if (!rows.length) {
+    const emptySig = "EMPTY";
+    if (lastQueueSignature === emptySig) return;
+    lastQueueSignature = emptySig;
+    // The empty transition destroys every tile, including a focused one, so it
+    // owes the same focus contract as a normal reconciliation: never silently
+    // drop focus to the document body.
+    const hadFocus = !!focusedQueueKey();
     el.innerHTML = '<p class="muted queue-empty">Nothing here in this view. Try the History / All filter.</p>';
+    if (hadFocus) {
+      el.setAttribute("tabindex", "-1");
+      if (el.focus) el.focus();
+    }
     return;
   }
-  let html = "", curState = null;
-  rows.forEach((it) => {
-    if (it.presentation_state !== curState) {
-      if (curState !== null) html += "</div>";
-      curState = it.presentation_state;
-      html += '<div class="q-group"><div class="q-group-head">' +
-        esc(PSTATE_LABEL[curState] || curState) + "</div>";
-    }
-    html += queueCard(it);
+  // A record with no canonical work-item id cannot be keyed, so it is skipped
+  // rather than reconciled under an empty key where several such rows would
+  // collapse together and reconciliation could drop, move or focus the wrong
+  // tile. The derivation guarantees a canonical id, so this is fail-closed
+  // handling of data that should not exist, not an expected path.
+  const desired = rows.filter((it) => it && it.work_item_id).map((it) => {
+    const html = queueCard(it);
+    return {
+      key: it.work_item_id,
+      group: it.presentation_state || "",
+      groupLabel: PSTATE_LABEL[it.presentation_state] || it.presentation_state || "",
+      sig: queueCardSignature(it),
+      html: html
+    };
   });
-  if (curState !== null) html += "</div>";
-  el.innerHTML = html;
+  // NO-CHANGE SHORT CIRCUIT. The dominant polling case is "nothing changed",
+  // and it must not touch the DOM at all.
+  const signature = desired.map((d) => d.group + "|" + d.key + "|" + d.sig).join("\n");
+  if (signature === lastQueueSignature) return;
+  lastQueueSignature = signature;
+
+  const focusKey = focusedQueueKey();
+  reconcileQueue(el, desired);
+  if (focusKey) restoreQueueFocus(focusKey, el);
 }
 
 function syncFilterChips() {
@@ -1290,23 +1653,674 @@ function openAttention() {
   }
 }
 
+// One safe composer during active work (Phase 1, item 3). While a work item is
+// selected the generic new-conversation composer is demoted so it cannot
+// compete with the work-item-bound composer for the operator's attention.
+// Nothing is disabled or removed: the operator can still start a new
+// conversation deliberately, it simply stops being an equal-weight target.
+function applyComposerFocus() {
+  const generic = document.getElementById("composer-card");
+  if (!generic) return;
+  const active = !!selectedWorkItemId;
+  generic.classList.toggle("composer-demoted", active);
+  // Demote CONSISTENTLY. Marking the card aria-hidden while leaving its Send
+  // button in the tab order is worse than doing nothing: a screen-reader user
+  // tabs to a control the accessibility tree says is not there. `inert` removes
+  // it from both the a11y tree and the tab order in one step; where it is not
+  // supported, mirror that on every focusable descendant, not just the input.
+  const FOCUSABLE = "a[href], button, input, select, textarea, [tabindex]";
+  if ("inert" in HTMLElement.prototype) {
+    generic.inert = active;
+    generic.removeAttribute("aria-hidden");   // inert already implies it
+  } else {
+    generic.setAttribute("aria-hidden", active ? "true" : "false");
+    generic.querySelectorAll(FOCUSABLE).forEach((el) => {
+      if (active) {
+        // Preserve any explicit tabindex so demotion is exactly reversible.
+        if (!el.hasAttribute("data-prior-tabindex")) {
+          el.setAttribute("data-prior-tabindex",
+                          el.hasAttribute("tabindex") ? el.getAttribute("tabindex") : "");
+        }
+        el.tabIndex = -1;
+      } else if (el.hasAttribute("data-prior-tabindex")) {
+        const prior = el.getAttribute("data-prior-tabindex");
+        if (prior === "") el.removeAttribute("tabindex");
+        else el.setAttribute("tabindex", prior);
+        el.removeAttribute("data-prior-tabindex");
+      }
+    });
+  }
+}
+
+// Keyboard activation for queue rows (Phase 1, item 7). Enter or Space opens
+// the row exactly as a click does; the existing click handler is untouched.
+// NO keyboard handler for queue tiles, deliberately. The primary control is a
+// real <button>, so the browser already activates it on Enter and on Space and
+// fires exactly one click, which the delegated queue listener turns into one
+// canonical navigation. An earlier version called preventDefault() on Space to
+// stop page scrolling; on a focused button Space's default action IS the
+// activation, so that suppressed the very keyboard path this control exists to
+// provide. Space does not scroll the page while a button holds focus, so there
+// is nothing to suppress and nothing to add.
+
+// --------------------------------------------------------------------------
+// TRUTHFUL EXECUTION STATE (Phase 1, item 6)
+// --------------------------------------------------------------------------
+// RUNNING is never derived from message-post activity. An inbound operator
+// message proves only that the OPERATOR acted; it is no evidence that an
+// executor resumed, consumed it, or is working. Such an item is reported as
+// a state the durable record can actually support, never an
+// inference from message-post activity.
+//
+// States requiring executor acknowledgement or wake telemetry
+// (EXECUTOR_RESUMED, MESSAGE_ACKNOWLEDGED, WAKE_PENDING) are NOT produced here
+// and are NOT simulated. They are deferred to the Phase 2 executor wake bridge.
+// Evidence-backed only. `it` is the derived work item from /api/work-items.
+// LIFECYCLE PHASE: where the governed work item sits in its own lifecycle.
+// Derived from `status`, whose observed domain is open|planning|verification|
+// claimed|operator_required|done|closed|superseded|malformed. This says nothing
+// about whether any executor is running.
+const LIFECYCLE_PHASE_LABELS = {
+  open: "OPEN", planning: "PLANNING", verification: "VERIFICATION",
+  claimed: "CLAIMED", operator_required: "OPERATOR REQUIRED",
+  done: "DONE", closed: "CLOSED", superseded: "SUPERSEDED",
+  malformed: "MALFORMED"
+};
+
+function lifecyclePhaseOf(it) {
+  const st = String((it && it.status) || "");
+  return Object.prototype.hasOwnProperty.call(LIFECYCLE_PHASE_LABELS, st) ? st : "";
+}
+
+function lifecyclePhaseLabel(it) {
+  return LIFECYCLE_PHASE_LABELS[lifecyclePhaseOf(it)] || "";
+}
+
+// EXECUTOR STATE: what a runner is actually doing, derived ONLY from
+// runner_state, whose domain is unowned|active_runner|waiting_on_council|
+// waiting_on_operator|claimed_idle|stale_or_no_heartbeat|unknown.
+//
+// ACTIVE is reported only for "active_runner", which the server returns solely
+// on positive evidence of recent non-claim activity. A claim alone is never
+// running, and a posted message is never running: ClearWright has no heartbeat
+// channel, so anything stronger would be fabricated.
+const EXECUTOR_LABELS = {
+  active_runner: "ACTIVE", waiting_on_council: "IN COUNCIL",
+  waiting_on_operator: "WAITING FOR OPERATOR", claimed_idle: "CLAIMED",
+  stale_or_no_heartbeat: "NO HEARTBEAT", unowned: "UNCLAIMED",
+  unknown: "UNKNOWN"
+};
+
+function executorRunnerState(it) {
+  const r = String((it && it.runner_state) || "");
+  return Object.prototype.hasOwnProperty.call(EXECUTOR_LABELS, r) ? r : "";
+}
+
+function executorStateLabel(it) {
+  return EXECUTOR_LABELS[executorRunnerState(it)] || "";
+}
+
+// Ranking vocabulary, mapped from the SAME evidence as the executor label so
+// the queue order and the rendered state can never disagree. Terminal
+// presentation states win first because a finished item is not active work.
+function truthfulExecutionState(it) {
+  if (!it) return "";
+  const p = String(it.presentation_state || "");
+  const r = executorRunnerState(it);
+  if (p === "recently_completed" || p === "historical" || p === "superseded") return "complete";
+  if (p === "needs_operator" || p === "waiting_on_operator" || r === "waiting_on_operator") {
+    return "waiting_for_operator";
+  }
+  if (r === "waiting_on_council") return "in_council";
+  if (r === "stale_or_no_heartbeat" || p === "stale") return "paused";
+  if (r === "active_runner") return "executor_active";
+  if (p === "blocked") return "blocked";
+  if (r === "claimed_idle" || it.claimed_by) return "claimed";
+  return "";
+}
+
+// --------------------------------------------------------------------------
+// DURABLE IDENTITY ON THE QUEUE (operator correction items 1, 2 and 3)
+// --------------------------------------------------------------------------
+// Investigation result, recorded because it changes what the correct fix is:
+// the apparently duplicated tiles are NOT phantoms and NOT client artifacts.
+// /api/work-items returns genuinely DISTINCT canonical work items whose titles
+// collide because the title is derived from the origin message text, and in one
+// case three separate message-scoped work items share a single thread. Every
+// work_item_id is a real "message:msg-..." value; no thread id is ever rendered
+// as a work item. Collapsing them would HIDE durable governed work, so the tiles
+// are disambiguated and the shared-thread condition is surfaced as an integrity
+// warning instead.
+
+// ONE escaping mechanism for every dynamic value interpolated into a
+// selector. Every such value in this file sits inside a QUOTED ATTRIBUTE
+// selector -- [data-work-item="..."] and friends -- so the correct
+// operation is CSS STRING-LITERAL escaping, not identifier escaping.
+// CSS.escape is deliberately NOT used here: it escapes identifiers, and
+// its output does not round-trip inside a quoted string, so a value
+// containing a quote, a backslash or a space would fail to match the very
+// node it names. Within a CSS string the backslash and the quote must be
+// escaped, and so must newlines, NUL and other control characters, which
+// are not permitted raw in a string token.
+function cssAttrValue(value) {
+  const v = String(value === null || value === undefined ? "" : value);
+  let out = "";
+  for (const ch of v) {
+    const code = ch.codePointAt(0);
+    if (ch === '\\' || ch === '"') { out += '\\' + ch; continue; }
+    // A CSS string token may not contain a raw newline, NUL or other control
+    // character. The general escape is a hexadecimal sequence terminated by a
+    // space, which is well defined for every code point in that range.
+    if (code < 0x20 || code === 0x7f) {
+      out += '\\' + code.toString(16) + ' ';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+// --------------------------------------------------------------------------
+// CANONICAL SENDABLE DESTINATIONS (operator correction 1 and 4)
+// --------------------------------------------------------------------------
+// A destination may only be a MESSAGE-SCOPED work item that is present in the
+// live queue and carries a durable thread. Two shapes are excluded on purpose:
+//
+//   * packet projections such as "in_progress:<packet-id>", which are the queue
+//     presentation of a clearance packet rather than a conversation, and have
+//     no thread to post into;
+//   * any record without a canonical message-scoped id, including a malformed
+//     or future entry, which must never resolve to a destination.
+//
+// The canonical id of a message work item is literally "message:" + its origin
+// message id, so this is a shape the derivation guarantees rather than a
+// convention.
+function isCanonicalMessageWorkItem(id) {
+  return typeof id === "string" && /^message:msg-[0-9A-Za-z]+$/.test(id);
+}
+
+// The LIVE queue record for a work item, or null. Returning null is the
+// fail-closed answer: it is used to refuse, never to fall back to remembered
+// state. A selection whose item polling has removed therefore stops being
+// sendable the moment the queue no longer lists it.
+function liveQueueRecord(workItemId) {
+  if (!isCanonicalMessageWorkItem(workItemId)) return null;
+  return (lastWorkItems || []).find(
+    (i) => i && i.work_item_id === workItemId) || null;
+}
+
+// thread_id -> [work_item_id, ...] for every item the queue can see.
+function threadWorkItemIndex(items) {
+  const idx = {};
+  (items || []).forEach((it) => {
+    const t = it && it.thread_id;
+    if (!t) return;
+    if (!idx[t]) idx[t] = [];
+    if (idx[t].indexOf(it.work_item_id) === -1) idx[t].push(it.work_item_id);
+  });
+  return idx;
+}
+
+// True when this item's thread carries more than one canonical work item. That
+// is legal but ambiguous to read, so it is flagged rather than hidden.
+function sharesThreadWithOtherWorkItems(it, items) {
+  if (!it || !it.thread_id) return false;
+  const peers = threadWorkItemIndex(items)[it.thread_id] || [];
+  return peers.length > 1;
+}
+
+// A work item id derived from a message carries that message's id verbatim:
+// "message:" + message_id. When the thread was created with that same origin
+// message the numeric suffixes match, which reads like duplication but is not.
+function idSuffix(id) {
+  const m = /(\d{8}T\d{6,})/.exec(String(id || ""));
+  return m ? m[1] : "";
+}
+
+function sharesSuffix(workItemId, threadId) {
+  const a = idSuffix(workItemId);
+  return !!a && a === idSuffix(threadId);
+}
+
+function originMessageId(workItemId) {
+  const s = String(workItemId || "");
+  return s.indexOf("message:") === 0 ? s.slice("message:".length) : "";
+}
+
+// Abbreviated for display only. The FULL id is always what gets copied.
+function abbrevId(id, keep) {
+  const s = String(id || "");
+  const k = keep || 14;
+  return s.length <= k + 3 ? s : s.slice(0, k) + "\u2026" + s.slice(-4);
+}
+
+// --------------------------------------------------------------------------
+// DURABLE MESSAGE IDENTITY (Phase 1, item 4) - see GitHub issue #86
+// --------------------------------------------------------------------------
+// Every durable message already carries data-message-id in the DOM; it was
+// simply never surfaced. These helpers render it visibly with a keyboard
+// accessible copy control. Presentation only: no identity is created,
+// altered, or inferred here.
+function copyToClipboard(value) {
+  if (!value) return Promise.resolve(false);
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(value).then(() => true, () => false);
+    }
+  } catch (e) { /* fall through */ }
+  return Promise.resolve(false);
+}
+
+// A real <button> so it is reachable and activatable by keyboard.
+function copyIdButton(value, label) {
+  if (!value) return "";
+  return '<button type="button" class="copy-id" data-copy-value="' + esc(value) +
+    '" aria-label="Copy ' + esc(label) + ' ' + esc(value) + '" title="Copy ' +
+    esc(label) + '">Copy</button>';
+}
+
+function messageIdentityRow(m) {
+  if (!m) return "";
+  const mid = m.message_id || "";
+  const tid = m.thread_id || "";
+  const wid = m.work_item_id || "";
+  let html = '<div class="msg-identity">';
+  if (mid) {
+    html += '<span class="msg-id mono" data-message-id-text="' + esc(mid) + '">' +
+      esc(mid) + "</span>" + copyIdButton(mid, "message ID");
+  }
+  if (tid) {
+    html += '<span class="msg-thread mono">' + esc(tid) + "</span>" +
+      copyIdButton(tid, "thread ID");
+  }
+  if (m.actor) html += '<span class="msg-actor">' + esc(m.actor) + "</span>";
+  if (m.intent) html += '<span class="msg-intent">' + esc(m.intent) + "</span>";
+  if (wid) html += '<span class="msg-binding mono">' + esc(wid) + "</span>";
+  if (m.at) html += '<span class="msg-time">' + esc(m.at) + "</span>";
+  return html + "</div>";
+}
+
+// Confirmation shown immediately after a verified post.
+function showPostConfirmation(result) {
+  if (!result) return;
+  const el = document.getElementById("post-confirmation");
+  if (!el) return;
+  el.hidden = false;
+  el.innerHTML = '<span class="pc-label">Posted</span>' +
+    '<span class="pc-msg mono" data-posted-message-id="' + esc(result.message_id || "") + '">' +
+    esc(result.message_id || "") + "</span>" +
+    copyIdButton(result.message_id, "message ID") +
+    '<span class="pc-work mono">' + esc(result.work_item_id || "") + "</span>" +
+    '<span class="pc-thread mono">' + esc(result.thread_id || "") + "</span>";
+}
+
+// One delegated listener serves every copy control, including ones rendered
+// later, and keeps them keyboard operable.
+document.addEventListener("click", (e) => {
+  const btn = e.target && e.target.closest && e.target.closest(".copy-id");
+  if (!btn) return;
+  const val = btn.getAttribute("data-copy-value") || "";
+  copyToClipboard(val).then((ok) => {
+    const prev = btn.textContent;
+    btn.textContent = ok ? "Copied" : "Copy failed";
+    setTimeout(() => { btn.textContent = prev; }, 1200);
+  });
+});
+
+// --------------------------------------------------------------------------
+// ACTIVE SESSION CONTINUITY (Phase 1, item 1)
+// --------------------------------------------------------------------------
+// Refreshing must return the operator to active work. The deterministic
+// #work= hash route below already exists; it is now WRITTEN on every selection
+// and MIRRORED to one localStorage key so a plain reload (no hash) still
+// restores. Nothing here changes work-item, thread, authority or identity
+// semantics: it only decides which existing item is shown first.
+const SELECTION_KEY = "cw_selected_work_item_v1";
+
+function persistSelection(workItemId) {
+  try {
+    if (workItemId) localStorage.setItem(SELECTION_KEY, workItemId);
+    else localStorage.removeItem(SELECTION_KEY);
+  } catch (e) { /* storage unavailable -> hash route still works */ }
+}
+
+function readPersistedSelection() {
+  try { return localStorage.getItem(SELECTION_KEY) || null; } catch (e) { return null; }
+}
+
+// Operator-specified priority order. Ranked ONLY from fields /api/work-items
+// already returns; nothing is inferred or simulated.
+// The operator's stated priority order. "wake_pending" is DELIBERATELY ABSENT:
+// it can only be established by executor acknowledgement or wake telemetry,
+// which is the Phase 2 wake bridge. Listing a bucket that no durable field can
+// fill makes the ranking contract inert and advertises a priority that never
+// applies, so it is deferred rather than simulated (Phase 1, item 6). When the
+// wake bridge lands it belongs between operator_message_posted and paused.
+// Every entry MUST be producible by executorStateOf(). Two buckets were removed
+// after being proven unreachable against the real server value domain:
+//   wake_pending            needs executor acknowledgement / wake telemetry,
+//                           which is the deferred Phase 2 wake bridge.
+//   operator_message_posted assumed last_activity_event could be "message" or
+//                           "operator_message". It cannot: last_activity() emits
+//                           exactly created|completion|verification|council|gate|
+//                           progress|claim|response|evidence, so that branch was
+//                           dead code and the rank could never be reached.
+// A rank nothing can produce silently mis-orders the queue, so it is removed
+// rather than left as decoration.
+const ACTIVE_RANK = [
+  "waiting_for_operator",
+  "paused",
+  "executor_active",
+  "in_council",
+  "claimed",
+  "blocked"
+];
+
+// Terminal / non-active presentation states are never auto-selected.
+const INACTIVE_STATES = ["recently_completed", "complete", "superseded", "historical"];
+
+function isActiveItem(it) {
+  if (!it) return false;
+  return INACTIVE_STATES.indexOf(String(it.presentation_state || "")) === -1;
+}
+
+// Map the derived record onto the operator's priority vocabulary. Only states
+// supportable from durable evidence are produced (Phase 1, item 6): anything
+// needing executor acknowledgement or wake telemetry is deferred to the wake
+// bridge and is NEVER synthesised here.
+function activeStateOf(it) {
+  // Delegate to the ONE truthful mapping instead of keeping a second, looser
+  // copy. The earlier duplicate never returned operator_message_posted (so that
+  // rank was unreachable) and defaulted every unrecognised item to in_council,
+  // which silently ranked unknown states ahead of blocked work. An unknown
+  // state now returns "" and sorts last rather than being guessed.
+  return truthfulExecutionState(it);
+}
+
+function rankActiveWorkItems(items) {
+  return (items || []).filter(isActiveItem).slice().sort((a, b) => {
+    const ra = ACTIVE_RANK.indexOf(activeStateOf(a));
+    const rb = ACTIVE_RANK.indexOf(activeStateOf(b));
+    const na = ra === -1 ? ACTIVE_RANK.length : ra;
+    const nb = rb === -1 ? ACTIVE_RANK.length : rb;
+    if (na !== nb) return na - nb;
+    const t = String(b.last_activity_at || "").localeCompare(String(a.last_activity_at || ""));
+    if (t !== 0) return t;
+    // Deterministic final key: equal or missing timestamps must not leave the
+    // restored selection dependent on queue iteration order.
+    return String(a.work_item_id || "").localeCompare(String(b.work_item_id || ""));
+  });
+}
+
+// Restore on load: an explicit prior selection wins while it is still valid;
+// otherwise the highest-priority active item; otherwise the empty state is
+// legitimate because there is genuinely no active work.
+function restoreActiveSelection() {
+  const items = lastWorkItems || [];
+  const deep = parseWorkRoute(location.hash);
+  if (deep && deep.malformed) {
+    selectTask(null);
+    persistSelection(null);
+    clearWorkRoute();
+    routeErrorReported = true;
+    showRestoreStatus("That link could not be read, so it was removed. " +
+                      "Nothing is selected.");
+    return;
+  }
+  if (deep) {
+    // An explicit deep link always wins. It is applied at boot BEFORE the queue
+    // is fetched, so the durable thread could not be resolved then; the queue is
+    // known now. Route handling goes through the SAME single policy as the
+    // hashchange path -- validate against the live queue, clear an unknown
+    // route, never persist a terminal item -- so the two cannot drift.
+    bindRouteSelection(deep.work_item_id);
+    return;
+  }
+  const stored = readPersistedSelection();
+  const storedItem = stored
+    ? items.find((it) => it.work_item_id === stored && isActiveItem(it))
+    : null;
+  const target = storedItem || rankActiveWorkItems(items)[0] || null;
+  if (!target) { persistSelection(null); return; }   // no active work: empty state is correct
+  navigateToWorkItem(target.work_item_id);
+}
+
+// ONE parser for the work route, shared by boot and restoration so malformed
+// input is handled identically in both. decodeURIComponent() raises URIError on
+// malformed percent-encoding; an unguarded call at boot aborts wire() before
+// initJumpToLatest(), restoration and the refresh timers are installed, so a
+// single bad URL would disable the console instead of being reported.
+function parseWorkRoute(hash) {
+  // NOTE the [^&]* rather than [^&]+: "#work=" carries an explicit but empty
+  // work id. That is an INVALID route, not the absence of one, and it must go
+  // through the same clear-and-report path instead of silently falling through
+  // to stored-selection restoration.
+  const m = /[#&]work=([^&]*)/.exec(hash || "");
+  if (!m) return null;
+  let wid;
+  try {
+    wid = decodeURIComponent(m[1]);
+  } catch (e) {
+    return { malformed: true, work_item_id: null, message_id: null };
+  }
+  if (!wid) return { malformed: true, work_item_id: null, message_id: null };
+  let msg = null;
+  const mm = /[#&]msg=([^&]+)/.exec(hash || "");
+  if (mm) {
+    try { msg = decodeURIComponent(mm[1]); } catch (e) { msg = null; }
+  }
+  return { malformed: false, work_item_id: wid, message_id: msg };
+}
+
+// Remove an invalid route so a reload does not repeat the same failure. Falls
+// back to assigning the hash when history is unavailable.
+function clearWorkRoute() {
+  try {
+    history.replaceState(null, "", location.pathname + location.search);
+  } catch (e) {
+    try { location.hash = ""; } catch (e2) { /* nothing further to do */ }
+  }
+}
+
+// ONE place where a route becomes a selection, so queue validation and the
+// terminal-item policy cannot diverge between the boot path and the hashchange
+// path. Returns true when a selection was bound, false when the route was
+// rejected, and null when the queue is not loaded yet (boot), in which case
+// restoreActiveSelection() validates once it is.
+function bindRouteSelection(wid) {
+  const items = lastWorkItems || [];
+  // Only a genuinely unfetched queue defers validation. A successful empty
+  // response is authoritative: the route cannot be backed by anything.
+  if (!workItemsLoaded) return null;
+  const known = items.find((it) => it.work_item_id === wid);
+  if (!known) {
+    // Queue-unbacked: clear unconditionally, drop the route so a reload does
+    // not repeat it, and say so.
+    selectTask(null);
+    persistSelection(null);
+    clearWorkRoute();
+    routeErrorReported = true;
+    showRestoreStatus('Work item "' + wid + '" is not in the live queue. ' +
+                      "The link may be stale, so nothing is selected.");
+    return false;
+  }
+  selectTask(known.thread_id || null, wid);
+  // A route that resolves is a successful navigation: any earlier route
+  // explanation is now obsolete and must not outlive it.
+  routeErrorReported = false;
+  // POLICY, applied on EVERY route path. An EXPLICIT link may open a terminal
+  // item, because reviewing finished work is the point of sharing a link. That
+  // is inspection, NOT active-session restoration: it is never persisted, so
+  // the next refresh restores real active work instead of reopening finished
+  // work. Automatic restoration still excludes terminal items entirely.
+  if (!isActiveItem(known)) {
+    persistSelection(null);
+    showRestoreStatus("Opened " + (activeStateOf(known) || "inactive").replace(/_/g, " ") +
+                      " work item for inspection. It is not active, so it " +
+                      "will not be restored on the next refresh.");
+  } else {
+    clearTransientRestoreStatus();
+  }
+  return true;
+}
+
 // Deterministic hash route: #work=<work_item_id>[&msg=<message_id>]. The
 // highlight message id is derived from the work item id itself (a message work
 // item id IS "message:" + message_id) -- no message search, no ambiguity.
 function navigateToWorkItem(workItemId) {
+  // Deliberate navigation: an earlier malformed-link explanation is obsolete.
+  // Clear the flag AND the visible text -- resetting only the flag left the
+  // stale message on screen whenever no hashchange followed.
+  routeErrorReported = false;
+  showRestoreStatus("");
   const msgId = workItemId && workItemId.indexOf("message:") === 0
     ? workItemId.slice("message:".length) : "";
   location.hash = "#work=" + encodeURIComponent(workItemId) +
     (msgId ? "&msg=" + encodeURIComponent(msgId) : "");
-  selectTask(null, workItemId);
+  // Use the durable thread the API already reports for this item, so the
+  // composer binds to the real thread instead of minting a new one.
+  const known = (lastWorkItems || []).find((it) => it.work_item_id === workItemId);
+  selectTask(known ? known.thread_id || null : null, workItemId);
   showView("work");
+  openConversationTab();                     // conversation-first (item 2)
   if (msgId) setTimeout(() => highlightMessage(msgId), 200);
+  else setTimeout(jumpToLatestMessage, 200); // land on the latest message
+}
+
+// Conversation-first active view (Phase 1, item 2). Selecting active work opens
+// the Conversation tab and lands on the latest message. Scroll is preserved
+// only when the operator deliberately moved away from the bottom, which the
+// existing unread tracking already detects.
+function openConversationTab() {
+  // The Work view IS the conversation surface in this console: #center-work
+  // hosts the conversation detail and the docked composer, and there is no
+  // separate tab control (the only role="tablist" is the queue filter strip).
+  // "Open the Conversation tab" therefore means show that view, which also
+  // runs loadConversations() and docks the composer.
+  if (currentView !== "work") showView("work");
+}
+
+// The element whose CONTENT is the conversation. Mutations are observed here.
+function conversationAnchorEl() {
+  return document.getElementById("conv-scroll") ||
+         document.getElementById("conv-detail") ||
+         document.getElementById("conversation") ||
+         document.getElementById("comms");
+}
+
+// The element that ACTUALLY SCROLLS. #conv-detail is laid out with
+// overflow-y:visible and grows with its content, so scrollHeight equals
+// clientHeight and it can never report a scroll position -- targeting it left
+// the whole jump-to-latest feature inert. Walk up to the nearest genuinely
+// scrollable ancestor and fall back to the page, which is the real scroller
+// in the current layout.
+function conversationScrollEl() {
+  let el = conversationAnchorEl();
+  while (el && el !== document.body && el !== document.documentElement) {
+    let oy = "";
+    try { oy = getComputedStyle(el).overflowY; } catch (e) { oy = ""; }
+    if ((oy === "auto" || oy === "scroll") && (el.scrollHeight - el.clientHeight) > 4) {
+      return el;
+    }
+    el = el.parentElement;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+
+
+function operatorMovedAwayFromLatest(el) {
+  if (!el) return false;
+  return (el.scrollHeight - el.scrollTop - el.clientHeight) > 120;
+}
+
+// True when THIS page load already reported an unusable route. The boot success
+// path must not wipe that message: clearing the hash necessarily makes the bad
+// route invisible to the restoration that follows, so without this flag the
+// operator would see the explanation replaced by a silently restored selection.
+let routeErrorReported = false;
+
+// Clear only a TRANSIENT status. A reported route error is not transient: it
+// explains something the operator's link did, and it stays until they navigate.
+function clearTransientRestoreStatus() {
+  if (routeErrorReported) return;
+  // A reported refresh failure is NOT transient. Clearing it here is what
+  // previously made an initial-load failure invisible: the boot continuation
+  // erased the explanation the failure had just rendered.
+  if (queueFailureReported) return;
+  showRestoreStatus("");
+}
+
+// Restoration status is surfaced, never swallowed. `retry` shows the control
+// that re-runs the same load path.
+function showRestoreStatus(text, retry) {
+  const el = document.getElementById("restore-status");
+  if (!el) return;
+  if (!text) { el.hidden = true; el.textContent = ""; return; }
+  el.textContent = text;
+  el.hidden = false;
+  if (retry) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-quiet";
+    btn.textContent = "Retry";
+    btn.addEventListener("click", () => {
+      refreshWorkItems().then((outcome) => {
+        if (refreshSucceeded(outcome)) { restoreActiveSelection(); return; }
+        if (outcome === REFRESH_FAILED) {
+          showRestoreStatus("Still could not load the work queue. Sending " +
+                            "remains paused until it reloads.", true);
+        }
+        // A superseded retry is silent: a newer refresh owns the truth.
+      }).catch(() => {
+        showRestoreStatus("Still could not load the work queue.", true);
+      });
+    });
+    el.appendChild(document.createTextNode(" "));
+    el.appendChild(btn);
+  }
+}
+
+// The Jump to latest control must actually work: it is activated by click, and
+// it appears only when new content arrives while the operator has deliberately
+// scrolled away from the newest message. Arriving content never yanks a
+// deliberately positioned view; it offers this control instead.
+function initJumpToLatest() {
+  const pill = document.getElementById("jump-to-latest");
+  if (!pill) return;
+  pill.addEventListener("click", jumpToLatestMessage);
+  // ONE capturing listener on window. Scroll events do not bubble, but they do
+  // reach window during the CAPTURE phase from any target, so this observes
+  // whichever element is scrolling without having to re-bind. Binding to the
+  // scroller resolved at init would go stale as soon as layout changed the
+  // scrolling ancestor -- which is exactly why the scroller is resolved lazily
+  // inside the handler.
+  window.addEventListener("scroll", () => {
+    if (!operatorMovedAwayFromLatest(conversationScrollEl())) pill.hidden = true;
+  }, true);
+  const anchor = conversationAnchorEl();
+  if (!anchor) return;
+  try {
+    const obs = new MutationObserver(() => {
+      // The pill is OUTSIDE the observed content container, so toggling it
+      // cannot re-enter this observer.
+      if (operatorMovedAwayFromLatest(conversationScrollEl())) pill.hidden = false;
+      else jumpToLatestMessage();
+    });
+    obs.observe(anchor, { childList: true, subtree: true });
+  } catch (e) { /* no observer -> the click path still works */ }
+}
+
+function jumpToLatestMessage() {
+  const el = conversationScrollEl();
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  const pill = document.getElementById("jump-to-latest");
+  if (pill) pill.hidden = true;
 }
 
 function highlightMessage(messageId) {
   try {
-    const sel = '[data-message-id="' +
-      (window.CSS && CSS.escape ? CSS.escape(messageId) : messageId) + '"]';
+    const sel = '[data-message-id="' + cssAttrValue(messageId) + '"]';
     const node = document.querySelector(sel);
     if (node) {
       node.classList.add("msg-highlight");
@@ -1317,27 +2331,99 @@ function highlightMessage(messageId) {
 
 // Apply a #work=...&msg=... route on load / hashchange (navigation only).
 function applyWorkHashRoute() {
-  const h = location.hash || "";
-  const m = /[#&]work=([^&]+)/.exec(h);
-  if (!m) return;
-  const wid = decodeURIComponent(m[1]);
-  selectTask(null, wid);
+  const route = parseWorkRoute(location.hash);
+  if (!route) return;
+  if (route.malformed) {
+    // Never throw out of boot. Clear the route AND the selection unconditionally
+    // -- clearWorkRoute() removes the hash, so the restoration that follows can
+    // no longer see this route, and leaving a selection behind would let an
+    // unusable link keep a destination bound.
+    selectTask(null);
+    persistSelection(null);
+    clearWorkRoute();
+    // Say what actually happens next. Restoration DOES continue, so claiming
+    // "nothing is selected" would be false a moment later.
+    routeErrorReported = true;
+    // Restoration may legitimately find no active work, so the message states
+    // only what has already happened and leaves the outcome to be observed.
+    showRestoreStatus("That link could not be read, so it was removed. " +
+                      "Nothing is selected from it.");
+    return;
+  }
+  // Validate here too. This function is also the hashchange path, so without
+  // it a post-boot link could select and persist an unknown or terminal item
+  // with no restoration pass following to correct it.
+  const bound = bindRouteSelection(route.work_item_id);
+  if (bound === false) return;
+  if (bound === null) {
+    // Queue not loaded yet (boot). Bind provisionally; restoreActiveSelection()
+    // validates against the live queue as soon as it arrives.
+    const known = (lastWorkItems || []).find((it) => it.work_item_id === route.work_item_id);
+    selectTask(known ? known.thread_id || null : null, route.work_item_id);
+  }
   showView("work");
-  const mm = /[#&]msg=([^&]+)/.exec(h);
-  if (mm) setTimeout(() => highlightMessage(decodeURIComponent(mm[1])), 200);
+  if (route.message_id) {
+    setTimeout(() => highlightMessage(route.message_id), 200);
+  }
 }
 
+// Returns one of the four REFRESH_* outcomes so callers can distinguish a
+// confirmed load from a handled failure without relying on exceptions. It
+// deliberately does NOT throw: it is called from a polling timer where an
+// unhandled rejection would be noise, and it keeps the previous content on
+// screen rather than blanking the operator.
 async function refreshWorkItems() {
+  const gen = ++queueRefreshGeneration;
   try {
     const data = await getJSON("/api/work-items");
-    lastWorkItems = data.work_items || [];
+    // A completion that is no longer the newest may not touch ANY shared
+    // state: not the snapshot, not loaded/confirmed, not the status. An older
+    // success arriving after a newer failure must not restore sendability.
+    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
+    // A 200 with a malformed body is NOT authoritative. Treating a missing or
+    // non-array work_items as an empty queue would confirm a snapshot the
+    // server never actually described, and confirmed-empty is a load-bearing
+    // outcome: it makes stale destinations unsendable. So it is reported as a
+    // FAILURE, which preserves the previous snapshot and pauses sending.
+    if (!data || !Array.isArray(data.work_items)) {
+      queueConfirmed = false;
+      queueFailureReported = true;
+      showRestoreStatus("The work queue returned an unreadable response, so " +
+                        "destinations cannot be confirmed. Sending is paused " +
+                        "until it reloads.", true);
+      return REFRESH_FAILED;
+    }
+    lastWorkItems = data.work_items;
+    workItemsLoaded = true;   // a SUCCESSFUL response, even when it is empty
+    queueConfirmed = true;    // and it is CURRENT as of this response
+    // Only a confirmed success clears a reported failure, because only this
+    // re-establishes the truth that failure was reporting.
+    if (queueFailureReported) {
+      queueFailureReported = false;
+      showRestoreStatus("");
+    }
     try {
       const cd = await getJSON("/api/review-councils");
-      lastQueueCouncils = cd.review_councils || [];
+      if (gen === queueRefreshGeneration) {
+        lastQueueCouncils = cd.review_councils || [];
+      }
     } catch (e2) { /* councils optional for queue hints */ }
+    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
     renderQueue();
+    return lastWorkItems.length ? REFRESH_CONFIRMED : REFRESH_CONFIRMED_EMPTY;
   } catch (e) {
-    // Leave the prior content in place on a transient fetch error.
+    // An older failure arriving after a newer success must not invalidate the
+    // confirmed current snapshot.
+    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
+    // Leave the prior content on screen so the operator is not blanked out, but
+    // withdraw its authority to authorise a send: an unrefreshed snapshot is
+    // not evidence that the destination is still live.
+    queueConfirmed = false;
+    queueFailureReported = true;
+    showRestoreStatus("The work queue could not be refreshed, so destinations " +
+                      "cannot be confirmed. Sending is paused until it reloads.",
+                      true);
+    return REFRESH_FAILED;
   }
 }
 
@@ -1398,7 +2484,7 @@ async function loadHistory() {
   lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
   const body = document.getElementById("ledger-body");
   if (!lastLedgerRows.length) {
-    body.innerHTML = '<tr><td colspan="6" class="muted">No records match the filters.</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="muted">No records match the filters.</td></tr>';
     return;
   }
   body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
@@ -1406,10 +2492,29 @@ async function loadHistory() {
     '" data-ledger-index="' + i + '">' +
     "<td>" + esc(shortTime(row.at)) + "</td>" +
     "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
-    '<td class="mono">' + esc(row.work_item_id || row.thread_id || row.packet_id || "") + "</td>" +
+    // Item 4: message, work-item and thread are SEPARATE columns. The previous
+    // `work_item_id || thread_id || packet_id` fallback printed a thr-... value
+    // under a heading that said "Work item", which is a false identity claim for
+    // the 148 ledger rows that legitimately have no work-item binding.
+    '<td class="mono">' + esc(abbrevId(ledgerMessageId(row), 12)) + "</td>" +
+    '<td class="mono">' + (row.work_item_id
+      ? esc(abbrevId(row.work_item_id, 12))
+      : '<span class="muted ledger-none">no work item</span>') + "</td>" +
+    '<td class="mono">' + (row.thread_id
+      ? esc(abbrevId(row.thread_id, 12))
+      : '<span class="muted ledger-none">-</span>') + "</td>" +
     "<td>" + esc(row.actor || "") + "</td>" +
     '<td class="ledger-event">' + esc(row.event || "") + "</td>" +
     "<td>" + esc(row.status || "") + "</td></tr>").join("");
+}
+
+// The durable message id for a ledger row, when the row IS a message. Packet and
+// council rows have none, and inventing one would be a false identity claim.
+function ledgerMessageId(row) {
+  if (!row) return "";
+  const rec = row.record || {};
+  if (row.type === "message") return rec.message_id || "";
+  return "";
 }
 
 function openLedgerDetail(index) {
@@ -1837,7 +2942,8 @@ function buildConversationTab(run) {
     html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
       (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
       '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
-      '<div class="conv-msg-meta">' + meta + "</div></div>";
+      '<div class="conv-msg-meta">' + meta + "</div>" +
+      messageIdentityRow(m) + "</div>";
   }
   html += "</div>";
   return html;
@@ -2135,6 +3241,27 @@ let convComposerNewThreadId = null;
 let convComposer = null;
 
 function convComposerTarget() {
+  // Phase 1, item 3: while a work item is selected the composer is BOUND to it,
+  // so the destination shown above the composer is the destination the post
+  // actually reaches. The work_item_id is only sent alongside a durable thread
+  // id, which engages the server's existing target-integrity check (it refuses
+  // a thread/work-item pair that is not genuinely bound) rather than relying on
+  // presentation alone.
+  if (selectedWorkItemId) {
+    // The thread comes ONLY from the live queue record. Reading
+    // selectedConvThread here was the stale-state path: when polling removed
+    // the selected item, the remembered thread kept the target sendable even
+    // though nothing in the live queue backed it.
+    const live = liveQueueRecord(selectedWorkItemId);
+    const thread = (live && live.thread_id) || null;
+    if (thread) return { work_item_id: selectedWorkItemId, thread_id: thread };
+    // FAIL CLOSED. A work_item_id WITHOUT a thread_id is the one shape the
+    // server's target-integrity check cannot validate, because that check
+    // compares the pair. Rather than emit an unverifiable target, report the
+    // selection as unresolved: the banner says so and the send is refused
+    // until the queue supplies a durable thread for this item.
+    return { work_item_id: selectedWorkItemId, thread_id: null, unresolved: true };
+  }
   if (selectedConvThread) return { thread_id: selectedConvThread };
   if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
   return { thread_id: convComposerNewThreadId };
@@ -2783,12 +3910,23 @@ function toggleToolLog() {
   if (footer) footer.hidden = !footer.hidden;
 }
 
+// A queue tile is a control that CONTAINS controls. Without this, clicking Copy
+// would also open the item, which is the opposite of a copy-without-navigating
+// affordance.
+function eventTargetsInnerControl(e) {
+  const t = e && e.target;
+  return !!(t && t.closest && t.closest(".copy-id"));
+}
+
 function selectTask(threadId, workItemId) {
   selectedConvThread = threadId || null;
   selectedWorkItemId = workItemId || null;
+  persistSelection(selectedWorkItemId);   // survive refresh (Phase 1, item 1)
+  applyComposerFocus();                   // one safe composer (Phase 1, item 3)
   convComposerNewThreadId = null;
   if (convComposer) convComposer.restoreDraft();
   if (operatorChatComposer) operatorChatComposer.updateBanner();
+  if (convComposer) convComposer.updateBanner();   // destination follows selection
   renderQueue();
   refreshTaskState();
   loadConversations();
@@ -2869,11 +4007,18 @@ function wire() {
 
   // Work queue: clicking a row selects that task everywhere.
   document.getElementById("queue-groups").addEventListener("click", (e) => {
-    const row = e.target.closest(".q-row");
-    if (!row) return;
-    const thread = row.getAttribute("data-thread");
-    const workItem = row.getAttribute("data-work-item");
-    if (thread || workItem) selectTask(thread, workItem);
+    if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
+    // Activation is scoped to the EXPLICIT primary control. Treating any pixel
+    // of the row as an activation target contradicted the button model and made
+    // the identifier rows and the integrity warning navigate unexpectedly, so
+    // selecting or copying that text is now safe.
+    const btn = e.target.closest(".q-open");
+    if (!btn) return;
+    const workItem = btn.getAttribute("data-work-item") ||
+      (btn.closest(".q-row") && btn.closest(".q-row").getAttribute("data-work-item"));
+    // Mouse activation goes through the SAME navigation as the keyboard so the
+    // canonical #work= route is always written.
+    if (workItem) navigateToWorkItem(workItem);
   });
 
   // Context-aware task actions are READ-ONLY navigation only: they switch view
@@ -2886,6 +4031,10 @@ function wire() {
     if (nav === "history") showView("history");
     else showView("work");   // conv / council / evidence / gate / verification tabs
   });
+  // This is the explicit, keyboard-reachable action that starts a new
+  // conversation while work is selected: clearing the selection is what
+  // re-enables the generic composer (applyComposerFocus lifts the demotion), so
+  // the demoted composer is never a dead end.
   document.getElementById("queue-new-btn").addEventListener("click", () => {
     selectTask(null);
     renderConvDetail(null);
@@ -2997,6 +4146,24 @@ function wire() {
   // at boot; the fast poll below only runs while the Work view is open.
   loadConversations();
   applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
+  // Active session continuity: once the queue has loaded, restore the prior
+  // selection or fall back to the highest-priority active item so a refresh
+  // never strands the operator on an empty panel while active work exists.
+  initJumpToLatest();
+  refreshWorkItems().then((outcome) => {
+    // Only a CONFIRMED success may clear status or restore a selection. On a
+    // handled failure the explanation stays and nothing is restored, because
+    // restoring from an unconfirmed snapshot is exactly what the failure means
+    // we cannot do. A superseded completion is not ours to act on at all.
+    if (!refreshSucceeded(outcome)) return;
+    clearTransientRestoreStatus();
+    restoreActiveSelection();
+  }).catch(() => {
+    // Continuity that fails silently is worse than continuity that reports the
+    // failure: the operator would see an empty console with no reason given.
+    showRestoreStatus("Could not load the work queue, so active work was not " +
+                      "restored. The next refresh will retry.", true);
+  });
   setInterval(refresh, LIVE_MS);
   setInterval(refreshAgentEvents, LIVE_MS);
   setInterval(refreshMessages, LIVE_MS);

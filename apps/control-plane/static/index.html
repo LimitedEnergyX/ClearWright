@@ -59,6 +59,9 @@
           <span>Work queue <span class="help" tabindex="0" role="button" aria-label="About the work queue">?<span class="tip">Actionable work only, derived from the live queue and messages: unanswered actionable requests, CTA packets ready to claim, IN_PROGRESS packets needing an update, and RFI packets awaiting clarification. Normal chat stays in the Conversation tab and never appears here. Workers can claim and respond through tools/clearwright_worker.py or local HTTP (/api/work-items); the browser is the operator display. Use "use CW" in Claude Desktop by having Claude post to this queue through the worker bridge (tools/clearwright_worker.py).</span></span></span>
           <button id="queue-new-btn" class="btn btn-quiet" type="button" title="Start a new conversation">New</button>
         </div>
+        <!-- Restoration/queue-load failures are reported here rather than
+             leaving the operator with an unexplained empty console. -->
+        <p class="restore-status" id="restore-status" role="status" aria-live="polite" hidden></p>
         <div class="queue-filters" id="queue-filters" role="tablist" aria-label="Queue filters">
           <button class="qf-chip is-active" data-filter="current" type="button">Current</button>
           <button class="qf-chip" data-filter="needs_attention" type="button">Needs attention</button>
@@ -113,23 +116,41 @@
 
         <div id="center-work" hidden>
           <p class="hint">Operator/agent dialogue on durable message threads. Replies from Claude, Codex, or other workers appear only when they actually post back through the local adapter; nothing here is simulated.</p>
-          <div id="conv-detail"><p class="muted">No task selected. Pick one from the work queue.</p></div>
+          <div id="conv-detail"></div>
           <!-- The fixed Work composer docks here (sticky at the viewport
                bottom) so replying never requires scrolling past the timeline. -->
+          <!-- Phase 1 item 4: the durable message id of a just-posted message is
+               shown here with a copy control, so the operator never needs
+               History or raw JSON to retrieve it (GitHub issue #86). -->
+          <div class="post-confirmation" id="post-confirmation" role="status" aria-live="polite" hidden></div>
+          <!-- Phase 1 item 2: explicit return to the newest message when the
+               operator has deliberately scrolled away. -->
+          <button type="button" class="jump-to-latest" id="jump-to-latest" hidden>Jump to latest</button>
           <div id="work-composer-dock"></div>
         </div>
       </section>
 
       <aside class="operator-region" id="operator-region" aria-label="Operator panel">
-        <div class="op-card" id="next-action-card">
-          <div class="op-card-head">Next required action</div>
-          <div class="op-card-body" id="next-action-body"><p class="muted">No task selected.</p></div>
+        <!-- Phase 1 item 5: ONE contextual session panel, shown only when a work
+             item is selected. Rows with no content are omitted rather than
+             rendered as separate empty placeholder cards. -->
+        <div class="session-rail" id="session-rail" hidden>
+          <div class="op-card" id="next-action-card">
+            <div class="op-card-head">Next required action</div>
+            <div class="op-card-body" id="next-action-body"></div>
+          </div>
+
+          <div class="op-card" id="authority-card">
+            <div class="op-card-head">Authority state</div>
+            <div class="op-card-body" id="authority-body"></div>
+          </div>
+
+          <div class="op-card" id="operator-actions-card">
+            <div class="op-card-head">Operator actions</div>
+            <div class="op-card-body conv-actions" id="operator-actions"></div>
+          </div>
         </div>
 
-        <div class="op-card" id="authority-card">
-          <div class="op-card-head">Authority state</div>
-          <div class="op-card-body" id="authority-body"><p class="muted">No task selected.</p></div>
-        </div>
 
         <section class="op-card clearance-card is-empty" id="clearance-card" aria-labelledby="incoming-h">
           <div class="op-card-head" id="incoming-h">Incoming clearance request <span class="help" tabindex="0" role="button" aria-label="About incoming clearance requests">?<span class="tip">Clearance packets arrive from agents, tools, scripts, or integrations. The operator reviews and decides; nobody fills out packet paperwork here.</span></span></div>
@@ -151,10 +172,7 @@
           <p class="conv-target-hint">Message is normal chat: durable, but never a work item and never an Attention flag. Participation is real only when a worker posts back through CW. Use the Work page composer for actionable requests.</p>
         </div>
 
-        <div class="op-card" id="operator-actions-card">
-          <div class="op-card-head">Operator actions</div>
-          <div class="op-card-body conv-actions" id="operator-actions"><p class="muted">No task selected.</p></div>
-        </div>
+        
       </aside>
     </div>
 
@@ -188,9 +206,12 @@
         <div class="ledger-table-wrap">
           <table class="ledger" aria-label="History ledger">
             <thead>
-              <tr><th>Time</th><th>Type</th><th>Work item</th><th>Actor</th><th>Event</th><th>Status</th></tr>
+              <!-- Item 4: message, work item and thread are DISTINCT
+                   identifier types and get their own columns. A thr-...
+                   value must never appear under "Work item". -->
+              <tr><th>Time</th><th>Type</th><th>Message</th><th>Work item</th><th>Thread</th><th>Actor</th><th>Event</th><th>Status</th></tr>
             </thead>
-            <tbody id="ledger-body"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
+            <tbody id="ledger-body"><tr><td colspan="8" class="muted">Loading...</td></tr></tbody>
           </table>
         </div>
         <div class="ledger-detail" id="ledger-detail" hidden>

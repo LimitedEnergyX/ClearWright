@@ -1047,3 +1047,169 @@ body.history-open .mission { display: none !important; }
 .activity-details[open] summary::before { content: "▾ "; }
 .activity-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray); white-space: nowrap; }
 .activity-log { margin: 0.35rem 0 0.2rem; font-family: ui-monospace, monospace; font-size: 0.74rem; white-space: pre-wrap; max-height: 5.5rem; overflow-y: auto; }
+
+/* ==========================================================================
+   Active Session Continuity and Message Identity UX (Phase 1)
+   Presentation only. No durable record, identity, or authority semantics are
+   expressed here.
+   ========================================================================== */
+
+/* Item 3: the composer destination must be hard to misread and hard to get
+   wrong. It is shown above the composer, never inferred from message prose. */
+.composer-destination {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
+  padding: .4rem .55rem; border-radius: 6px;
+  background: rgba(120, 170, 255, .10);
+  border: 1px solid rgba(120, 170, 255, .35);
+  font-size: .82rem;
+}
+.composer-destination .dest-label { font-weight: 600; opacity: .85; }
+.composer-destination .dest-work { font-weight: 600; }
+.composer-destination .dest-thread { opacity: .8; }
+.composer-destination .dest-title { opacity: .7; font-style: italic; }
+/* .composer-banner sets text-transform:uppercase on everything it contains, so
+   without this the destination shows ids as "MESSAGE:MSG-2026..." -- a case the
+   durable record does not have, and misleading to read or transcribe. The
+   "Posting to" label keeps the banner styling; the identities render as stored. */
+.composer-destination .dest-work,
+.composer-destination .dest-thread,
+.composer-destination .dest-title {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Item 3: the generic composer is demoted, never removed, while work is
+   selected, so it cannot compete with the work-item-bound composer. */
+.composer-demoted { opacity: .45; filter: saturate(.6); }
+.composer-demoted:focus-within { opacity: 1; filter: none; }
+
+/* Item 4: durable message identity, visible on every message card. */
+.msg-identity {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem;
+  margin-top: .3rem; padding-top: .3rem;
+  border-top: 1px dashed rgba(255, 255, 255, .12);
+  font-size: .74rem; opacity: .85;
+}
+.msg-identity .msg-id { font-weight: 600; }
+.msg-identity .msg-actor,
+.msg-identity .msg-intent,
+.msg-identity .msg-binding,
+.msg-identity .msg-time { opacity: .7; }
+
+/* A real button so it is keyboard reachable and focus-visible. */
+.copy-id {
+  font: inherit; font-size: .72rem; line-height: 1;
+  padding: .15rem .4rem; border-radius: 4px; cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, .25);
+  background: transparent; color: inherit; opacity: .8;
+}
+.copy-id:hover { opacity: 1; }
+.copy-id:focus-visible { outline: 2px solid #7aa2ff; outline-offset: 1px; opacity: 1; }
+
+/* Item 4: post-send confirmation carrying the new durable message id. */
+.post-confirmation {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
+  margin: .4rem 0; padding: .4rem .55rem; border-radius: 6px;
+  background: rgba(90, 200, 140, .12);
+  border: 1px solid rgba(90, 200, 140, .35);
+  font-size: .78rem;
+}
+.post-confirmation .pc-label { font-weight: 600; }
+.post-confirmation .pc-work,
+.post-confirmation .pc-thread { opacity: .75; }
+
+/* Item 2: explicit return to the newest message. */
+.jump-to-latest {
+  align-self: center; font: inherit; font-size: .78rem;
+  padding: .25rem .6rem; margin: .25rem 0; border-radius: 999px;
+  cursor: pointer; border: 1px solid rgba(120, 170, 255, .45);
+  background: rgba(120, 170, 255, .15); color: inherit;
+}
+.jump-to-latest:focus-visible { outline: 2px solid #7aa2ff; outline-offset: 2px; }
+
+/* Item 5: one contextual rail; hidden entirely with nothing selected. */
+.session-rail[hidden] { display: none; }
+.session-rail { display: flex; flex-direction: column; gap: .6rem; }
+
+/* Item 7: queue rows are real controls, so they need a visible focus ring. */
+/* Queue rows are plain containers; the primary control is .q-open, which
+   carries the cursor and focus ring. The old role="button" rules are gone. */
+.q-exec { font-size: .68rem; opacity: .65; letter-spacing: .02em; }
+
+/* Round-2 council corrections. */
+.restore-status {
+  margin: 0 0 0.4rem; padding: 0.4rem 0.55rem;
+  font-size: 0.74rem; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-left: 3px solid var(--warn, #d08a00); border-radius: 8px;
+}
+/* An unverifiable destination must not look like a valid one. */
+.composer-destination .dest-unresolved {
+  color: var(--warn, #d08a00);
+  font-weight: 700;
+}
+
+/* Durable identity on queue tiles (operator correction items 1, 2, 3, 10). */
+.q-ids {
+  display: flex; flex-direction: column; gap: 0.12rem;
+  margin-top: 0.3rem; padding-top: 0.3rem;
+  border-top: 1px dashed var(--line);
+}
+.q-idrow { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; font-size: 0.66rem; }
+.q-idk {
+  color: var(--gray); font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; min-width: 5.6rem;
+}
+/* Identifiers render in their STORED case; no transform may alter them. */
+.q-idv { text-transform: none; letter-spacing: 0; opacity: .9; }
+.q-idnote {
+  font-size: 0.6rem; color: var(--gray); border: 1px dotted var(--line);
+  border-radius: 999px; padding: 0 0.3rem; cursor: help;
+}
+.q-phase, .q-exec {
+  font-size: 0.6rem; font-weight: 700; text-transform: none; letter-spacing: 0;
+  padding: 0 0.35rem; border-radius: 999px; border: 1px solid var(--line);
+  color: var(--gray);
+}
+.q-phase { border-style: dashed; }
+/* An ambiguous tile is MARKED, never hidden: the records are real. */
+.q-integrity {
+  margin-top: 0.3rem; padding: 0.25rem 0.4rem;
+  font-size: 0.64rem; line-height: 1.35; color: var(--text);
+  background: var(--panel-2); border-left: 3px solid var(--warn, #d08a00);
+  border-radius: 6px;
+}
+.q-row.q-ambiguous { border-left: 3px solid var(--warn, #d08a00); }
+/* History: an absent binding is stated, not substituted. */
+.ledger-none { font-style: italic; opacity: .7; }
+
+/* The queue tile's primary control. The row itself is a plain container, so
+   this button carries the click target, the pressed state and the focus ring,
+   and real copy buttons can sit beside it without nesting inside a control. */
+.q-open {
+  display: block; width: 100%; text-align: left;
+  background: none; border: 0; padding: 0; margin: 0;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.q-open:focus-visible {
+  outline: 2px solid var(--blue-soft);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+/* The control uses aria-current, not a toggle state: activating it navigates
+   rather than switching something off again. */
+.q-open[aria-current="true"] .q-title { font-weight: 700; }
+
+/* .q-meta is a span (phrasing content, so it may sit inside the button) but
+   still lays out as a row. */
+.q-open .q-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
+
+/* A non-canonical entry (today only a clearance-packet projection) is shown for
+   visibility but is READ-ONLY: no activation, no navigation, no destination. */
+.q-row.q-noncanonical { opacity: .92; border-left: 3px dashed var(--line); }
+.q-readonly { display: block; cursor: default; }
+.q-ro-badge {
+  margin-left: 0.4rem; padding: 0 0.35rem; border-radius: 999px;
+  font-size: 0.6rem; font-weight: 700; letter-spacing: 0.03em;
+  color: var(--gray); border: 1px dotted var(--line); cursor: help;
+}

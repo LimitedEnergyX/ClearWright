@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   ce253ecdd80c8a3cc61efb72af602a7d6db09b3a
+HEAD (bytes under review):   0a0ee29c6180f22054cb5243c337e8e1ca6a2a91
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -16,54 +16,67 @@ message:msg-20260725T142257787771 and thread thr-20260725T142257787771),
 which postdates the terminal result of the previous verify council by
 seven hours.
 
-THE TWO CORRECTIONS IN THIS ROUND (newest work, scrutinise first)
+THE CORRECTIONS IN THIS ROUND (newest work, scrutinise first)
 ----------------------------------------------------------------------
-1. QUEUE FOCUS SURVIVES POLLING. renderQueue rewrote innerHTML on every
-   poll, roughly every two seconds, destroying the focused control before
-   a human could press a key. MEASURED in the running console: focus held
-   at 0, 200, 600 and 1200 ms and the node was gone by 2500 ms, so
-   keyboard operation of the queue was impossible.
+1. A LIVE CANONICAL RECORD IS REQUIRED BEFORE SENDING. The prior gap,
+   confirmed by reading the code rather than inferred: destinationDisagreement
+   guarded its thread comparison with `known &&`, so when polling removed the
+   selected item the check was skipped exactly when it mattered, while
+   convComposerTarget kept the target sendable by reading the remembered
+   selectedConvThread.
 
-   Now a no-change short circuit compares a rendered signature and returns
-   WITHOUT touching the DOM, which is the dominant polling case. When
-   something did change, reconcileQueue patches by canonical work-item key
-   and leaves an unchanged tile entirely alone, so it keeps its DOM
-   identity and its focus. Focus is captured before reconciliation and
-   restored after; a legitimately removed item moves focus to a remaining
-   tile, then the container, never the body. No stale item is retained
-   merely to preserve focus.
+   Both halves are closed. convComposerTarget derives the thread ONLY from the
+   live queue record. destinationDisagreement requires a live canonical record
+   AND an exact thread match, refusing with its own explanation otherwise.
 
-   RE-MEASURED after the fix: focus held for the full 7 seconds across
-   multiple polling cycles, on the same node.
+   VERIFIED in the running console with POSTs intercepted: an item selected
+   with a valid thread, then removed by polling while the stale thread was
+   still remembered and the hash still matched, produced 0 request attempts, a
+   preserved draft, an explanation naming the live queue, and a restored
+   button.
 
-2. NATIVE KEYBOARD ACTIVATION. The Space keydown handler is REMOVED, not
-   adjusted. On a focused button Space default action IS the activation, so
-   preventDefault suppressed the very path the control exists to provide.
-   There is now NO queue key handler at all: the native button activates on
-   Enter and Space and fires exactly one click, which the delegated listener
-   turns into one canonical navigation.
+2. NON-CANONICAL DESTINATIONS CANNOT BE SENDABLE. isCanonicalMessageWorkItem
+   anchors on the message-scoped prefix, so a packet projection such as
+   in_progress:<packet-id> -- the queue presentation of a clearance packet,
+   with no thread -- can never resolve to a destination, nor can a malformed
+   record. renderQueue skips any row without a canonical id rather than
+   reconciling several such rows under one empty key.
 
-3. COVERAGE NOW RUNS THE REAL WIRED PATHS. The previous harness called
-   helpers directly, which a prior round correctly said proves the helper
-   and not the wiring. tests/dom/mini_dom.mjs implements a small but real
-   DOM: markup parsing, tree, selector subset, focus, capture/target/bubble
-   propagation, and native button Enter/Space activation modelled as a
-   DEFAULT that preventDefault can suppress, so the harness can actually
-   detect the regression it exists to catch. tests/dom/wired_paths.mjs
-   installs the real wire(), renders real tiles and dispatches genuine
-   events: 49 checks covering delegated click, Enter, Space,
-   exactly-one-activation, Copy not navigating, focus and node identity
-   across polling, predictable focus movement on removal, and the real
-   send() refusing through all four destination-integrity branches with
-   zero requests and the draft kept.
+   VERIFIED live against the REAL CTA packet projection currently in the
+   queue: not canonical, no live record, unresolved target, 0 request
+   attempts, explicit refusal.
 
-   STATED HONESTLY: real-browser Space activation could NOT be verified in
-   this environment. Instrumentation showed the tooling discrete key events
-   never reach the page (zero keydown events observed) while focus was
-   correctly held, so the measurement is UNAVAILABLE rather than negative.
-   Proven: focus retention in the real browser, and the activation contract
-   in the harness, with no handler remaining that could suppress the
-   default.
+3. ONE ESCAPING MECHANISM FOR EVERY DYNAMIC SELECTOR. cssEscape replaces the
+   inline CSS.escape conditionals, with a conservative fallback that escapes
+   everything outside the identifier-safe set rather than guessing which
+   characters an engine treats as significant. Applied to the focus selector,
+   the message-highlight selector and the group selector; a test fails if any
+   inline conditional escaping reappears.
+
+4. WIRED COVERAGE for exactly these paths: stale selection after polling,
+   including that a retry sends only after a valid live item is reselected; a
+   live record that lost its thread; a packet projection; malformed records;
+   and selector-significant identifiers. The harness is now 110 checks, up
+   from 66.
+
+   Two HARNESS FIDELITY BUGS were found and fixed while writing that coverage,
+   recorded because they made earlier results look better than they were: the
+   send helper read refusal state AFTER flushing, by which point unrelated
+   render chains had called restoreDraft and cleared the textarea; and the stub
+   responder answered the work-items endpoint with a generic payload, which
+   emptied the seeded queue mid-test and made a legitimate retry refuse for the
+   wrong reason.
+
+PRESERVED, all previously accepted behaviour: focus persistence, keyed
+reconciliation with group movement and ordering, native mouse/Enter/Space
+activation, route integrity, Copy controls, conversation and composer binding,
+in-flight send feedback, duplicate prevention, draft preservation, durable
+success confirmation, identifier presentation, History separation, and
+shared-thread sibling preservation.
+
+STILL UNVERIFIED, stated plainly: real-browser Space activation. The tooling
+delivers no discrete key events to the page, so the measurement is unavailable
+rather than negative. No queue keydown handler remains that could suppress it.
 
 EARLIER WORK IN THIS SAME DIFF (reviewed in prior councils)
 ----------------------------------------------------------------------
@@ -140,50 +153,53 @@ artifacts across 1380 ledger rows.
 
 TESTS (counts measured by running them, not typed)
 ----------------------------------------------------------------------
-  focused static   159 tests  (OK)
+  focused static   171 tests  (OK)
   runtime          109 checks (PASS)  tests/dom/session_ux_runtime.mjs
-  full suite       1366 tests  (OK, skipped=1)
+  wired path       110 checks (PASS)  tests/dom/wired_paths.mjs
+  full suite       1378 tests  (OK, skipped=1)
 
-The runtime harness executes the real app.js in a Node vm against a
-controllable DOM stub and adds NO dependency: every import is a Node
-builtin, there is no package manifest, and the Python wrapper skips when
-node is absent. Stated limitation, unchanged: it supplies scroll geometry
-rather than computing layout, so it proves decision logic given a
-geometry, not that a browser produces that geometry. Layout-dependent
-behaviour was checked by live inspection, recorded above as manual
-evidence rather than automated coverage.
+The runtime and wired harnesses execute the real app.js in a Node vm.
+They add NO dependency: every import is a Node builtin or a local
+module, there is no package manifest, and the Python wrappers skip when
+node is absent. STATED LIMITATION: the mini DOM implements markup
+parsing, the element tree, a CSS-selector subset, focus tracking,
+capture/target/bubble propagation and native button activation modelled
+as a suppressible default. It is not a browser: it does not compute
+layout or painting, so geometry-dependent behaviour is proven only
+against supplied values, and it should be read as support evidence
+rather than browser automation.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       176765  bb1c0e237006667b66f4f62c953df1648e7185be6d2abf446976adc022ad515a
+  apps/control-plane/static/app.js                       180020  6d142f60db84a4081b4b13518339768d56834341e2162db1abd7222fa110b3b4
   apps/control-plane/static/index.html                    22393  86b4ffbf452f29a46c2c7c9877a3daadfdf29b5bc3af4118bb40b55a993b02f4
   apps/control-plane/static/style.css                     54663  95c975dbf6a0adf373683ca2b595527dbdd6ad01116cc6405228becf95ae0e27
   tests/dom/mini_dom.mjs                                  14376  b3b489e5368f4262df8a26c557a319c9cc58f711abc4482dad97b594e42c5752
   tests/dom/session_ux_runtime.mjs                        31834  e5085e168f511380372b6c7420de37c8b4d9bee5edb8947c6bde0d30d9f05894
-  tests/dom/wired_paths.mjs                               24172  7ba5e94ba6acbc0fba4280c5af5d25fd7971db494631a1b265007d9333af1f64
-  tests/test_session_continuity_ux.py                     63922  bd7b92741867c255de93511be18188c2b613a2ab8f1c01ca85c3f2c7b538ea7d
+  tests/dom/wired_paths.mjs                               33149  60df5a6a5a41eab0bb26920352e87977561c750e9d2950f1ad735f67a90aba8f
+  tests/test_session_continuity_ux.py                     68954  113dbd410eb8b7bcfe722827a09926bd136bfa81b55ece58248fca32e93da7d1
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
   tests/test_session_ux_wired.py                           2358  3c8647d059510f8e7c8d0207f07ff842fd962ac5f06f8fa659762af272ade56d
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 1043 +++++++++++++++++++++++++-
+ apps/control-plane/static/app.js     | 1106 +++++++++++++++++++++++++-
  apps/control-plane/static/index.html |   49 +-
  apps/control-plane/static/style.css  |  154 ++++
- tests/dom/mini_dom.mjs               |  374 ++++++++++
- tests/dom/session_ux_runtime.mjs     |  667 +++++++++++++++++
- tests/dom/wired_paths.mjs            |  580 +++++++++++++++
- tests/test_session_continuity_ux.py  | 1351 ++++++++++++++++++++++++++++++++++
+ tests/dom/mini_dom.mjs               |  374 +++++++++
+ tests/dom/session_ux_runtime.mjs     |  667 ++++++++++++++++
+ tests/dom/wired_paths.mjs            |  753 ++++++++++++++++++
+ tests/test_session_continuity_ux.py  | 1449 ++++++++++++++++++++++++++++++++++
  tests/test_session_ux_runtime.py     |   40 +
  tests/test_session_ux_wired.py       |   55 ++
- 9 files changed, 4263 insertions(+), 50 deletions(-)
+ 9 files changed, 4595 insertions(+), 52 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
-These files are NOT modified by this change. They are quoted because the
-review asked, correctly, how the claims above can be checked.
+These files are NOT modified by this change. They are quoted because
+the review asked, correctly, how the claims above can be checked.
 
-  apps/control-plane/server.py lines 348-385  -- the pair-validation this UI change relies on for destination integrity
+  apps/control-plane/server.py lines 348-385  -- the pair-validation this UI change relies on
         driver: it builds and writes through clearwright_message, the same code
         path the CLI uses. On respond, a thread_id is required and the message
         defaults to an outbound response.
@@ -257,7 +273,7 @@ review asked, correctly, how the claims above can be checked.
     
     def in_default_view(item):
 
-  tools/clearwright_work.py lines 290-310  -- the value domain of runner_state, the second field the labels read
+  tools/clearwright_work.py lines 290-310  -- the value domain of runner_state
     def runner_state(claimed, claim_at, active_runner, in_council, awaiting_operator,
                      has_gate, status, now_dt):
         """Honest runner state (section 4). Claimed is NOT running. Degrades to
@@ -280,40 +296,29 @@ review asked, correctly, how the claims above can be checked.
     
     
 
-Consequences, stated so they can be checked against the quoted source:
-  * The server refuses a thread_id/work_item_id pair that is not durably
-    bound. It can only apply when BOTH are supplied, which is exactly why
-    a work_item_id with no thread is now refused in the UI instead of
-    being sent as an unverifiable target.
-  * presentation_state is a total, ordered, mutually-exclusive function
-    with nine possible values: superseded, recently_completed, historical
-    (terminal), and needs_operator, blocked, waiting_on_operator, running,
-    waiting_on_claude, stale. INACTIVE_STATES covers every terminal value.
-    waiting_on_claude has no dedicated rank: it resolves to claimed when a
-    claimant exists and otherwise to the empty string, which sorts last.
-    That is the intended unknown-state behaviour, not an omission.
-
 REVIEW QUESTIONS
 ----------------------------------------------------------------------
-1. Is disambiguating-plus-warning the right response to the duplicate
-   tiles, given the records are genuinely distinct? Would any form of
-   deduplication hide durable governed work?
-2. Can any code path still render a thread id where a work-item id is
-   claimed, in the queue or in History?
-3. Can the fail-closed destination check be bypassed, or can a request
-   body be built while route, selection, thread and destination disagree?
-4. Are the phase and executor label sets exactly the server value
-   domains, and can ACTIVE be reported without positive runner evidence?
-5. Can the composer strand in a sending state, double-post from any entry
-   point, or clear a draft before durable success is confirmed?
-6. Is any failure mode here silent rather than fail-closed and explained?
+1. Can a send still be built for a work item that is not present in the
+   live queue, through any path -- stale thread, stale hash, stale
+   conversation state, or a target constructed before a poll?
+2. Can any non-canonical entry -- packet projection, malformed record,
+   missing id -- become a sendable destination or a reconciled tile?
+3. Is any dynamic value still interpolated into a selector without
+   going through cssEscape?
+4. Does this round regress any previously accepted behaviour: focus
+   persistence, keyed reconciliation with ordering and group movement,
+   native activation, route integrity, Copy controls, composer binding,
+   in-flight feedback, duplicate prevention, draft preservation,
+   identifier presentation, History separation, sibling preservation?
+5. Is any failure mode here silent rather than fail-closed and
+   explained to the operator?
 
 FULL DIFF (committed bytes)
 ----------------------------------------------------------------------
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..4667a9d 100644
+index dd2d10c..cac630a 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -338,7 +343,7 @@ index dd2d10c..4667a9d 100644
    nextBody.innerHTML = '<p class="op-next' + (ts.phase_attention ? " op-next-attention" : "") +
      '">' + esc(ts.next_action || "") + "</p>";
  
-@@ -761,6 +767,39 @@ function createComposer(opts) {
+@@ -761,6 +767,48 @@ function createComposer(opts) {
      return name + ":" + (target.thread_id || "new") + ":" + (target.work_item_id || "");
    }
  
@@ -351,10 +356,19 @@ index dd2d10c..4667a9d 100644
 +    if (target.work_item_id !== selectedWorkItemId) {
 +      return "The composer destination and the selected work item disagree.";
 +    }
-+    const known = (lastWorkItems || []).find(
-+      (i) => i.work_item_id === selectedWorkItemId);
-+    if (known && known.thread_id && target.thread_id &&
-+        known.thread_id !== target.thread_id) {
++    // A LIVE canonical record is required. Guarding this on `known &&` meant
++    // the check was skipped exactly when the item had disappeared, which is the
++    // case it most needed to catch.
++    if (!isCanonicalMessageWorkItem(target.work_item_id)) {
++      return "That destination is not a message-scoped work item, so it cannot " +
++             "receive a message.";
++    }
++    const known = liveQueueRecord(target.work_item_id);
++    if (!known) {
++      return "That work item is no longer in the live queue, so the destination " +
++             "cannot be confirmed. Reselect an active work item.";
++    }
++    if (!known.thread_id || known.thread_id !== target.thread_id) {
 +      return "The composer thread does not match the selected work item's thread.";
 +    }
 +    // STRICT. A work-item-bound send requires a canonical route that PROVES the
@@ -378,7 +392,7 @@ index dd2d10c..4667a9d 100644
    function updateBanner() {
      if (!bannerEl) return;
      const target = getTarget();
-@@ -768,8 +807,36 @@ function createComposer(opts) {
+@@ -768,8 +816,36 @@ function createComposer(opts) {
      // before anything has actually been sent; the banner only calls it
      // "continuing" once the caller confirms that id is a real durable thread.
      const confirmed = !isConfirmedTarget || isConfirmedTarget();
@@ -417,7 +431,7 @@ index dd2d10c..4667a9d 100644
      bannerEl.textContent = text;
    }
  
-@@ -823,10 +890,29 @@ function createComposer(opts) {
+@@ -823,10 +899,29 @@ function createComposer(opts) {
        return;
      }
      showError("");
@@ -448,7 +462,7 @@ index dd2d10c..4667a9d 100644
      try {
        const body = Object.assign(
          { message: raw, idempotency_key: draft.idempotencyKey },
-@@ -865,10 +951,18 @@ function createComposer(opts) {
+@@ -865,10 +960,18 @@ function createComposer(opts) {
        textarea.value = "";
        autoGrow();
        updateCounter();
@@ -467,7 +481,7 @@ index dd2d10c..4667a9d 100644
      }
    }
  
-@@ -958,6 +1052,11 @@ const WORK_KIND_LABEL = {
+@@ -958,6 +1061,11 @@ const WORK_KIND_LABEL = {
  // --------------------------------------------------------------------------- //
  
  let lastWorkItems = [];
@@ -479,7 +493,7 @@ index dd2d10c..4667a9d 100644
  let lastQueueCouncils = [];
  let lastArchiveIndex = { archived: [], count: 0 };
  
-@@ -1045,6 +1144,16 @@ function actionsForState(pstate, canonical) {
+@@ -1045,6 +1153,16 @@ function actionsForState(pstate, canonical) {
    }
  }
  
@@ -496,7 +510,7 @@ index dd2d10c..4667a9d 100644
  function queueCard(it) {
    const ps = it.presentation_state || "waiting_on_claude";
    const selected = it.work_item_id && it.work_item_id === selectedWorkItemId;
-@@ -1061,11 +1170,68 @@ function queueCard(it) {
+@@ -1061,11 +1179,68 @@ function queueCard(it) {
      ? '<span class="q-opflag" title="operator action required"><U+25C9> operator</span>' : "";
    // Technical ids ride on data attributes only; the primary card stays readable.
    const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
@@ -568,7 +582,7 @@ index dd2d10c..4667a9d 100644
      "</div>";
  }
  
-@@ -1117,6 +1283,109 @@ function attentionCounts(items) {
+@@ -1117,6 +1292,108 @@ function attentionCounts(items) {
    return c;
  }
  
@@ -594,8 +608,7 @@ index dd2d10c..4667a9d 100644
 +  if (!key) return;
 +  let btn = null;
 +  try {
-+    btn = el.querySelector('.q-open[data-work-item="' +
-+      (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
++    btn = el.querySelector('.q-open[data-work-item="' + cssEscape(key) + '"]');
 +  } catch (e) { btn = null; }
 +  if (btn) { btn.focus(); return; }
 +  const first = el.querySelector(".q-open");
@@ -633,7 +646,7 @@ index dd2d10c..4667a9d 100644
 +  order.forEach((first) => {
 +    const g = first.group;
 +    seen[g] = true;
-+    let groupEl = el.querySelector('.q-group[data-group="' + g + '"]');
++    let groupEl = el.querySelector('.q-group[data-group="' + cssEscape(g) + '"]');
 +    if (!groupEl) {
 +      groupEl = document.createElement("div");
 +      groupEl.className = "q-group";
@@ -678,7 +691,7 @@ index dd2d10c..4667a9d 100644
  function renderQueue() {
    const el = document.getElementById("queue-groups");
    if (!el) return;
-@@ -1124,21 +1393,39 @@ function renderQueue() {
+@@ -1124,21 +1401,44 @@ function renderQueue() {
    const rows = filterSortQueue(lastWorkItems, queueFilterMode, queueSearch);
    syncFilterChips();
    if (!rows.length) {
@@ -705,10 +718,15 @@ index dd2d10c..4667a9d 100644
 -        esc(PSTATE_LABEL[curState] || curState) + "</div>";
 -    }
 -    html += queueCard(it);
-+  const desired = rows.map((it) => {
++  // A record with no canonical work-item id cannot be keyed, so it is skipped
++  // rather than reconciled under an empty key where several such rows would
++  // collapse together and reconciliation could drop, move or focus the wrong
++  // tile. The derivation guarantees a canonical id, so this is fail-closed
++  // handling of data that should not exist, not an expected path.
++  const desired = rows.filter((it) => it && it.work_item_id).map((it) => {
 +    const html = queueCard(it);
 +    return {
-+      key: it.work_item_id || "",
++      key: it.work_item_id,
 +      group: it.presentation_state || "",
 +      groupLabel: PSTATE_LABEL[it.presentation_state] || it.presentation_state || "",
 +      sig: queueCardSignature(it),
@@ -729,7 +747,7 @@ index dd2d10c..4667a9d 100644
  }
  
  function syncFilterChips() {
-@@ -1290,17 +1577,602 @@ function openAttention() {
+@@ -1290,23 +1590,650 @@ function openAttention() {
    }
  }
  
@@ -871,6 +889,49 @@ index dd2d10c..4667a9d 100644
 +// as a work item. Collapsing them would HIDE durable governed work, so the tiles
 +// are disambiguated and the shared-thread condition is surfaced as an integrity
 +// warning instead.
++
++// ONE escaping mechanism for every dynamic selector value. CSS.escape is not
++// universally available, and an identifier carrying a quote, backslash, bracket
++// or space would otherwise break the selector or silently change its meaning --
++// which in a focus or reconciliation contract degrades exactly when it matters.
++function cssEscape(value) {
++  const v = String(value === null || value === undefined ? "" : value);
++  if (typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function") {
++    return CSS.escape(v);
++  }
++  // Conservative fallback: escape everything outside the identifier-safe set
++  // rather than guessing which characters this engine treats as significant.
++  return v.replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
++}
++
++// --------------------------------------------------------------------------
++// CANONICAL SENDABLE DESTINATIONS (operator correction 1 and 4)
++// --------------------------------------------------------------------------
++// A destination may only be a MESSAGE-SCOPED work item that is present in the
++// live queue and carries a durable thread. Two shapes are excluded on purpose:
++//
++//   * packet projections such as "in_progress:<packet-id>", which are the queue
++//     presentation of a clearance packet rather than a conversation, and have
++//     no thread to post into;
++//   * any record without a canonical message-scoped id, including a malformed
++//     or future entry, which must never resolve to a destination.
++//
++// The canonical id of a message work item is literally "message:" + its origin
++// message id, so this is a shape the derivation guarantees rather than a
++// convention.
++function isCanonicalMessageWorkItem(id) {
++  return typeof id === "string" && /^message:msg-[0-9A-Za-z]+$/.test(id);
++}
++
++// The LIVE queue record for a work item, or null. Returning null is the
++// fail-closed answer: it is used to refuse, never to fall back to remembered
++// state. A selection whose item polling has removed therefore stops being
++// sendable the moment the queue no longer lists it.
++function liveQueueRecord(workItemId) {
++  if (!isCanonicalMessageWorkItem(workItemId)) return null;
++  return (lastWorkItems || []).find(
++    (i) => i && i.work_item_id === workItemId) || null;
++}
 +
 +// thread_id -> [work_item_id, ...] for every item the queue can see.
 +function threadWorkItemIndex(items) {
@@ -1333,7 +1394,14 @@ index dd2d10c..4667a9d 100644
  }
  
  function highlightMessage(messageId) {
-@@ -1317,20 +2189,47 @@ function highlightMessage(messageId) {
+   try {
+-    const sel = '[data-message-id="' +
+-      (window.CSS && CSS.escape ? CSS.escape(messageId) : messageId) + '"]';
++    const sel = '[data-message-id="' + cssEscape(messageId) + '"]';
+     const node = document.querySelector(sel);
+     if (node) {
+       node.classList.add("msg-highlight");
+@@ -1317,20 +2244,47 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -1388,7 +1456,7 @@ index dd2d10c..4667a9d 100644
      try {
        const cd = await getJSON("/api/review-councils");
        lastQueueCouncils = cd.review_councils || [];
-@@ -1398,7 +2297,7 @@ async function loadHistory() {
+@@ -1398,7 +2352,7 @@ async function loadHistory() {
    lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
    const body = document.getElementById("ledger-body");
    if (!lastLedgerRows.length) {
@@ -1397,7 +1465,7 @@ index dd2d10c..4667a9d 100644
      return;
    }
    body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
-@@ -1406,12 +2305,31 @@ async function loadHistory() {
+@@ -1406,12 +2360,31 @@ async function loadHistory() {
      '" data-ledger-index="' + i + '">' +
      "<td>" + esc(shortTime(row.at)) + "</td>" +
      "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
@@ -1430,7 +1498,7 @@ index dd2d10c..4667a9d 100644
  function openLedgerDetail(index) {
    const row = lastLedgerRows[index];
    if (!row) return;
-@@ -1837,7 +2755,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2810,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -1440,7 +1508,7 @@ index dd2d10c..4667a9d 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +3054,23 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +3109,27 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -1451,8 +1519,12 @@ index dd2d10c..4667a9d 100644
 +  // a thread/work-item pair that is not genuinely bound) rather than relying on
 +  // presentation alone.
 +  if (selectedWorkItemId) {
-+    const it = (lastWorkItems || []).find((i) => i.work_item_id === selectedWorkItemId);
-+    const thread = selectedConvThread || (it && it.thread_id) || null;
++    // The thread comes ONLY from the live queue record. Reading
++    // selectedConvThread here was the stale-state path: when polling removed
++    // the selected item, the remembered thread kept the target sendable even
++    // though nothing in the live queue backed it.
++    const live = liveQueueRecord(selectedWorkItemId);
++    const thread = (live && live.thread_id) || null;
 +    if (thread) return { work_item_id: selectedWorkItemId, thread_id: thread };
 +    // FAIL CLOSED. A work_item_id WITHOUT a thread_id is the one shape the
 +    // server's target-integrity check cannot validate, because that check
@@ -1464,7 +1536,7 @@ index dd2d10c..4667a9d 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2783,12 +3719,23 @@ function toggleToolLog() {
+@@ -2783,12 +3778,23 @@ function toggleToolLog() {
    if (footer) footer.hidden = !footer.hidden;
  }
  
@@ -1488,7 +1560,7 @@ index dd2d10c..4667a9d 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2869,11 +3816,18 @@ function wire() {
+@@ -2869,11 +3875,18 @@ function wire() {
  
    // Work queue: clicking a row selects that task everywhere.
    document.getElementById("queue-groups").addEventListener("click", (e) => {
@@ -1512,7 +1584,7 @@ index dd2d10c..4667a9d 100644
    });
  
    // Context-aware task actions are READ-ONLY navigation only: they switch view
-@@ -2886,6 +3840,10 @@ function wire() {
+@@ -2886,6 +3899,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -1523,7 +1595,7 @@ index dd2d10c..4667a9d 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +3955,19 @@ function wire() {
+@@ -2997,6 +4014,19 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -2852,10 +2924,10 @@ index 0000000..a7008eb
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/dom/wired_paths.mjs b/tests/dom/wired_paths.mjs
 new file mode 100644
-index 0000000..24a165c
+index 0000000..d086e71
 --- /dev/null
 +++ b/tests/dom/wired_paths.mjs
-@@ -0,0 +1,580 @@
+@@ -0,0 +1,753 @@
 +/*
 + * Executable coverage through the REAL wired event paths.
 + *
@@ -2917,6 +2989,9 @@ index 0000000..24a165c
 +    doc.body.appendChild(el);
 +  });
 +  // A couple of elements app.js expects to be specific tags.
++  const sendBtn = doc.getElementById("conv-send");
++  if (sendBtn) sendBtn.textContent = "Send";
++
 +  const ta = doc.createElement("textarea");
 +  ta.setAttribute("id", "conv-input");
 +  const old = doc.getElementById("conv-input");
@@ -2998,8 +3073,10 @@ index 0000000..24a165c
 +    claimed_by: "claude", last_activity_at: "2026-07-25T09:00:00Z", last_activity_event: "council" },
 +];
 +
-+function seed(ctx, items) {
++function seed(ctx, items, env) {
 +  ev(ctx, "workItemsLoaded = true; lastWorkItems = " + JSON.stringify(items || ITEMS) + ";");
++  // Keep the served payload in step, or the next poll reverts the seeded state.
++  if (env) env.servedItems = items || ITEMS;
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -3310,15 +3387,26 @@ index 0000000..24a165c
 +// 5. THE REAL send() PATH refuses through every destination-integrity branch.
 +// ---------------------------------------------------------------------------
 +function sendEnv(hash) {
++  // The responder must answer /api/work-items with a WORK-ITEMS shape. Returning
++  // a generic payload made refreshWorkItems set lastWorkItems to [] during the
++  // flush, which silently emptied the queue the test had just seeded and made a
++  // legitimate retry refuse for the wrong reason.
 +  const env = buildEnv({
 +    hash,
-+    responder: (url) => {
-+      if (url.indexOf("/api/messages?") === 0 || url.indexOf("message_id=") !== -1) {
-+        return { found: true, message: { message: "PROBE" } };
++    responder: (url, method) => {
++      if (url.indexOf("/api/work-items") === 0) {
++        return { work_items: env && env.servedItems ? env.servedItems : ITEMS };
 +      }
-+      return { ok: true, message_id: "msg-new", thread_id: "thr-alpha" };
++      if (url.indexOf("message_id=") !== -1) {
++        return { found: true, message: { message: env.lastSent || "PROBE" } };
++      }
++      if (method === "POST") {
++        return { ok: true, message_id: "msg-new", thread_id: "thr-alpha" };
++      }
++      return { ok: true };
 +    },
 +  });
++  env.servedItems = ITEMS;
 +  const ctx = loadApp(env);
 +  seed(ctx);
 +  ctx.wire();
@@ -3326,13 +3414,43 @@ index 0000000..24a165c
 +  return { env, ctx };
 +}
 +
-+function attemptSend(ctx, env, text) {
++// send() is async: it awaits the POST and then a durable re-read. The helper
++// must let those continuations run, or the composer stays in flight and the
++// `sending` guard silently blocks every later attempt.
++const settle = () => new Promise((r) => setImmediate(r));
++
++async function attemptSend(ctx, env, text) {
 +  const ta = env.doc.getElementById("conv-input");
++  const err = env.doc.getElementById("conv-error");
++  const btn = env.doc.getElementById("conv-send");
 +  ta.value = text || "PROBE";
++  env.lastSent = ta.value;
 +  const before = env.posted.filter((p) => p.method === "POST").length;
 +  ev(ctx, "convComposer.send()");
++
++  // Every destination-integrity refusal happens SYNCHRONOUSLY, before the first
++  // await, so the refusal state is captured here. It cannot be read after the
++  // flush below, because unrelated render chains resolving in the meantime call
++  // restoreDraft() and clear the textarea -- which would look like a cleared
++  // draft even though the send was refused.
++  const refusal = {
++    draft: ta.value,
++    error: String(err.textContent || ""),
++    label: String(btn.textContent || ""),
++    disabled: !!btn.disabled,
++  };
++
++  for (let i = 0; i < 8; i++) await settle();   // let the POST chain complete
 +  const after = env.posted.filter((p) => p.method === "POST").length;
-+  return { posts: after - before, draft: ta.value };
++  return {
++    posts: after - before,
++    draft: refusal.draft,
++    error: refusal.error,
++    inFlightLabel: refusal.label,
++    inFlightDisabled: refusal.disabled,
++    settledLabel: String(btn.textContent || ""),
++    settledDisabled: !!btn.disabled,
++  };
 +}
 +
 +// 5a. Unresolved destination: selected item has no durable thread.
@@ -3341,31 +3459,29 @@ index 0000000..24a165c
 +  ev(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-nothread",' +
 +          ' thread_id: null, presentation_state: "needs_operator" }];' +
 +          'selectedWorkItemId = "message:msg-nothread"; selectedConvThread = null;');
-+  const r = attemptSend(ctx, env);
++  const r = await attemptSend(ctx, env);
 +  eq(r.posts, 0, "unresolved destination emits NO request");
 +  ok(r.draft.length > 0, "unresolved destination preserves the draft");
-+  const err = env.doc.getElementById("conv-error");
-+  ok(String(err.textContent).length > 0, "unresolved destination explains itself");
++  ok(r.error.length > 0, "unresolved destination explains itself");
 +}
 +
 +// 5b. Route names a DIFFERENT work item than the selection.
 +{
 +  const { env, ctx } = sendEnv("#work=message%3Amsg-beta");
 +  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
-+  const r = attemptSend(ctx, env);
++  const r = await attemptSend(ctx, env);
 +  eq(r.posts, 0, "route/selection disagreement emits NO request");
 +  ok(r.draft.length > 0, "disagreement preserves the draft");
-+  ok(String(env.doc.getElementById("conv-error").textContent).indexOf("different work item") !== -1,
-+     "disagreement names the mismatch");
++  ok(r.error.indexOf("different work item") !== -1, "disagreement names the mismatch");
 +}
 +
 +// 5c. ABSENT route: nothing proves the URL agrees.
 +{
 +  const { env, ctx } = sendEnv("");
 +  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
-+  const r = attemptSend(ctx, env);
++  const r = await attemptSend(ctx, env);
 +  eq(r.posts, 0, "an absent route emits NO request");
-+  ok(String(env.doc.getElementById("conv-error").textContent).indexOf("no work route") !== -1,
++  ok(r.error.indexOf("no work route") !== -1,
 +     "an absent route says the URL cannot confirm the destination");
 +}
 +
@@ -3377,27 +3493,26 @@ index 0000000..24a165c
 +  // would let applyWorkHashRoute clear it first, so the send would then be
 +  // refused for an ABSENT route and this branch would never be exercised.
 +  ctx.location.hash = "#work=%";
-+  const r = attemptSend(ctx, env);
++  const r = await attemptSend(ctx, env);
 +  eq(r.posts, 0, "a malformed route emits NO request");
-+  ok(String(env.doc.getElementById("conv-error").textContent).indexOf("unreadable") !== -1,
-+     "a malformed route says the URL is unreadable");
++  ok(r.error.indexOf("unreadable") !== -1, "a malformed route says the URL is unreadable");
 +}
 +
 +// 5e. VALID RETRY after a refusal succeeds, and the button state is restored.
 +{
 +  const { env, ctx } = sendEnv("");
 +  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
-+  const btn = env.doc.getElementById("conv-send");
-+  const idle = btn.textContent;
-+
-+  const refused = attemptSend(ctx, env);
++  const refused = await attemptSend(ctx, env);
 +  eq(refused.posts, 0, "the first attempt is refused");
-+  eq(btn.textContent, idle, "the button label is unchanged by a refusal");
-+  ok(!btn.disabled, "the button is re-enabled after a refusal");
++  eq(refused.settledLabel, "Send", "the button label is unchanged by a refusal");
++  ok(!refused.settledDisabled, "the button is re-enabled after a refusal");
 +
-+  // Correct the route and retry: the same draft must now be sendable.
++  // Correct the route and retry. The selection is re-established explicitly,
++  // because unrelated render chains resolving during the flush can clear it and
++  // this case is about the ROUTE being corrected, not about selection drift.
 +  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
-+  const retry = attemptSend(ctx, env);
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  const retry = await attemptSend(ctx, env);
 +  eq(retry.posts, 1, "a valid retry after a refusal DOES send");
 +}
 +
@@ -3434,14 +3549,144 @@ index 0000000..24a165c
 +  eq(after - before, 1, "repeated Ctrl+Enter in flight produces EXACTLY ONE POST");
 +}
 +
++// ---------------------------------------------------------------------------
++// 6. STALE SELECTION AFTER POLLING. The reported gap: once polling removed the
++//    selected item, a retained thread plus a matching stale hash let a request
++//    be built for a destination the live queue no longer backed.
++// ---------------------------------------------------------------------------
++{
++  const { env, ctx } = sendEnv("");
++  ctx.wire();
++  ctx.renderQueue();
++
++  // Select a VALID live item through the real wired path.
++  const groups = env.doc.getElementById("queue-groups");
++  groups.querySelector('.q-row[data-work-item="message:msg-alpha"] .q-open')
++    .dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha", "a live item is selected");
++  eq(ev(ctx, "selectedConvThread"), "thr-alpha", "its durable thread is bound");
++  const routeAfterSelect = ctx.location.hash;
++  ok(routeAfterSelect.indexOf("msg-alpha") !== -1, "the canonical route is written");
++
++  // A send here is legitimate, proving the refusal below is not incidental.
++  const okAttempt = await attemptSend(ctx, env, "BASELINE");
++  eq(okAttempt.posts, 1, "a valid live selection DOES send");
++
++  // Now polling removes that item while thread, hash and composer state remain.
++  // env is passed so the SERVED payload drops it too: otherwise the next poll
++  // would restore it and the test could pass without exercising the gap.
++  seed(ctx, [ITEMS[1]], env);
++  ctx.renderQueue();
++  ctx.location.hash = routeAfterSelect;          // stale but MATCHING route
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++
++  eq(ev(ctx, "selectedConvThread"), "thr-alpha", "the stale thread is still remembered");
++  ok(ctx.location.hash.indexOf("msg-alpha") !== -1, "the stale route still matches");
++
++  const refused = await attemptSend(ctx, env, "MUST NOT SEND");
++  eq(refused.posts, 0,
++     "a selection removed by polling emits NO request, despite stale thread and matching route");
++  ok(refused.draft.length > 0, "the draft is preserved through the refusal");
++  ok(refused.error.indexOf("no longer in the live queue") !== -1,
++     "the refusal explains that the item left the live queue");
++  eq(refused.settledLabel, "Send", "the button returns from Sending... to Send");
++  ok(!refused.settledDisabled, "the button is re-enabled after the refusal");
++
++  // The target itself must report unresolved rather than a sendable pair.
++  const stale = ev(ctx, "convComposerTarget()");
++  ok(stale.unresolved === true, "the stale target reports unresolved");
++  ok(!stale.thread_id, "the stale target carries no thread");
++
++  // Retry succeeds ONLY after selecting a valid live item.
++  groups.querySelector('.q-row[data-work-item="message:msg-beta"] .q-open')
++    .dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-beta", "a live item is reselected");
++  const retry = await attemptSend(ctx, env, "NOW VALID");
++  eq(retry.posts, 1, "the retry sends only after a valid live item is selected");
++}
++
++// 6b. THREAD REMOVED from the live record, item still present.
++{
++  const { env, ctx } = sendEnv("#work=message%3Amsg-alpha");
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  ev(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-alpha",' +
++          ' thread_id: null, presentation_state: "needs_operator" }];');
++  const r = await attemptSend(ctx, env, "MUST NOT SEND");
++  eq(r.posts, 0, "an item whose live record lost its thread emits NO request");
++  ok(r.draft.length > 0, "the draft is preserved");
++}
++
++// 6c. A PACKET PROJECTION can never be a message destination.
++{
++  const { env, ctx } = sendEnv("#work=in_progress%3Asession-ux-cta-20260725");
++  ev(ctx, 'workItemsLoaded = true; lastWorkItems = [{' +
++          ' work_item_id: "in_progress:session-ux-cta-20260725", thread_id: null,' +
++          ' presentation_state: "waiting_on_claude" }];' +
++          'selectedWorkItemId = "in_progress:session-ux-cta-20260725";' +
++          'selectedConvThread = "thr-anything";');
++  ok(ev(ctx, 'isCanonicalMessageWorkItem("in_progress:session-ux-cta-20260725")') === false,
++     "a packet projection is not a canonical message work item");
++  const t = ev(ctx, "convComposerTarget()");
++  ok(t.unresolved === true, "a packet projection resolves to an unresolved target");
++  const r = await attemptSend(ctx, env, "MUST NOT SEND");
++  eq(r.posts, 0, "a packet projection emits NO request even with a remembered thread");
++}
++
++// 6d. A MALFORMED record can never become a destination or a reconciled tile.
++{
++  const { env, ctx } = sendEnv("");
++  ctx.wire();
++  ev(ctx, 'workItemsLoaded = true; lastWorkItems = [' +
++          '{ work_item_id: "message:msg-good", thread_id: "thr-good", title: "Good",' +
++          '  presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council" },' +
++          '{ work_item_id: null, thread_id: "thr-orphan", title: "No canonical id",' +
++          '  presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council" },' +
++          '{ thread_id: "thr-orphan2", title: "Missing entirely",' +
++          '  presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council" }];');
++  ctx.renderQueue();
++  const groups = env.doc.getElementById("queue-groups");
++  eq(groups.querySelectorAll(".q-row[data-work-item]").length, 1,
++     "only the canonical record is reconciled into a tile");
++  eq(groups.querySelectorAll('.q-row[data-work-item=""]').length, 0,
++     "no tile is keyed on an empty work-item id");
++
++  for (const bad of [null, "", "thr-20260725T142257787771", "in_progress:x", "message:", "msg-1"]) {
++    ok(ev(ctx, "isCanonicalMessageWorkItem(" + JSON.stringify(bad) + ")") === false,
++       JSON.stringify(bad) + " is not a canonical message work item");
++  }
++  ok(ev(ctx, 'isCanonicalMessageWorkItem("message:msg-20260725T142257787771")') === true,
++     "a real canonical id is accepted");
++}
++
++// 6e. SELECTOR-SIGNIFICANT characters in identifiers must not break escaping.
++{
++  const env = buildEnv({});
++  const ctx = loadApp(env);
++  const hostile = ['a"b', "a\\b", "a]b", "a b", "a.b", "a#b", "a:b"];
++  hostile.forEach((v) => {
++    const out = ev(ctx, "cssEscape(" + JSON.stringify(v) + ")");
++    ok(typeof out === "string" && out.length >= v.length,
++       "cssEscape returns an escaped string for " + JSON.stringify(v));
++    // The escaped value must be usable in a selector without throwing.
++    let threw = null;
++    try { env.doc.body.querySelector('[data-x="' + out + '"]'); }
++    catch (e) { threw = String(e); }
++    ok(threw === null, "an escaped value is selector-safe for " + JSON.stringify(v));
++  });
++  // Escaping must be applied, not merely available.
++  const src = fs.readFileSync(APP, "utf8");
++  ok(src.indexOf("CSS.escape ? CSS.escape(") === -1,
++     "no inline conditional escaping remains; all values go through cssEscape");
++}
++
 +console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..116a365
+index 0000000..3a3527f
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,1351 @@
+@@ -0,0 +1,1449 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -3684,9 +3929,11 @@ index 0000000..116a365
 +        """The server refuses an unbound thread/work-item pair; never invent one."""
 +        m = re.search(r"function convComposerTarget[\s\S]{0,4000}?\n\}", APP)
 +        body = m.group(0)
-+        self.assertNotIn("convComposerNewThreadId", body.split("selectedConvThread ||")[0])
-+        # The bare-work-item shape is now an explicit fail-closed marker rather
-+        # than a sendable target.
++        # The thread now comes ONLY from the live queue record, so a
++        # remembered thread can no longer keep a removed item sendable.
++        self.assertIn("liveQueueRecord(selectedWorkItemId)", body)
++        self.assertIn("(live && live.thread_id) || null", body)
++        # The bare-work-item shape is an explicit fail-closed marker.
 +        self.assertIn("if (thread) return {", body)
 +        self.assertIn("unresolved: true", body)
 +
@@ -3873,7 +4120,7 @@ index 0000000..116a365
 +        # The populated path must reach its short circuit without touching the
 +        # DOM. The empty-queue branch above it writes one message and is itself
 +        # guarded by its own signature check, so it is excluded here.
-+        empty_end = body.index("const desired = rows.map")
++        empty_end = body.index("const desired = rows")
 +        populated = body[empty_end:]
 +        i = populated.index("if (signature === lastQueueSignature) return;")
 +        self.assertNotIn("innerHTML", populated[:i],
@@ -3974,6 +4221,102 @@ index 0000000..116a365
 +        src = open(os.path.join(here, "dom", "mini_dom.mjs"), encoding="utf-8").read()
 +        self.assertIn("STATED LIMITATION", src)
 +        self.assertIn("not a browser", src)
++
++
++class LiveRecordRequiredTest(unittest.TestCase):
++    """Correction 1: a send requires a LIVE canonical record.
++
++    The prior gap: destinationDisagreement guarded its thread comparison with
++    `known &&`, so when polling removed the selected item the check was skipped
++    exactly when it mattered, while convComposerTarget kept the target sendable
++    by reading the remembered selectedConvThread.
++    """
++
++    def test_a_live_record_helper_exists(self):
++        self.assertIn("function liveQueueRecord", APP)
++        m = re.search(r"function liveQueueRecord[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("isCanonicalMessageWorkItem", body)
++        self.assertIn("lastWorkItems", body)
++        self.assertIn("|| null", body)
++
++    def test_the_target_thread_comes_only_from_the_live_record(self):
++        m = re.search(r"function convComposerTarget[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("liveQueueRecord(selectedWorkItemId)", body)
++        self.assertNotIn("selectedConvThread || ", body,
++                         "the remembered thread was the stale-state path")
++
++    def test_the_destination_check_requires_a_live_record(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        body = m.group(0)
++        self.assertIn("liveQueueRecord(target.work_item_id)", body)
++        self.assertIn("if (!known)", body)
++        self.assertIn("no longer in the live queue", body)
++
++    def test_the_thread_comparison_is_no_longer_optional(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        body = m.group(0)
++        self.assertNotIn("known && known.thread_id", body,
++                         "guarding on existence skipped the check exactly when "
++                         "the record was missing")
++        self.assertIn("!known.thread_id || known.thread_id !== target.thread_id", body)
++
++
++class CanonicalDestinationTest(unittest.TestCase):
++    """Correction 4: only a message-scoped work item may receive a message."""
++
++    def test_a_canonical_shape_test_exists(self):
++        self.assertIn("function isCanonicalMessageWorkItem", APP)
++        m = re.search(r"function isCanonicalMessageWorkItem[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        self.assertIn("message:msg-", m.group(0))
++
++    def test_packet_projections_are_excluded_by_shape(self):
++        m = re.search(r"function isCanonicalMessageWorkItem[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        self.assertIn("^message:msg-", m.group(0),
++                      "the pattern must be anchored so in_progress: ids cannot match")
++
++    def test_the_destination_check_rejects_non_canonical_ids(self):
++        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
++        body = m.group(0)
++        self.assertIn("isCanonicalMessageWorkItem(target.work_item_id)", body)
++        self.assertIn("not a message-scoped work item", body)
++
++    def test_reconciliation_skips_records_without_a_canonical_id(self):
++        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("rows.filter((it) => it && it.work_item_id)", body)
++        self.assertNotIn('key: it.work_item_id || ""', body,
++                         "an empty key collapsed several rows together")
++
++
++class SelectorEscapingTest(unittest.TestCase):
++    """Correction 3: one escaping mechanism, applied everywhere."""
++
++    def test_a_single_escaper_exists(self):
++        self.assertIn("function cssEscape", APP)
++        m = re.search(r"function cssEscape[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("CSS.escape", body)
++        self.assertIn("replace(", body, "a fallback is required where CSS.escape is absent")
++
++    def test_no_inline_conditional_escaping_remains(self):
++        self.assertNotIn("CSS.escape ? CSS.escape(", APP,
++                         "every dynamic value must go through cssEscape")
++
++    def test_every_dynamic_selector_is_escaped(self):
++        for probe in ('.q-open[data-work-item="', '[data-message-id="',
++                      '.q-group[data-group="'):
++            i = APP.index(probe)
++            window = APP[i:i + 160]
++            self.assertIn("cssEscape(", window,
++                          "unescaped interpolation into selector " + probe)
++
++    def test_the_fallback_is_conservative(self):
++        m = re.search(r"function cssEscape[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        self.assertIn("a-zA-Z0-9_-", m.group(0),
++                      "the fallback should escape everything outside the "
++                      "identifier-safe set rather than guess")
 +
 +
 +class CanonicalIdentityTest(unittest.TestCase):

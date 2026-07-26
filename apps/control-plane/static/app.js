@@ -776,6 +776,15 @@ function createComposer(opts) {
     if (target.work_item_id !== selectedWorkItemId) {
       return "The composer destination and the selected work item disagree.";
     }
+    // A CURRENTLY CONFIRMED queue is required. A snapshot that merely loaded
+    // once is not positive evidence: if the latest refresh failed, the old
+    // record and thread are still sitting in the array and would otherwise
+    // authorise a send against a destination nothing has re-confirmed.
+    if (!queueConfirmed) {
+      return "The work queue is not currently confirmed, so this destination " +
+             "cannot be verified. Wait for the queue to reload, then reselect " +
+             "the work item.";
+    }
     // A LIVE canonical record is required. Guarding this on `known &&` meant
     // the check was skipped exactly when the item had disappeared, which is the
     // case it most needed to catch.
@@ -1066,6 +1075,11 @@ let lastWorkItems = [];
 // conflated the two, so after a successful empty response an unknown explicit
 // route was retained as a provisional selection instead of being rejected.
 let workItemsLoaded = false;
+// A SUCCESSFUL queue response is positive evidence that the snapshot is live.
+// A failed refresh is not: it leaves the previous array in place, which must
+// NOT keep authorising sends. Send authorization therefore requires a
+// currently-confirmed queue, not merely one that loaded successfully once.
+let queueConfirmed = false;
 let lastQueueCouncils = [];
 let lastArchiveIndex = { archived: [], count: 0 };
 
@@ -1160,6 +1174,7 @@ function queueCardSignature(it) {
           it.runner_state, it.claimed_by, it.title || it.summary,
           it.last_activity_at, it.last_activity_event,
           it.work_item_id === selectedWorkItemId ? "sel" : "",
+          isCanonicalMessageWorkItem(it.work_item_id) ? "canon" : "noncanon",
           sharesThreadWithOtherWorkItems(it, lastWorkItems) ? "amb" : ""].join("\u0001");
 }
 
@@ -1185,6 +1200,12 @@ function queueCard(it) {
   const execLabel = executorStateLabel(it);
   const phaseLabel = lifecyclePhaseLabel(it);
   const wid = it.work_item_id || "";
+  // A non-canonical entry -- today only the packet projection
+  // "in_progress:<packet-id>" -- is REAL work the operator must still see, so
+  // it is not hidden. It is rendered READ-ONLY: no .q-open control, so it is
+  // not activatable, not navigable and not selectable as a message
+  // destination. Only message-scoped work items are conversations.
+  const canonical = isCanonicalMessageWorkItem(wid);
   const tid = it.thread_id || "";
   const originId = originMessageId(wid);
   // Item 1: multiple canonical work items on one thread is legal but reads as
@@ -1219,17 +1240,29 @@ function queueCard(it) {
   // pattern, so the primary action is now an explicit button and the copy
   // buttons are its siblings. Enter and Space come free from native button
   // semantics rather than a hand-rolled key handler.
+  // aria-current, not aria-pressed: activating this control NAVIGATES to a
+  // work item, it does not toggle a state off again, so a toggle-button
+  // contract would misdescribe it to assistive technology.
+  const openStart = canonical
+    ? ('<button type="button" class="q-open" ' +
+       'aria-current="' + (selected ? "true" : "false") + '"' +
+       ' aria-label="Open work item ' + esc(wid) +
+       (execLabel ? " (executor " + esc(execLabel) + ")" : "") + '"' +
+       ' data-work-item="' + esc(wid) + '">')
+    : ('<div class="q-readonly" role="note"' +
+       ' aria-label="Packet record ' + esc(wid) + ', not a conversation">');
+  const openEnd = canonical ? "</button>" : "</div>";
+  const roBadge = canonical ? ""
+    : '<span class="q-ro-badge" title="A clearance packet shown for visibility. ' +
+      'It is not a conversation and cannot receive messages.">packet record</span>';
   return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
-    (ambiguous ? " q-ambiguous" : "") + '"' +
+    (ambiguous ? " q-ambiguous" : "") + (canonical ? "" : " q-noncanonical") + '"' +
     ' data-sig="' + esc(queueCardSignature(it)) + '"' +
+    ' data-canonical="' + (canonical ? "true" : "false") + '"' +
     ' data-thread="' + esc(it.thread_id || "") +
-    '" data-work-item="' + esc(it.work_item_id || "") + '">' +
-    '<button type="button" class="q-open" ' +
-    'aria-pressed="' + (selected ? "true" : "false") + '"' +
-    ' aria-label="Open work item ' + esc(it.work_item_id || "") +
-    (execLabel ? " (executor " + esc(execLabel) + ")" : "") + '"' +
-    ' data-work-item="' + esc(it.work_item_id || "") + '">' +
-    '<span class="q-title">' + title + "</span>" +
+    '" data-work-item="' + esc(wid) + '">' +
+    openStart +
+    '<span class="q-title">' + title + "</span>" + roBadge +
     // A button's content model is phrasing content, so the meta strip is a
     // span laid out as a block rather than a div inside interactive markup.
     '<span class="q-meta">' + bits.join("") + opFlag +
@@ -1240,7 +1273,7 @@ function queueCard(it) {
       esc(phaseLabel) + "</span>" : "") +
     (execLabel ? '<span class="q-exec mono" title="executor state, derived from ' +
       'runner_state only">Executor ' + esc(execLabel) + "</span>" : "") +
-    "</span></button>" + ids + warn +
+    "</span>" + openEnd + ids + warn +
     "</div>";
 }
 
@@ -1314,7 +1347,7 @@ function restoreQueueFocus(key, el) {
   if (!key) return;
   let btn = null;
   try {
-    btn = el.querySelector('.q-open[data-work-item="' + cssEscape(key) + '"]');
+    btn = el.querySelector('.q-open[data-work-item="' + cssAttrValue(key) + '"]');
   } catch (e) { btn = null; }
   if (btn) { btn.focus(); return; }
   const first = el.querySelector(".q-open");
@@ -1352,7 +1385,7 @@ function reconcileQueue(el, desired) {
   order.forEach((first) => {
     const g = first.group;
     seen[g] = true;
-    let groupEl = el.querySelector('.q-group[data-group="' + cssEscape(g) + '"]');
+    let groupEl = el.querySelector('.q-group[data-group="' + cssAttrValue(g) + '"]');
     if (!groupEl) {
       groupEl = document.createElement("div");
       groupEl.className = "q-group";
@@ -1729,18 +1762,18 @@ function truthfulExecutionState(it) {
 // are disambiguated and the shared-thread condition is surfaced as an integrity
 // warning instead.
 
-// ONE escaping mechanism for every dynamic selector value. CSS.escape is not
-// universally available, and an identifier carrying a quote, backslash, bracket
-// or space would otherwise break the selector or silently change its meaning --
-// which in a focus or reconciliation contract degrades exactly when it matters.
-function cssEscape(value) {
+// ONE escaping mechanism for every dynamic value interpolated into a
+// selector. Every such value in this file sits inside a QUOTED ATTRIBUTE
+// selector -- [data-work-item="..."] and friends -- so the correct
+// operation is CSS STRING-LITERAL escaping, not identifier escaping.
+// CSS.escape is deliberately NOT used here: it escapes identifiers, and
+// its output does not round-trip inside a quoted string, so a value
+// containing a quote, a backslash or a space would fail to match the very
+// node it names. Within a CSS string only the backslash and the quote
+// character itself need escaping.
+function cssAttrValue(value) {
   const v = String(value === null || value === undefined ? "" : value);
-  if (typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function") {
-    return CSS.escape(v);
-  }
-  // Conservative fallback: escape everything outside the identifier-safe set
-  // rather than guessing which characters this engine treats as significant.
-  return v.replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
+  return v.replace(/[\\"]/g, (c) => "\\" + c);
 }
 
 // --------------------------------------------------------------------------
@@ -2233,7 +2266,7 @@ function jumpToLatestMessage() {
 
 function highlightMessage(messageId) {
   try {
-    const sel = '[data-message-id="' + cssEscape(messageId) + '"]';
+    const sel = '[data-message-id="' + cssAttrValue(messageId) + '"]';
     const node = document.querySelector(sel);
     if (node) {
       node.classList.add("msg-highlight");
@@ -2285,13 +2318,20 @@ async function refreshWorkItems() {
     const data = await getJSON("/api/work-items");
     lastWorkItems = data.work_items || [];
     workItemsLoaded = true;   // a SUCCESSFUL response, even when it is empty
+    queueConfirmed = true;    // and it is CURRENT as of this response
     try {
       const cd = await getJSON("/api/review-councils");
       lastQueueCouncils = cd.review_councils || [];
     } catch (e2) { /* councils optional for queue hints */ }
     renderQueue();
   } catch (e) {
-    // Leave the prior content in place on a transient fetch error.
+    // Leave the prior content on screen so the operator is not blanked out, but
+    // withdraw its authority to authorise a send: an unrefreshed snapshot is
+    // not evidence that the destination is still live.
+    queueConfirmed = false;
+    showRestoreStatus("The work queue could not be refreshed, so destinations " +
+                      "cannot be confirmed. Sending is paused until it reloads.",
+                      true);
   }
 }
 

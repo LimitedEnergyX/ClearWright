@@ -602,32 +602,125 @@ class CanonicalDestinationTest(unittest.TestCase):
 
 
 class SelectorEscapingTest(unittest.TestCase):
-    """Correction 3: one escaping mechanism, applied everywhere."""
+    """Correction 3: one escaping mechanism, correct for its actual context.
+
+    Every dynamic value in app.js is interpolated into a QUOTED ATTRIBUTE
+    selector, so the correct operation is CSS string-literal escaping, not
+    identifier escaping. CSS.escape is deliberately not used: its output does
+    not round-trip inside a quoted string, so a value containing a quote,
+    backslash or space would fail to match the very node it names. The
+    wired-path harness proves this positively by selecting the intended node.
+    """
 
     def test_a_single_escaper_exists(self):
-        self.assertIn("function cssEscape", APP)
-        m = re.search(r"function cssEscape[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
-        body = m.group(0)
-        self.assertIn("CSS.escape", body)
-        self.assertIn("replace(", body, "a fallback is required where CSS.escape is absent")
+        self.assertIn("function cssAttrValue", APP)
+        self.assertNotIn("function cssEscape", APP,
+                         "identifier escaping was wrong for this context")
 
-    def test_no_inline_conditional_escaping_remains(self):
-        self.assertNotIn("CSS.escape ? CSS.escape(", APP,
-                         "every dynamic value must go through cssEscape")
+    def test_identifier_escaping_is_not_used_in_code(self):
+        code = "\n".join(l for l in APP.split("\n")
+                          if not l.strip().startswith("//"))
+        self.assertNotIn("CSS.escape", code)
 
     def test_every_dynamic_selector_is_escaped(self):
         for probe in ('.q-open[data-work-item="', '[data-message-id="',
                       '.q-group[data-group="'):
             i = APP.index(probe)
             window = APP[i:i + 160]
-            self.assertIn("cssEscape(", window,
+            self.assertIn("cssAttrValue(", window,
                           "unescaped interpolation into selector " + probe)
 
-    def test_the_fallback_is_conservative(self):
-        m = re.search(r"function cssEscape[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
-        self.assertIn("a-zA-Z0-9_-", m.group(0),
-                      "the fallback should escape everything outside the "
-                      "identifier-safe set rather than guess")
+    def test_the_escaper_targets_string_literal_semantics(self):
+        m = re.search(r"function cssAttrValue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        # Inside a CSS string only the backslash and the quote need escaping.
+        self.assertIn("replace(", body)
+        self.assertIn(chr(92) + chr(92) + '"', body)
+
+
+class QueueFreshnessTest(unittest.TestCase):
+    """Council finding: a stale snapshot is not positive evidence.
+
+    liveQueueRecord looked up the last SUCCESSFUL snapshot, but a failed refresh
+    left that array in place with workItemsLoaded still true, so an unrefreshed
+    queue kept authorising sends.
+    """
+
+    def test_a_confirmation_flag_exists_and_is_separate_from_loaded(self):
+        self.assertIn("let queueConfirmed = false;", APP)
+        self.assertIn("let workItemsLoaded = false;", APP)
+
+    def test_a_successful_refresh_confirms_the_queue(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("queueConfirmed = true;", body)
+
+    def test_a_failed_refresh_withdraws_confirmation(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        catch = body.split("} catch (e) {")[1]
+        self.assertIn("queueConfirmed = false;", catch)
+        self.assertIn("showRestoreStatus", catch,
+                      "the operator must be told sending is paused")
+
+    def test_the_send_gate_requires_a_confirmed_queue(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        body = m.group(0)
+        self.assertIn("if (!queueConfirmed)", body)
+        self.assertIn("not currently confirmed", body)
+
+    def test_the_freshness_check_precedes_the_record_lookup(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        body = m.group(0)
+        self.assertLess(body.index("if (!queueConfirmed)"),
+                        body.index("liveQueueRecord(target.work_item_id)"),
+                        "an unconfirmed queue must refuse before any lookup")
+
+    def test_the_previous_content_is_not_blanked(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        catch = m.group(0).split("} catch (e) {")[1]
+        self.assertNotIn("lastWorkItems = []", catch,
+                         "the operator should not be blanked out on a "
+                         "transient failure")
+
+
+class ReadOnlyProjectionTest(unittest.TestCase):
+    """Council finding: non-canonical entries were reconciled as activatable
+    tiles even though they can never be destinations.
+
+    Policy, stated explicitly: a packet projection is REAL work the operator
+    must still see, so it is not hidden. It renders READ-ONLY, with no
+    activation control, so it can never be selected or navigated to.
+    """
+
+    def test_canonicality_is_decided_in_the_card(self):
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        self.assertIn("isCanonicalMessageWorkItem(wid)", body)
+        self.assertIn("data-canonical=", body)
+
+    def test_only_canonical_records_get_an_activation_control(self):
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        self.assertIn("canonical", body.split("const openStart")[1][:200])
+        self.assertIn("q-readonly", body)
+
+    def test_non_canonical_records_remain_visible(self):
+        """Hiding a durable record is never the fix."""
+        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertNotIn("isCanonicalMessageWorkItem", body,
+                         "renderQueue must not filter out non-canonical rows; "
+                         "they render read-only instead")
+
+    def test_the_projection_is_labelled(self):
+        m = re.search(RE_CARD, APP)
+        self.assertIn("packet record", m.group(0))
+        self.assertIn(".q-ro-badge", CSS)
+        self.assertIn(".q-noncanonical", CSS)
+
+    def test_stale_role_button_css_is_removed(self):
+        self.assertNotIn('.q-row[role="button"]', CSS)
 
 
 class CanonicalIdentityTest(unittest.TestCase):
@@ -1389,7 +1482,12 @@ class AccessibilityTest(unittest.TestCase):
         m = re.search(RE_CARD, APP)
         body = m.group(0)
         self.assertIn('<button type="button" class="q-open"', body)
-        self.assertIn("aria-pressed=", body)
+        # aria-current, not aria-pressed: activating this NAVIGATES, it does not
+        # toggle a state off again.
+        self.assertIn("aria-current=", body)
+        self.assertNotIn("aria-pressed=", body,
+                         "a navigation control must not advertise a toggle "
+                         "contract to assistive technology")
         self.assertNotIn('role="button" tabindex="0"', body,
                          "the row must not claim button semantics itself")
         self.assertIn("data-sig=", body,

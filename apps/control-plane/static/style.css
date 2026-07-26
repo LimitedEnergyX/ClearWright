@@ -1132,8 +1132,8 @@ body.history-open .mission { display: none !important; }
 .session-rail { display: flex; flex-direction: column; gap: .6rem; }
 
 /* Item 7: queue rows are real controls, so they need a visible focus ring. */
-.q-row[role="button"] { cursor: pointer; }
-.q-row[role="button"]:focus-visible { outline: 2px solid #7aa2ff; outline-offset: 2px; }
+/* Queue rows are plain containers; the primary control is .q-open, which
+   carries the cursor and focus ring. The old role="button" rules are gone. */
 .q-exec { font-size: .68rem; opacity: .65; letter-spacing: .02em; }
 
 /* Round-2 council corrections. */
@@ -1201,3 +1201,13 @@ body.history-open .mission { display: none !important; }
 /* .q-meta is a span (phrasing content, so it may sit inside the button) but
    still lays out as a row. */
 .q-open .q-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
+
+/* A non-canonical entry (today only a clearance-packet projection) is shown for
+   visibility but is READ-ONLY: no activation, no navigation, no destination. */
+.q-row.q-noncanonical { opacity: .92; border-left: 3px dashed var(--line); }
+.q-readonly { display: block; cursor: default; }
+.q-ro-badge {
+  margin-left: 0.4rem; padding: 0 0.35rem; border-radius: 999px;
+  font-size: 0.6rem; font-weight: 700; letter-spacing: 0.03em;
+  color: var(--gray); border: 1px dotted var(--line); cursor: help;
+}

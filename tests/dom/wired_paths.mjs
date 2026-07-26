@@ -144,7 +144,9 @@ const ITEMS = [
 ];
 
 function seed(ctx, items, env) {
-  ev(ctx, "workItemsLoaded = true; lastWorkItems = " + JSON.stringify(items || ITEMS) + ";");
+  // A successful refresh sets BOTH: the snapshot and its confirmation.
+  ev(ctx, "workItemsLoaded = true; queueConfirmed = true; lastWorkItems = " +
+          JSON.stringify(items || ITEMS) + ";");
   // Keep the served payload in step, or the next poll reverts the seeded state.
   if (env) env.servedItems = items || ITEMS;
 }
@@ -734,7 +736,7 @@ async function attemptSend(ctx, env, text) {
   const ctx = loadApp(env);
   const hostile = ['a"b', "a\\b", "a]b", "a b", "a.b", "a#b", "a:b"];
   hostile.forEach((v) => {
-    const out = ev(ctx, "cssEscape(" + JSON.stringify(v) + ")");
+    const out = ev(ctx, "cssAttrValue(" + JSON.stringify(v) + ")");
     ok(typeof out === "string" && out.length >= v.length,
        "cssEscape returns an escaped string for " + JSON.stringify(v));
     // The escaped value must be usable in a selector without throwing.
@@ -745,8 +747,142 @@ async function attemptSend(ctx, env, text) {
   });
   // Escaping must be applied, not merely available.
   const src = fs.readFileSync(APP, "utf8");
-  ok(src.indexOf("CSS.escape ? CSS.escape(") === -1,
-     "no inline conditional escaping remains; all values go through cssEscape");
+  // Ignore comment lines: the code explains WHY CSS.escape is wrong here.
+  const codeOnly = src.split("\n").filter((l) => l.trim().indexOf("//") !== 0).join("\n");
+  ok(codeOnly.indexOf("CSS.escape") === -1,
+     "identifier escaping is not used for quoted attribute selectors");
+}
+
+// ---------------------------------------------------------------------------
+// 7. A FAILED QUEUE REFRESH withdraws send authority. A snapshot that merely
+//    loaded once is not evidence the destination is still live.
+// ---------------------------------------------------------------------------
+{
+  const { env, ctx } = sendEnv("");
+  ctx.wire();
+  ctx.renderQueue();
+  const groups = env.doc.getElementById("queue-groups");
+  groups.querySelector('.q-row[data-work-item="message:msg-alpha"] .q-open')
+    .dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha", "a live item is selected");
+
+  const before = await attemptSend(ctx, env, "BASELINE");
+  eq(before.posts, 1, "sending works while the queue is confirmed");
+
+  // The refresh now FAILS. The snapshot and the selection are untouched.
+  ev(ctx, "queueConfirmed = false;");
+  ok(ev(ctx, "lastWorkItems.length") > 0, "the stale snapshot is still present");
+  ok(ev(ctx, "workItemsLoaded") === true, "the queue still counts as loaded");
+  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha", "the selection survives");
+
+  const refused = await attemptSend(ctx, env, "MUST NOT SEND");
+  eq(refused.posts, 0, "a stale, unconfirmed queue emits NO request");
+  ok(refused.draft.length > 0, "the draft is preserved");
+  ok(refused.error.indexOf("not currently confirmed") !== -1,
+     "the refusal explains that the queue is unconfirmed");
+  eq(refused.settledLabel, "Send", "the button returns to Send");
+  ok(!refused.settledDisabled, "the button is re-enabled");
+
+  // RECOVERY: a successful refresh re-confirms and sending resumes.
+  seed(ctx, ITEMS, env);
+  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
+  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
+  const recovered = await attemptSend(ctx, env, "NOW CONFIRMED");
+  eq(recovered.posts, 1, "sending resumes after a successful refresh re-confirms");
+}
+
+// 7b. A real refreshWorkItems FAILURE marks the queue unconfirmed.
+{
+  const env = buildEnv({ responder: () => { throw new Error("network down"); } });
+  const ctx = loadApp(env);
+  seed(ctx, ITEMS, env);
+  ok(ev(ctx, "queueConfirmed") === true, "confirmed after seeding");
+  env.failAll = true;
+  // Force the failure path through the real function.
+  ctx.fetch = () => Promise.reject(new Error("network down"));
+  await ctx.refreshWorkItems();
+  ok(ev(ctx, "queueConfirmed") === false,
+     "a failed refresh withdraws queue confirmation");
+  ok(ev(ctx, "lastWorkItems.length") > 0,
+     "the previous content stays on screen rather than blanking the operator");
+}
+
+// ---------------------------------------------------------------------------
+// 8. NON-CANONICAL ENTRIES render READ-ONLY: visible, never activatable.
+// ---------------------------------------------------------------------------
+{
+  const env = buildEnv({});
+  const ctx = loadApp(env);
+  const mixed = [
+    { work_item_id: "message:msg-real", thread_id: "thr-real", title: "Real work",
+      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council" },
+    { work_item_id: "in_progress:session-ux-cta-20260725", thread_id: null,
+      title: "CTA packet", presentation_state: "waiting_on_claude", status: "open",
+      runner_state: "unknown" },
+    { work_item_id: "totally-malformed-but-truthy", thread_id: "thr-x",
+      title: "Malformed", presentation_state: "blocked", status: "planning",
+      runner_state: "waiting_on_council" },
+  ];
+  seed(ctx, mixed, env);
+  ctx.wire();
+  ctx.renderQueue();
+  const groups = env.doc.getElementById("queue-groups");
+
+  // All three remain VISIBLE: hiding real durable records is not the fix.
+  eq(groups.querySelectorAll(".q-row[data-work-item]").length, 3,
+     "every durable record stays visible, canonical or not");
+
+  // Only the canonical one is activatable.
+  eq(groups.querySelectorAll(".q-open").length, 1,
+     "only a canonical message work item gets an activation control");
+  const proj = groups.querySelector('.q-row[data-work-item="in_progress:session-ux-cta-20260725"]');
+  eq(proj.getAttribute("data-canonical"), "false", "the projection is marked non-canonical");
+  ok(!proj.querySelector(".q-open"), "the projection has NO activation control");
+  ok(!!proj.querySelector(".q-readonly"), "the projection renders read-only");
+  ok(!!proj.querySelector(".q-ro-badge"), "the projection is labelled as a packet record");
+
+  const mal = groups.querySelector('.q-row[data-work-item="totally-malformed-but-truthy"]');
+  eq(mal.getAttribute("data-canonical"), "false", "a truthy non-canonical id is non-canonical");
+  ok(!mal.querySelector(".q-open"), "a malformed record has NO activation control");
+
+  // Clicking a read-only row navigates nowhere.
+  ev(ctx, "selectedWorkItemId = null;");
+  proj.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), null, "clicking a packet projection does not navigate");
+  mal.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), null, "clicking a malformed record does not navigate");
+
+  // The canonical one still works.
+  groups.querySelector(".q-open").dispatchEvent(
+    new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), "message:msg-real",
+     "the canonical record is still activatable");
+
+  // aria-current, not aria-pressed: this navigates, it does not toggle.
+  const btn = groups.querySelector(".q-open");
+  ok(btn.hasAttribute("aria-current"), "the control uses aria-current");
+  ok(!btn.hasAttribute("aria-pressed"),
+     "it does not advertise a toggle-button contract");
+}
+
+// 8b. POSITIVE selector-match proof for escaped values, not merely no-throw.
+{
+  const env = buildEnv({});
+  const ctx = loadApp(env);
+  const host = env.doc.createElement("div");
+  env.doc.body.appendChild(host);
+  const hostile = ['a"b', "a\\b", "a]b", "a b", "a.b", "a#b", "a:b", "a[b"];
+  hostile.forEach((v, i) => {
+    const el = env.doc.createElement("span");
+    el.setAttribute("data-probe", v);
+    el.setAttribute("data-idx", String(i));
+    host.appendChild(el);
+    const escd = ev(ctx, "cssAttrValue(" + JSON.stringify(v) + ")");
+    let found = null;
+    try { found = host.querySelector('[data-probe="' + escd + '"]'); }
+    catch (e) { found = null; }
+    same(found, el, "an escaped value SELECTS THE INTENDED node for " + JSON.stringify(v));
+  });
 }
 
 console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");

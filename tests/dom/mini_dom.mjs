@@ -285,8 +285,26 @@ function selectorMatches(el, sel) {
   return String(sel).split(",").some((part) => matchCompoundChain(el, part.trim()));
 }
 
+// Whitespace-aware compound splitter that respects quoted attribute values.
+function splitCompounds(sel) {
+  const out = [];
+  let buf = "", quote = null, esc = false;
+  for (const ch of String(sel)) {
+    if (esc) { buf += ch; esc = false; continue; }
+    if (ch === "\\") { buf += ch; esc = true; continue; }
+    if (quote) { buf += ch; if (ch === quote) quote = null; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; buf += ch; continue; }
+    if (/\s/.test(ch)) { if (buf) { out.push(buf); buf = ""; } continue; }
+    buf += ch;
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
 function matchCompoundChain(el, sel) {
-  const parts = sel.split(/\s+/).filter(Boolean);
+  // Split on descendant combinators, but NOT on whitespace inside a quoted
+  // attribute value: [data-x="a b"] is one compound, not two.
+  const parts = splitCompounds(sel);
   if (!parts.length) return false;
   if (!matchCompound(el, parts[parts.length - 1])) return false;
   let n = el.parentNode;
@@ -302,12 +320,19 @@ function matchCompoundChain(el, sel) {
 }
 
 function matchCompound(el, comp) {
-  const re = /(^|\.|#)([\w-]+)|\[([\w-]+)(?:\s*=\s*"([^"]*)")?\]/g;
+  // Attribute values may contain BACKSLASH-ESCAPED characters, which is how
+  // a quote or backslash is carried inside a CSS string literal. Matching
+  // must unescape them, or a correctly escaped selector would fail here
+  // and the harness would report a false negative.
+  const re = /(^|\.|#)([\w-]+)|\[([\w-]+)(?:\s*=\s*"((?:[^"\\]|\\.)*)")?\]/g;
   let m, ok = true, any = false;
   while ((m = re.exec(comp)) !== null) {
     any = true;
     if (m[3] !== undefined) {
-      if (m[4] !== undefined) { if (el.getAttribute(m[3]) !== m[4]) ok = false; }
+      if (m[4] !== undefined) {
+        const want = m[4].replace(/\\(.)/g, "$1");   // unescape the literal
+        if (el.getAttribute(m[3]) !== want) ok = false;
+      }
       else if (!el.hasAttribute(m[3])) ok = false;
     } else if (m[1] === ".") {
       if (!el.classList.contains(m[2])) ok = false;

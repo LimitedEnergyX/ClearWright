@@ -1,82 +1,76 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with main): a3a5618ff8c35af561ee8a281c35e69bbd9aafac
-HEAD (bytes under review):   f6de7ddf96b56fc6c7b9872e759f1c49bb476b63
+HEAD (bytes under review):   b2f5872e892984a96d04e6395631c26e57fdb3b0
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
-An operator-workflow identity, integrity and submission-feedback
-correction to the LOCAL control-plane console. Presentation and wiring
-only: apps/control-plane/server.py, tools/clearwright_identity.py and
-every durable record are untouched, and no identity semantics change.
+An operator-workflow correction to the LOCAL control-plane console.
+Presentation and wiring only: apps/control-plane/server.py,
+tools/clearwright_identity.py and every durable record are untouched, and
+no identity semantics change.
 
-It is authorised by durable operator message msg-20260725T224347822028
-(2026-07-25T22:43:47Z, OPERATOR-0001, inbound, bound to work item
-message:msg-20260725T142257787771 and thread thr-20260725T142257787771),
-which postdates the terminal result of the previous verify council by
-seven hours.
+Authorised by durable operator message msg-20260726T022755446388
+(2026-07-26T02:27:55.446389Z, OPERATOR-0001, operator, inbound,
+operator-ui, simulated false), bound to work item
+message:msg-20260725T142257787771 and thread thr-20260725T142257787771,
+postdating the terminal result of the previous verify council. The CTA was
+re-verified IN_PROGRESS with a valid lease before editing and again before
+protected dispatch.
+
+This branch is cumulative: the diff carries the whole slice, but the
+section below marks what is NEW in this round.
 
 THE CORRECTIONS IN THIS ROUND (newest work, scrutinise first)
 ----------------------------------------------------------------------
-1. A LIVE CANONICAL RECORD IS REQUIRED BEFORE SENDING. The prior gap,
-   confirmed by reading the code rather than inferred: destinationDisagreement
-   guarded its thread comparison with `known &&`, so when polling removed the
-   selected item the check was skipped exactly when it mattered, while
-   convComposerTarget kept the target sendable by reading the remembered
-   selectedConvThread.
+1. REFRESH-FAILURE VISIBILITY THROUGH THE COMPLETE CHAIN. refreshWorkItems
+   previously caught its own error and resolved normally, so callers could
+   not tell a handled failure from a successful load; the boot continuation
+   then cleared the explanation the failure had just rendered, making an
+   initial-load failure invisible.
 
-   Both halves are closed. convComposerTarget derives the thread ONLY from the
-   live queue record. destinationDisagreement requires a live canonical record
-   AND an exact thread match, refusing with its own explanation otherwise.
+   It now returns one of FOUR explicit outcomes -- confirmed, confirmed_empty,
+   failed, superseded -- and deliberately does not throw, because it is called
+   from a polling timer where an unhandled rejection would be noise and it
+   keeps prior content on screen rather than blanking the operator.
 
-   VERIFIED in the running console with POSTs intercepted: an item selected
-   with a valid thread, then removed by polling while the stale thread was
-   still remembered and the hash still matched, produced 0 request attempts, a
-   preserved draft, an explanation naming the live queue, and a restored
-   button.
+   A reported failure is tracked separately and is NOT transient:
+   clearTransientRestoreStatus refuses to erase it, the boot continuation acts
+   only when refreshSucceeded(outcome), and the Retry control branches the
+   same way. Only a later CONFIRMED success clears it. Confirmed-empty is a
+   first-class outcome, never conflated with unloaded or failed.
 
-2. NON-CANONICAL DESTINATIONS CANNOT BE SENDABLE. isCanonicalMessageWorkItem
-   anchors on the message-scoped prefix, so a packet projection such as
-   in_progress:<packet-id> -- the queue presentation of a clearance packet,
-   with no thread -- can never resolve to a destination, nor can a malformed
-   record. renderQueue skips any row without a canonical id rather than
-   reconciling several such rows under one empty key.
+2. DETERMINISTIC MONOTONIC REFRESH SEQUENCING. Every refresh takes a
+   generation from a monotonically increasing counter and may touch shared
+   state only while it is still the newest. BOTH completion paths are guarded,
+   so an older success arriving after a newer failure cannot restore
+   sendability, and an older failure arriving after a newer success cannot
+   invalidate a confirmed snapshot. A superseded completion changes nothing.
 
-   VERIFIED live against the REAL CTA packet projection currently in the
-   queue: not canonical, no live record, unresolved target, 0 request
-   attempts, explicit refusal.
+COVERAGE runs through the REAL refresh, wire(), destination and send paths,
+using a controllable transport that can defer a request and complete it out of
+order. It proves: the four outcomes are distinct; both stale-completion
+directions; an initial-load failure through wire() keeps its explanation after
+every continuation settles, including transient cleanup, restoration and a
+further failed poll; zero POSTs while unconfirmed with the draft preserved;
+recovery only after a later confirmed refresh; and that a confirmed EMPTY
+result is authoritative, leaving stale destinations unsendable without being
+reported as a failure.
 
-3. ONE ESCAPING MECHANISM FOR EVERY DYNAMIC SELECTOR. cssEscape replaces the
-   inline CSS.escape conditionals, with a conservative fallback that escapes
-   everything outside the identifier-safe set rather than guessing which
-   characters an engine treats as significant. Applied to the focus selector,
-   the message-highlight selector and the group selector; a test fails if any
-   inline conditional escaping reappears.
+Two harness fidelity bugs were fixed while writing that coverage: the
+transport wrapper double-counted POSTs it delegated, and the status helper
+treated an element with no hidden attribute as visible even when empty.
 
-4. WIRED COVERAGE for exactly these paths: stale selection after polling,
-   including that a retry sends only after a valid live item is reselected; a
-   live record that lost its thread; a packet projection; malformed records;
-   and selector-significant identifiers. The harness is now 110 checks, up
-   from 66.
+PRESERVED: every previously accepted Session Continuity and Message Identity
+UX behaviour, including focus persistence, keyed reconciliation with ordering
+and group movement, native activation, route integrity, Copy controls,
+read-only packet projections, composer binding, in-flight feedback, duplicate
+prevention, draft preservation, identifier presentation and History
+separation.
 
-   Two HARNESS FIDELITY BUGS were found and fixed while writing that coverage,
-   recorded because they made earlier results look better than they were: the
-   send helper read refusal state AFTER flushing, by which point unrelated
-   render chains had called restoreDraft and cleared the textarea; and the stub
-   responder answered the work-items endpoint with a generic payload, which
-   emptied the seeded queue mid-test and made a legitimate retry refuse for the
-   wrong reason.
-
-PRESERVED, all previously accepted behaviour: focus persistence, keyed
-reconciliation with group movement and ordering, native mouse/Enter/Space
-activation, route integrity, Copy controls, conversation and composer binding,
-in-flight send feedback, duplicate prevention, draft preservation, durable
-success confirmation, identifier presentation, History separation, and
-shared-thread sibling preservation.
-
-STILL UNVERIFIED, stated plainly: real-browser Space activation. The tooling
-delivers no discrete key events to the page, so the measurement is unavailable
-rather than negative. No queue keydown handler remains that could suppress it.
+STILL UNVERIFIED: real-browser Space activation. The tooling delivers no
+discrete key events to the page, so the measurement is unavailable rather than
+negative.
 
 EARLIER WORK IN THIS SAME DIFF (reviewed in prior councils)
 ----------------------------------------------------------------------
@@ -153,10 +147,10 @@ artifacts across 1380 ledger rows.
 
 TESTS (counts measured by running them, not typed)
 ----------------------------------------------------------------------
-  focused static   182 tests  (OK)
+  focused static   196 tests  (OK)
   runtime          109 checks (PASS)  tests/dom/session_ux_runtime.mjs
-  wired path       145 checks (PASS)  tests/dom/wired_paths.mjs
-  full suite       1389 tests  (OK, skipped=1)
+  wired path       192 checks (PASS)  tests/dom/wired_paths.mjs
+  full suite       1403 tests  (OK, skipped=1)
 
 The runtime and wired harnesses execute the real app.js in a Node vm.
 They add NO dependency: every import is a Node builtin or a local
@@ -171,28 +165,28 @@ rather than browser automation.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       182539  4d1efa482026dc5589fef119c7ab276c3ef07d963ac9a69352aa0cf0a85b2795
+  apps/control-plane/static/app.js                       186056  2d7672a219212ecf6794addb8a6f0ac42e526f2899b56a51a9c2de26aa0513eb
   apps/control-plane/static/index.html                    22393  86b4ffbf452f29a46c2c7c9877a3daadfdf29b5bc3af4118bb40b55a993b02f4
   apps/control-plane/static/style.css                     55185  3f14d5e79f3c220d029508dd84347190d12cf061677cd023897fa0e7f4a82984
   tests/dom/mini_dom.mjs                                  15472  03b1de7aadd7cd0c81e37bcea5eba26fc5c052f0a1a05d105842f6d4cb29fa32
   tests/dom/session_ux_runtime.mjs                        31834  e5085e168f511380372b6c7420de37c8b4d9bee5edb8947c6bde0d30d9f05894
-  tests/dom/wired_paths.mjs                               39937  2010785128784973a6e41bcde2401f3acb3b7d241c66a654c954be8f386ddc4e
-  tests/test_session_continuity_ux.py                     73619  6407ad8dbafbc32f26e5a8a0b98d760a26e095013cae446047e7345fd9381aa8
+  tests/dom/wired_paths.mjs                               49365  20791359b04e6a20a133bb0a67411ed6701b3ac4dded9f6403f30a13ec44e83c
+  tests/test_session_continuity_ux.py                     79237  a25540d2bc76b099100e49ab76e267fd61c5cf97e7d4ab2e4488ace1b0794f96
   tests/test_session_ux_runtime.py                         1585  ebb673195e5fb9463a228865f4a136e4111de7aa9bc41d714d8816c4c9386a1f
   tests/test_session_ux_wired.py                           2358  3c8647d059510f8e7c8d0207f07ff842fd962ac5f06f8fa659762af272ade56d
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js     | 1150 ++++++++++++++++++++++++-
+ apps/control-plane/static/app.js     | 1215 ++++++++++++++++++++++++-
  apps/control-plane/static/index.html |   49 +-
  apps/control-plane/static/style.css  |  164 ++++
- tests/dom/mini_dom.mjs               |  399 +++++++++
- tests/dom/session_ux_runtime.mjs     |  667 +++++++++++++++
- tests/dom/wired_paths.mjs            |  889 +++++++++++++++++++
- tests/test_session_continuity_ux.py  | 1547 ++++++++++++++++++++++++++++++++++
+ tests/dom/mini_dom.mjs               |  399 ++++++++
+ tests/dom/session_ux_runtime.mjs     |  667 ++++++++++++++
+ tests/dom/wired_paths.mjs            | 1097 ++++++++++++++++++++++
+ tests/test_session_continuity_ux.py  | 1657 ++++++++++++++++++++++++++++++++++
  tests/test_session_ux_runtime.py     |   40 +
  tests/test_session_ux_wired.py       |   55 ++
- 9 files changed, 4906 insertions(+), 54 deletions(-)
+ 9 files changed, 5288 insertions(+), 55 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -318,7 +312,7 @@ FULL DIFF (committed bytes)
 NOTE: non-ASCII characters below are shown as <U+XXXX>.
 
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index dd2d10c..4a6a212 100644
+index dd2d10c..ba0913d 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -315,12 +315,18 @@ function renderOperatorPanel(ts) {
@@ -490,7 +484,7 @@ index dd2d10c..4a6a212 100644
      }
    }
  
-@@ -958,6 +1070,16 @@ const WORK_KIND_LABEL = {
+@@ -958,6 +1070,39 @@ const WORK_KIND_LABEL = {
  // --------------------------------------------------------------------------- //
  
  let lastWorkItems = [];
@@ -504,10 +498,33 @@ index dd2d10c..4a6a212 100644
 +// NOT keep authorising sends. Send authorization therefore requires a
 +// currently-confirmed queue, not merely one that loaded successfully once.
 +let queueConfirmed = false;
++// A refresh failure the operator can still see. It is NOT transient: no boot
++// continuation, route restoration, conversation restoration, polling cycle or
++// transient-status cleanup may erase it. Only a later CONFIRMED success clears
++// it, because only that re-establishes the truth it was reporting.
++let queueFailureReported = false;
++// Monotonically increasing refresh generation. Overlapping refreshes are
++// possible (the polling timer, the boot path and the Retry control can all be
++// in flight at once) and they can complete OUT OF ORDER, so a completion may
++// only touch shared state when it belongs to the newest started refresh.
++let queueRefreshGeneration = 0;
++
++// The four outcomes a refresh can have. They are deliberately distinct:
++// "confirmed empty" is a real, authoritative answer and must never be confused
++// with "not loaded" or "failed".
++const REFRESH_CONFIRMED = "confirmed";
++const REFRESH_CONFIRMED_EMPTY = "confirmed_empty";
++const REFRESH_FAILED = "failed";
++const REFRESH_SUPERSEDED = "superseded";
++
++// True only for an outcome that re-establishes authoritative queue truth.
++function refreshSucceeded(outcome) {
++  return outcome === REFRESH_CONFIRMED || outcome === REFRESH_CONFIRMED_EMPTY;
++}
  let lastQueueCouncils = [];
  let lastArchiveIndex = { archived: [], count: 0 };
  
-@@ -1045,6 +1167,17 @@ function actionsForState(pstate, canonical) {
+@@ -1045,6 +1190,17 @@ function actionsForState(pstate, canonical) {
    }
  }
  
@@ -525,7 +542,7 @@ index dd2d10c..4a6a212 100644
  function queueCard(it) {
    const ps = it.presentation_state || "waiting_on_claude";
    const selected = it.work_item_id && it.work_item_id === selectedWorkItemId;
-@@ -1061,11 +1194,86 @@ function queueCard(it) {
+@@ -1061,11 +1217,86 @@ function queueCard(it) {
      ? '<span class="q-opflag" title="operator action required"><U+25C9> operator</span>' : "";
    // Technical ids ride on data attributes only; the primary card stays readable.
    const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
@@ -616,7 +633,7 @@ index dd2d10c..4a6a212 100644
      "</div>";
  }
  
-@@ -1117,6 +1325,108 @@ function attentionCounts(items) {
+@@ -1117,6 +1348,108 @@ function attentionCounts(items) {
    return c;
  }
  
@@ -725,7 +742,7 @@ index dd2d10c..4a6a212 100644
  function renderQueue() {
    const el = document.getElementById("queue-groups");
    if (!el) return;
-@@ -1124,21 +1434,44 @@ function renderQueue() {
+@@ -1124,21 +1457,44 @@ function renderQueue() {
    const rows = filterSortQueue(lastWorkItems, queueFilterMode, queueSearch);
    syncFilterChips();
    if (!rows.length) {
@@ -781,7 +798,7 @@ index dd2d10c..4a6a212 100644
  }
  
  function syncFilterChips() {
-@@ -1290,23 +1623,650 @@ function openAttention() {
+@@ -1290,23 +1646,660 @@ function openAttention() {
    }
  }
  
@@ -1362,6 +1379,10 @@ index dd2d10c..4a6a212 100644
 +// explains something the operator's link did, and it stays until they navigate.
 +function clearTransientRestoreStatus() {
 +  if (routeErrorReported) return;
++  // A reported refresh failure is NOT transient. Clearing it here is what
++  // previously made an initial-load failure invisible: the boot continuation
++  // erased the explanation the failure had just rendered.
++  if (queueFailureReported) return;
 +  showRestoreStatus("");
 +}
 +
@@ -1379,8 +1400,14 @@ index dd2d10c..4a6a212 100644
 +    btn.className = "btn btn-quiet";
 +    btn.textContent = "Retry";
 +    btn.addEventListener("click", () => {
-+      showRestoreStatus("");
-+      refreshWorkItems().then(restoreActiveSelection).catch(() => {
++      refreshWorkItems().then((outcome) => {
++        if (refreshSucceeded(outcome)) { restoreActiveSelection(); return; }
++        if (outcome === REFRESH_FAILED) {
++          showRestoreStatus("Still could not load the work queue. Sending " +
++                            "remains paused until it reloads.", true);
++        }
++        // A superseded retry is silent: a newer refresh owns the truth.
++      }).catch(() => {
 +        showRestoreStatus("Still could not load the work queue.", true);
 +      });
 +    });
@@ -1435,7 +1462,7 @@ index dd2d10c..4a6a212 100644
      const node = document.querySelector(sel);
      if (node) {
        node.classList.add("msg-highlight");
-@@ -1317,27 +2277,61 @@ function highlightMessage(messageId) {
+@@ -1317,27 +2310,86 @@ function highlightMessage(messageId) {
  
  // Apply a #work=...&msg=... route on load / hashchange (navigation only).
  function applyWorkHashRoute() {
@@ -1482,30 +1509,56 @@ index dd2d10c..4a6a212 100644
 +  }
  }
  
++// Returns one of the four REFRESH_* outcomes so callers can distinguish a
++// confirmed load from a handled failure without relying on exceptions. It
++// deliberately does NOT throw: it is called from a polling timer where an
++// unhandled rejection would be noise, and it keeps the previous content on
++// screen rather than blanking the operator.
  async function refreshWorkItems() {
++  const gen = ++queueRefreshGeneration;
    try {
      const data = await getJSON("/api/work-items");
++    // A completion that is no longer the newest may not touch ANY shared
++    // state: not the snapshot, not loaded/confirmed, not the status. An older
++    // success arriving after a newer failure must not restore sendability.
++    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
      lastWorkItems = data.work_items || [];
 +    workItemsLoaded = true;   // a SUCCESSFUL response, even when it is empty
 +    queueConfirmed = true;    // and it is CURRENT as of this response
++    // Only a confirmed success clears a reported failure, because only this
++    // re-establishes the truth that failure was reporting.
++    if (queueFailureReported) {
++      queueFailureReported = false;
++      showRestoreStatus("");
++    }
      try {
        const cd = await getJSON("/api/review-councils");
-       lastQueueCouncils = cd.review_councils || [];
+-      lastQueueCouncils = cd.review_councils || [];
++      if (gen === queueRefreshGeneration) {
++        lastQueueCouncils = cd.review_councils || [];
++      }
      } catch (e2) { /* councils optional for queue hints */ }
++    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
      renderQueue();
++    return lastWorkItems.length ? REFRESH_CONFIRMED : REFRESH_CONFIRMED_EMPTY;
    } catch (e) {
 -    // Leave the prior content in place on a transient fetch error.
++    // An older failure arriving after a newer success must not invalidate the
++    // confirmed current snapshot.
++    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
 +    // Leave the prior content on screen so the operator is not blanked out, but
 +    // withdraw its authority to authorise a send: an unrefreshed snapshot is
 +    // not evidence that the destination is still live.
 +    queueConfirmed = false;
++    queueFailureReported = true;
 +    showRestoreStatus("The work queue could not be refreshed, so destinations " +
 +                      "cannot be confirmed. Sending is paused until it reloads.",
 +                      true);
++    return REFRESH_FAILED;
    }
  }
  
-@@ -1398,7 +2392,7 @@ async function loadHistory() {
+@@ -1398,7 +2450,7 @@ async function loadHistory() {
    lastLedgerRows = (data.rows || []).filter((row) => ledgerRowMatches(row, f));
    const body = document.getElementById("ledger-body");
    if (!lastLedgerRows.length) {
@@ -1514,7 +1567,7 @@ index dd2d10c..4a6a212 100644
      return;
    }
    body.innerHTML = lastLedgerRows.slice(0, 500).map((row, i) =>
-@@ -1406,12 +2400,31 @@ async function loadHistory() {
+@@ -1406,12 +2458,31 @@ async function loadHistory() {
      '" data-ledger-index="' + i + '">' +
      "<td>" + esc(shortTime(row.at)) + "</td>" +
      "<td>" + esc(row.type) + (row.archived ? ' <span class="feed-badge local">archived</span>' : "") + "</td>" +
@@ -1547,7 +1600,7 @@ index dd2d10c..4a6a212 100644
  function openLedgerDetail(index) {
    const row = lastLedgerRows[index];
    if (!row) return;
-@@ -1837,7 +2850,8 @@ function buildConversationTab(run) {
+@@ -1837,7 +2908,8 @@ function buildConversationTab(run) {
      html += '<div class="' + cls + '" data-message-id="' + esc(m.message_id || "") + '">' +
        (tag ? '<div class="conv-entry-tag">' + esc(tag.label) + "</div>" : "") +
        '<div class="conv-msg-body">' + esc(m.message) + "</div>" +
@@ -1557,7 +1610,7 @@ index dd2d10c..4a6a212 100644
    }
    html += "</div>";
    return html;
-@@ -2135,6 +3149,27 @@ let convComposerNewThreadId = null;
+@@ -2135,6 +3207,27 @@ let convComposerNewThreadId = null;
  let convComposer = null;
  
  function convComposerTarget() {
@@ -1585,7 +1638,7 @@ index dd2d10c..4a6a212 100644
    if (selectedConvThread) return { thread_id: selectedConvThread };
    if (!convComposerNewThreadId) convComposerNewThreadId = genThreadId();
    return { thread_id: convComposerNewThreadId };
-@@ -2783,12 +3818,23 @@ function toggleToolLog() {
+@@ -2783,12 +3876,23 @@ function toggleToolLog() {
    if (footer) footer.hidden = !footer.hidden;
  }
  
@@ -1609,7 +1662,7 @@ index dd2d10c..4a6a212 100644
    renderQueue();
    refreshTaskState();
    loadConversations();
-@@ -2869,11 +3915,18 @@ function wire() {
+@@ -2869,11 +3973,18 @@ function wire() {
  
    // Work queue: clicking a row selects that task everywhere.
    document.getElementById("queue-groups").addEventListener("click", (e) => {
@@ -1633,7 +1686,7 @@ index dd2d10c..4a6a212 100644
    });
  
    // Context-aware task actions are READ-ONLY navigation only: they switch view
-@@ -2886,6 +3939,10 @@ function wire() {
+@@ -2886,6 +3997,10 @@ function wire() {
      if (nav === "history") showView("history");
      else showView("work");   // conv / council / evidence / gate / verification tabs
    });
@@ -1644,7 +1697,7 @@ index dd2d10c..4a6a212 100644
    document.getElementById("queue-new-btn").addEventListener("click", () => {
      selectTask(null);
      renderConvDetail(null);
-@@ -2997,6 +4054,19 @@ function wire() {
+@@ -2997,6 +4112,24 @@ function wire() {
    // at boot; the fast poll below only runs while the Work view is open.
    loadConversations();
    applyWorkHashRoute();   // honor a #work=...&msg=... deep link on load
@@ -1652,7 +1705,12 @@ index dd2d10c..4a6a212 100644
 +  // selection or fall back to the highest-priority active item so a refresh
 +  // never strands the operator on an empty panel while active work exists.
 +  initJumpToLatest();
-+  refreshWorkItems().then(() => {
++  refreshWorkItems().then((outcome) => {
++    // Only a CONFIRMED success may clear status or restore a selection. On a
++    // handled failure the explanation stays and nothing is restored, because
++    // restoring from an unconfirmed snapshot is exactly what the failure means
++    // we cannot do. A superseded completion is not ours to act on at all.
++    if (!refreshSucceeded(outcome)) return;
 +    clearTransientRestoreStatus();
 +    restoreActiveSelection();
 +  }).catch(() => {
@@ -3008,10 +3066,10 @@ index 0000000..a7008eb
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/dom/wired_paths.mjs b/tests/dom/wired_paths.mjs
 new file mode 100644
-index 0000000..5ada594
+index 0000000..73ecb23
 --- /dev/null
 +++ b/tests/dom/wired_paths.mjs
-@@ -0,0 +1,889 @@
+@@ -0,0 +1,1097 @@
 +/*
 + * Executable coverage through the REAL wired event paths.
 + *
@@ -3899,14 +3957,222 @@ index 0000000..5ada594
 +  });
 +}
 +
++// ---------------------------------------------------------------------------
++// 9. REFRESH OUTCOMES, SEQUENCING AND PERSISTENT FAILURE VISIBILITY.
++//    Everything below drives the REAL refreshWorkItems / wire() / send paths.
++//    A controllable transport lets a test decide, per request, whether a
++//    /api/work-items call succeeds, fails, or resolves LATE and out of order.
++// ---------------------------------------------------------------------------
++function queueEnv(opts) {
++  opts = opts || {};
++  const state = { mode: "ok", items: ITEMS, pending: [] };
++  const env = buildEnv({
++    hash: opts.hash || "",
++    responder: (url, method) => {
++      if (url.indexOf("message_id=") !== -1) return { found: true, message: { message: env.lastSent || "PROBE" } };
++      if (method === "POST") return { ok: true, message_id: "msg-new", thread_id: "thr-alpha" };
++      return { ok: true };
++    },
++  });
++  const realFetch = env.ctx.fetch;
++  env.queue = state;
++  env.ctx.fetch = function (url, init) {
++    const u = String(url);
++    const method = (init && init.method) || "GET";
++    if (u.indexOf("/api/work-items") === 0) {
++      env.posted.push({ url: u, method });   // recorded here; not delegated
++      if (state.mode === "fail") return Promise.reject(new Error("probe: queue down"));
++      if (state.mode === "defer") {
++        // Hand the test the resolver so it can complete this call LATER.
++        return new Promise((resolve, reject) => {
++          state.pending.push({
++            resolveWith: (items) => resolve({ ok: true, status: 200,
++              json: () => Promise.resolve({ work_items: items }) }),
++            rejectWith: (e) => reject(e || new Error("probe: deferred failure")),
++          });
++        });
++      }
++      return Promise.resolve({ ok: true, status: 200,
++        json: () => Promise.resolve({ work_items: state.items }) });
++    }
++    return realFetch(url, init);
++  };
++  return env;
++}
++
++const statusOf = (env) => {
++  const el = env.doc.getElementById("restore-status");
++  const text = String(el.textContent || "");
++  // A status counts as shown only when it is both un-hidden AND has content:
++  // the stub element starts without a hidden attribute, so emptiness is the
++  // reliable signal that nothing is being reported.
++  const shown = !el.hidden && text.trim().length > 0;
++  return { hidden: !shown, shown: shown, text: text };
++};
++
++// 9a. THE FOUR OUTCOMES ARE DISTINCT.
++{
++  const env = queueEnv({});
++  const ctx = loadApp(env);
++  env.queue.items = ITEMS;
++  eq(await ctx.refreshWorkItems(), "confirmed", "a populated load is CONFIRMED");
++  env.queue.items = [];
++  eq(await ctx.refreshWorkItems(), "confirmed_empty",
++     "an EMPTY load is confirmed_empty, not failed and not unloaded");
++  ok(ev(ctx, "workItemsLoaded") === true, "a confirmed empty load is still LOADED");
++  ok(ev(ctx, "queueConfirmed") === true, "a confirmed empty load is CONFIRMED");
++  eq(ev(ctx, "lastWorkItems.length"), 0, "and the snapshot is genuinely empty");
++  env.queue.mode = "fail";
++  eq(await ctx.refreshWorkItems(), "failed", "a rejected load is FAILED");
++  ok(ev(ctx, "queueConfirmed") === false, "a failure withdraws confirmation");
++  ok(ev(ctx, "workItemsLoaded") === true,
++     "a failure does not pretend the queue was never loaded");
++}
++
++// 9b. STALE COMPLETION, DIRECTION ONE: an OLDER SUCCESS after a NEWER FAILURE
++//     must not restore sending.
++{
++  const env = queueEnv({});
++  const ctx = loadApp(env);
++  env.queue.items = ITEMS;
++  await ctx.refreshWorkItems();
++  ok(ev(ctx, "queueConfirmed") === true, "confirmed to begin with");
++
++  env.queue.mode = "defer";
++  const older = ctx.refreshWorkItems();          // generation N, left in flight
++  env.queue.mode = "fail";
++  const newerOutcome = await ctx.refreshWorkItems();   // generation N+1, fails
++  eq(newerOutcome, "failed", "the newer refresh failed");
++  ok(ev(ctx, "queueConfirmed") === false, "confirmation is withdrawn");
++
++  env.queue.pending.shift().resolveWith(ITEMS);  // the OLDER one now succeeds
++  eq(await older, "superseded", "the older success reports SUPERSEDED");
++  ok(ev(ctx, "queueConfirmed") === false,
++     "an older success does NOT restore confirmation after a newer failure");
++  ok(ev(ctx, "queueFailureReported") === true, "the failure is still reported");
++}
++
++// 9c. STALE COMPLETION, DIRECTION TWO: an OLDER FAILURE after a NEWER SUCCESS
++//     must not invalidate the confirmed snapshot.
++{
++  const env = queueEnv({});
++  const ctx = loadApp(env);
++  env.queue.mode = "defer";
++  const older = ctx.refreshWorkItems();          // generation N, in flight
++  env.queue.mode = "ok";
++  env.queue.items = ITEMS;
++  eq(await ctx.refreshWorkItems(), "confirmed", "the newer refresh confirmed");
++  ok(ev(ctx, "queueConfirmed") === true, "the queue is confirmed");
++
++  env.queue.pending.shift().rejectWith();        // the OLDER one now fails
++  eq(await older, "superseded", "the older failure reports SUPERSEDED");
++  ok(ev(ctx, "queueConfirmed") === true,
++     "an older failure does NOT invalidate a newer confirmed snapshot");
++  ok(ev(ctx, "queueFailureReported") === false, "no failure is reported");
++  eq(statusOf(env).hidden, true, "and no failure status is shown");
++}
++
++// 9d. INITIAL LOAD FAILURE THROUGH wire(): the explanation must SURVIVE every
++//     continuation. This is the regression the previous round introduced.
++{
++  const env = queueEnv({});
++  const ctx = loadApp(env);
++  env.queue.mode = "fail";
++  ctx.wire();
++  for (let i = 0; i < 12; i++) await settle();   // let ALL continuations run
++
++  ok(ev(ctx, "queueConfirmed") === false, "boot failure leaves the queue unconfirmed");
++  ok(ev(ctx, "queueFailureReported") === true, "the failure is recorded");
++  const st = statusOf(env);
++  eq(st.hidden, false, "the explanation is STILL VISIBLE after boot settles");
++  ok(st.text.indexOf("Sending is paused") !== -1,
++     "the explanation is the plain-language sending-paused message");
++  ok(st.text.indexOf("could not be refreshed") !== -1, "it says what went wrong");
++  eq(ev(ctx, "selectedWorkItemId"), null,
++     "no selection is restored from an unconfirmed snapshot");
++
++  // Transient cleanup must not erase it either.
++  ctx.clearTransientRestoreStatus();
++  eq(statusOf(env).hidden, false,
++     "transient-status cleanup does NOT erase a refresh failure");
++
++  // Nor may a later polling cycle that also fails.
++  await ctx.refreshWorkItems();
++  eq(statusOf(env).hidden, false, "a further failed poll keeps the explanation");
++}
++
++// 9e. ZERO POSTS while unconfirmed, DRAFT PRESERVED, then RECOVERY.
++{
++  const env = queueEnv({});
++  const ctx = loadApp(env);
++  env.queue.items = ITEMS;
++  await ctx.refreshWorkItems();
++  ctx.wire();
++  ctx.renderQueue();
++  env.doc.getElementById("queue-groups")
++    .querySelector('.q-row[data-work-item="message:msg-alpha"] .q-open')
++    .dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
++  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha", "a live item is selected");
++
++  const baseline = await attemptSend(ctx, env, "BASELINE");
++  eq(baseline.posts, 1, "sending works while confirmed");
++
++  env.queue.mode = "fail";
++  eq(await ctx.refreshWorkItems(), "failed", "the refresh now fails");
++
++  const refused = await attemptSend(ctx, env, "MUST NOT SEND");
++  eq(refused.posts, 0, "ZERO POSTs while the queue is unconfirmed");
++  ok(refused.draft.length > 0, "the draft is preserved");
++  ok(refused.error.indexOf("not currently confirmed") !== -1,
++     "the refusal explains the unconfirmed queue");
++  eq(refused.settledLabel, "Send", "the button is restored");
++  eq(statusOf(env).hidden, false, "the sending-paused explanation is still visible");
++
++  // RECOVERY through a later CONFIRMED refresh.
++  env.queue.mode = "ok";
++  eq(await ctx.refreshWorkItems(), "confirmed", "a later refresh confirms");
++  ok(ev(ctx, "queueFailureReported") === false, "the failure record is cleared");
++  eq(statusOf(env).hidden, true, "and the explanation is cleared with it");
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
++  const recovered = await attemptSend(ctx, env, "NOW CONFIRMED");
++  eq(recovered.posts, 1, "sendability is restored only after a confirmed refresh");
++}
++
++// 9f. A CONFIRMED EMPTY result is authoritative: stale destinations are NOT
++//     sendable afterwards, and it is not treated as a failure.
++{
++  const env = queueEnv({});
++  const ctx = loadApp(env);
++  env.queue.items = ITEMS;
++  await ctx.refreshWorkItems();
++  ctx.wire();
++  ctx.renderQueue();
++  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
++  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
++
++  env.queue.items = [];
++  eq(await ctx.refreshWorkItems(), "confirmed_empty", "the queue is confirmed EMPTY");
++  ok(ev(ctx, "queueConfirmed") === true, "confirmed empty is still confirmed");
++  eq(statusOf(env).hidden, true, "a confirmed empty result shows no failure status");
++
++  const t = ev(ctx, "convComposerTarget()");
++  ok(t.unresolved === true, "the stale destination is unresolved after an empty result");
++  const r = await attemptSend(ctx, env, "MUST NOT SEND");
++  eq(r.posts, 0, "a stale destination is NOT sendable after a confirmed empty result");
++  ok(r.draft.length > 0, "the draft is preserved");
++  ok(r.error.indexOf("no longer in the live queue") !== -1,
++     "the refusal names the live queue, not a refresh failure");
++}
++
 +console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");
 +process.exit(failures === 0 ? 0 : 1);
 diff --git a/tests/test_session_continuity_ux.py b/tests/test_session_continuity_ux.py
 new file mode 100644
-index 0000000..219f2c9
+index 0000000..c80809e
 --- /dev/null
 +++ b/tests/test_session_continuity_ux.py
-@@ -0,0 +1,1547 @@
+@@ -0,0 +1,1657 @@
 +"""Active Session Continuity and Message Identity UX (Phase 1).
 +
 +Follows the established front-end test pattern in this repository: static
@@ -4630,6 +4896,116 @@ index 0000000..219f2c9
 +
 +    def test_stale_role_button_css_is_removed(self):
 +        self.assertNotIn('.q-row[role="button"]', CSS)
++
++
++class RefreshOutcomeTest(unittest.TestCase):
++    """Correction 1: refresh must distinguish four outcomes explicitly.
++
++    refreshWorkItems previously caught its own error and resolved normally, so
++    callers could not tell a handled failure from a successful load. The boot
++    continuation therefore cleared the status the failure had just rendered.
++    """
++
++    def test_the_four_outcomes_are_named_constants(self):
++        for c in ("REFRESH_CONFIRMED", "REFRESH_CONFIRMED_EMPTY",
++                  "REFRESH_FAILED", "REFRESH_SUPERSEDED"):
++            self.assertIn("const " + c + " =", APP)
++
++    def test_confirmed_empty_is_distinct_from_failed_and_unloaded(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("lastWorkItems.length ? REFRESH_CONFIRMED : REFRESH_CONFIRMED_EMPTY", body)
++        # An empty load is still loaded AND confirmed.
++        self.assertIn("workItemsLoaded = true;", body)
++        self.assertIn("queueConfirmed = true;", body)
++
++    def test_a_success_helper_gates_the_callers(self):
++        self.assertIn("function refreshSucceeded", APP)
++        m = re.search(r"function refreshSucceeded[" + BS + r"s" + BS + r"S]{0,1000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("REFRESH_CONFIRMED", body)
++        self.assertIn("REFRESH_CONFIRMED_EMPTY", body)
++        self.assertNotIn("REFRESH_FAILED", body)
++
++    def test_the_boot_path_acts_only_on_a_confirmed_success(self):
++        i = APP.index("function wire()")
++        j = APP.index("function handleOperatorAction")
++        boot = APP[i:j]
++        self.assertIn("refreshWorkItems().then((outcome) =>", boot)
++        self.assertIn("if (!refreshSucceeded(outcome)) return;", boot)
++
++    def test_the_retry_control_branches_the_same_way(self):
++        m = re.search(r"function showRestoreStatus[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("refreshSucceeded(outcome)", body)
++        self.assertIn("REFRESH_FAILED", body)
++
++    def test_refresh_does_not_signal_failure_by_throwing(self):
++        """It is called from a polling timer, where an unhandled rejection
++        would be noise, and it keeps prior content on screen."""
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertNotIn("throw", body)
++        self.assertIn("return REFRESH_FAILED;", body)
++
++
++class RefreshFailureVisibilityTest(unittest.TestCase):
++    """Correction 1: the explanation must survive every continuation."""
++
++    def test_a_reported_failure_is_tracked_separately(self):
++        self.assertIn("let queueFailureReported = false;", APP)
++
++    def test_transient_cleanup_cannot_erase_it(self):
++        m = re.search(r"function clearTransientRestoreStatus[" + BS + r"s" + BS + r"S]{0,1200}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertIn("if (queueFailureReported) return;", body)
++
++    def test_only_a_confirmed_success_clears_it(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        success = body.split("catch (e)")[0]
++        self.assertIn("queueFailureReported = false;", success)
++        self.assertIn("queueFailureReported = true;", body.split("catch (e)")[1])
++
++    def test_the_failure_keeps_the_snapshot_visible(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        catch = m.group(0).split("catch (e)")[1]
++        self.assertNotIn("lastWorkItems = []", catch)
++        self.assertIn("queueConfirmed = false;", catch)
++        self.assertIn("showRestoreStatus(", catch)
++
++
++class RefreshSequencingTest(unittest.TestCase):
++    """Correction 2: only the newest generation may alter refresh truth."""
++
++    def test_a_monotonic_generation_exists(self):
++        self.assertIn("let queueRefreshGeneration = 0;", APP)
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        self.assertIn("const gen = ++queueRefreshGeneration;", m.group(0))
++
++    def test_both_completion_paths_are_guarded(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        success, failure = body.split("catch (e)")
++        self.assertIn("gen !== queueRefreshGeneration", success,
++                      "an older SUCCESS must not restore state")
++        self.assertIn("gen !== queueRefreshGeneration", failure,
++                      "an older FAILURE must not invalidate newer state")
++
++    def test_a_superseded_completion_touches_no_shared_state(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        i = body.index("if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;")
++        head = body[:i]
++        for mutation in ("lastWorkItems =", "queueConfirmed =", "workItemsLoaded ="):
++            self.assertNotIn(mutation, head,
++                             "no state may change before the generation check")
++
++    def test_the_guard_precedes_the_snapshot_write(self):
++        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
++        body = m.group(0)
++        self.assertLess(body.index("if (gen !== queueRefreshGeneration)"),
++                        body.index("lastWorkItems = data.work_items"))
 +
 +
 +class CanonicalIdentityTest(unittest.TestCase):

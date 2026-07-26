@@ -2401,9 +2401,13 @@ async function refreshWorkItems() {
     queueRefreshInFlight = false;
     if (queueRefreshFollowUp) {
       queueRefreshFollowUp = false;
-      // Start the single coalesced follow-up. Deliberately not awaited: the
-      // caller's outcome describes the refresh it actually performed.
-      refreshWorkItems();
+      // Start the single coalesced follow-up. Deliberately NOT awaited: the
+      // caller's outcome describes the refresh it actually performed, not a
+      // later one. runWorkItemsRefresh converts every failure into
+      // REFRESH_FAILED and does not throw, but this is fire-and-forget, so the
+      // rejection handler is attached explicitly rather than relying on that
+      // contract holding forever. An unhandled rejection here would be silent.
+      refreshWorkItems().catch(() => { /* never surfaces as an unhandled rejection */ });
     }
   }
   return outcome;

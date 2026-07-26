@@ -933,9 +933,10 @@ class BoundedRefreshControlTest(unittest.TestCase):
         body = m.group(0)
         # The flag is cleared before the follow-up starts, so repeats collapse.
         i = body.index("if (queueRefreshFollowUp)")
-        tail = body[i:i+300]
+        tail = body[i:i + 700]
         self.assertIn("queueRefreshFollowUp = false;", tail)
-        self.assertIn("refreshWorkItems();", tail)
+        # The follow-up is fire-and-forget WITH an explicit rejection handler.
+        self.assertIn("refreshWorkItems().catch(", tail)
 
     def test_the_slot_is_released_even_on_failure(self):
         m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,3000}?" + BS + r"n}", APP)
@@ -954,6 +955,24 @@ class BoundedRefreshControlTest(unittest.TestCase):
         success, failure = body.split("catch (e)")
         self.assertIn("gen !== queueRefreshGeneration", success)
         self.assertIn("gen !== queueRefreshGeneration", failure)
+
+    def test_the_bounded_entry_point_is_the_only_production_path(self):
+        """Codex asked whether any production call site bypasses the
+        controller. Exactly one declaration and one awaited call, both inside
+        refreshWorkItems."""
+        self.assertEqual(APP.count("async function runWorkItemsRefresh()"), 1)
+        self.assertEqual(APP.count("await runWorkItemsRefresh()"), 1)
+        i = APP.index("async function refreshWorkItems()")
+        j = APP.index("async function runWorkItemsRefresh()")
+        self.assertLess(i, j, "the controller precedes the inner request")
+        self.assertIn("await runWorkItemsRefresh()", APP[i:j],
+                      "the only call must live inside the controller")
+
+    def test_the_fire_and_forget_followup_cannot_go_unhandled(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,3000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("refreshWorkItems().catch(", body,
+                      "an unawaited follow-up needs an explicit rejection handler")
 
     def test_a_coalesced_poll_is_not_a_success(self):
         m = re.search(r"function refreshSucceeded[" + BS + r"s" + BS + r"S]{0,1000}?" + BS + r"n}", APP)

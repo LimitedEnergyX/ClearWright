@@ -1294,5 +1294,71 @@ for (const bad of [{}, { work_items: null }, { work_items: "nope" }, { work_item
      "no durable write is produced by refreshing");
 }
 
+// 11g. MULTI-CALLER LIFECYCLE: wire()/boot refresh, polling, and an explicit
+//      operator refresh all share ONE bounded slot. This is exactly the
+//      interaction the controller exists to make safe.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  env.queue.mode = "defer";
+
+  ctx.wire();                                   // boot refresh takes the slot
+  ok(ev(ctx, "queueRefreshInFlight") === true, "the boot refresh owns the slot");
+  eq(env.queue.pending.length, 1, "boot started exactly one request");
+
+  // Polling ticks and an explicit operator refresh arrive during boot.
+  eq(await ctx.refreshWorkItems(), "coalesced", "a polling tick coalesces behind boot");
+  eq(await ctx.refreshWorkItems(), "coalesced", "a second tick adds no request");
+  eq(await ctx.refreshWorkItems(), "coalesced", "an explicit operator refresh coalesces too");
+  eq(env.queue.pending.length, 1, "still exactly ONE request in flight");
+
+  // Boot settles and applies; exactly one follow-up runs for all three callers.
+  env.queue.pending.shift().resolveWith(ITEMS);
+  for (let i = 0; i < 8; i++) await settle();
+  ok(ev(ctx, "queueConfirmed") === true, "boot confirmed despite concurrent callers");
+  eq(env.queue.pending.length, 1, "ONE coalesced follow-up for all three callers");
+  env.queue.pending.shift().resolveWith(ITEMS);
+  for (let i = 0; i < 8; i++) await settle();
+  ok(ev(ctx, "queueRefreshInFlight") === false, "the slot is free once everything settles");
+  eq(env.queue.pending.length, 0, "no residual backlog");
+}
+
+// 11h. The fire-and-forget follow-up can never surface an unhandled rejection,
+//      even if the inner request throws outside its expected failure contract.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  let unhandled = 0;
+  const onUnhandled = () => { unhandled += 1; };
+  process.on("unhandledRejection", onUnhandled);
+
+  env.queue.items = ITEMS;
+  env.queue.mode = "defer";
+  const active = ctx.refreshWorkItems();
+  await ctx.refreshWorkItems();                 // request the follow-up
+  // Make the FOLLOW-UP throw from the transport itself, not a handled failure.
+  env.queue.pending.shift().resolveWith(ITEMS);
+  env.ctx.fetch = () => { throw new Error("probe: transport threw"); };
+  await active;
+  for (let i = 0; i < 10; i++) await settle();
+
+  eq(unhandled, 0, "a throwing follow-up produces NO unhandled rejection");
+  ok(ev(ctx, "queueRefreshInFlight") === false, "and the slot is still released");
+  process.removeListener("unhandledRejection", onUnhandled);
+}
+
+// 11i. The bounded entry point is the ONLY production path; the inner request
+//      is not called directly outside the controller.
+{
+  const src = fs.readFileSync(APP, "utf8");
+  const calls = src.split("runWorkItemsRefresh").length - 1;
+  const decl = (src.match(/async function runWorkItemsRefresh\(\)/g) || []).length;
+  const inController = (src.match(/await runWorkItemsRefresh\(\)/g) || []).length;
+  eq(decl, 1, "the inner request is declared once");
+  eq(inController, 1, "it is awaited exactly once, inside the controller");
+  ok(calls <= 3, "no production call site bypasses the bounded entry point");
+}
+
 console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");
 process.exit(failures === 0 ? 0 : 1);

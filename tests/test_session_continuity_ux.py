@@ -633,9 +633,11 @@ class SelectorEscapingTest(unittest.TestCase):
     def test_the_escaper_targets_string_literal_semantics(self):
         m = re.search(r"function cssAttrValue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
         body = m.group(0)
-        # Inside a CSS string only the backslash and the quote need escaping.
-        self.assertIn("replace(", body)
-        self.assertIn(chr(92) + chr(92) + '"', body)
+        # Backslash and quote are escaped, and control characters are
+        # hex-escaped, because a CSS string token may not contain them raw.
+        self.assertIn("codePointAt(0)", body)
+        self.assertIn("toString(16)", body)
+        self.assertIn("0x7f", body)
 
 
 class QueueFreshnessTest(unittest.TestCase):
@@ -831,6 +833,71 @@ class RefreshSequencingTest(unittest.TestCase):
         body = m.group(0)
         self.assertLess(body.index("if (gen !== queueRefreshGeneration)"),
                         body.index("lastWorkItems = data.work_items"))
+
+
+class CssStringEscapingTest(unittest.TestCase):
+    """Council finding: escaping only backslash and quote was incomplete.
+
+    A CSS string token may not contain a raw newline, NUL or other control
+    character, so a route-supplied message id or an unexpected presentation
+    state could still have produced an invalid selector.
+    """
+
+    def test_control_characters_are_escaped(self):
+        m = re.search(r"function cssAttrValue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("0x20", body)
+        self.assertIn("0x7f", body)
+        self.assertIn("toString(16)", body,
+                      "the general escape is a hexadecimal sequence")
+
+    def test_the_comment_no_longer_overclaims(self):
+        i = APP.index("function cssAttrValue")
+        head = APP[max(0, i - 900):i]
+        self.assertNotIn("only the backslash and the quote", head)
+        self.assertIn("control characters", head)
+
+
+class RefreshPayloadValidationTest(unittest.TestCase):
+    """Council finding: `data.work_items || []` made a malformed 200 look like
+    an authoritative empty queue, and confirmed-empty is load-bearing because
+    it makes stale destinations unsendable."""
+
+    def test_the_payload_shape_is_validated(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("Array.isArray(data.work_items)", body)
+        self.assertNotIn("data.work_items || []", body)
+
+    def test_a_malformed_payload_is_a_failure(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        branch = body.split("Array.isArray(data.work_items)")[1][:600]
+        self.assertIn("queueConfirmed = false;", branch)
+        self.assertIn("return REFRESH_FAILED;", branch)
+        self.assertIn("unreadable", branch)
+
+    def test_the_previous_snapshot_survives_a_malformed_payload(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        after = body.split("Array.isArray(data.work_items)")[1]
+        branch = after[:after.index("    }")]      # the guard block only
+        self.assertNotIn("lastWorkItems =", branch,
+                         "a malformed response must not overwrite the snapshot")
+        self.assertIn("return REFRESH_FAILED;", branch)
+
+
+class RecordPolicyDocumentationTest(unittest.TestCase):
+    """Both reviewers asked for the record policy to be stated explicitly."""
+
+    def test_the_two_cases_are_documented_where_enforced(self):
+        m = re.search(RE_CARD, APP)
+        body = m.group(0)
+        self.assertIn("POLICY", body)
+        low = body.lower()
+        self.assertIn("no usable key", low)
+        self.assertIn("excluded from reconciliation", low)
+        self.assertIn("read-only", low)
 
 
 class CanonicalIdentityTest(unittest.TestCase):

@@ -1093,5 +1093,65 @@ const statusOf = (env) => {
      "the refusal names the live queue, not a refresh failure");
 }
 
+// ---------------------------------------------------------------------------
+// 10. CSS STRING ESCAPING is complete, and a MALFORMED payload is not an
+//     authoritative empty queue.
+// ---------------------------------------------------------------------------
+{
+  const env = buildEnv({});
+  const ctx = loadApp(env);
+
+  // Control characters are not permitted raw in a CSS string token.
+  const controls = ["a\nb", "a\rb", "a\tb", "a\u0000b", "a\u001fb", "a\u007fb"];
+  controls.forEach((v) => {
+    const out = ev(ctx, "cssAttrValue(" + JSON.stringify(v) + ")");
+    ok(out.indexOf("\n") === -1 && out.indexOf("\r") === -1,
+       "no raw newline survives escaping of " + JSON.stringify(v));
+    ok(/\\[0-9a-f]+ /.test(out),
+       "a control character is hex-escaped in " + JSON.stringify(v));
+  });
+
+  // And the ordinary cases still round-trip to the intended node.
+  const host = env.doc.createElement("div");
+  env.doc.body.appendChild(host);
+  ['a"b', "a\\b", "a b", "a]b"].forEach((v) => {
+    const el = env.doc.createElement("span");
+    el.setAttribute("data-probe", v);
+    host.appendChild(el);
+    const escd = ev(ctx, "cssAttrValue(" + JSON.stringify(v) + ")");
+    let found = null;
+    try { found = host.querySelector('[data-probe="' + escd + '"]'); } catch (e) { found = null; }
+    same(found, el, "escaping still selects the intended node for " + JSON.stringify(v));
+  });
+}
+
+// 10b. A 200 with a MALFORMED body must be a FAILURE, not a confirmed empty.
+for (const bad of [{}, { work_items: null }, { work_items: "nope" }, { work_items: 7 }]) {
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  await ctx.refreshWorkItems();
+  ok(ev(ctx, "queueConfirmed") === true, "confirmed to begin with");
+  const snapshotBefore = ev(ctx, "lastWorkItems.length");
+
+  // Return 200 with a body that is not a work-items payload.
+  env.ctx.fetch = (url, init) => {
+    const u = String(url);
+    const method = (init && init.method) || "GET";
+    if (u.indexOf("/api/work-items") === 0) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(bad) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
+  };
+  const outcome = await ctx.refreshWorkItems();
+  eq(outcome, "failed",
+     "a malformed body is FAILED, not confirmed_empty: " + JSON.stringify(bad));
+  ok(ev(ctx, "queueConfirmed") === false, "confirmation is withdrawn");
+  eq(ev(ctx, "lastWorkItems.length"), snapshotBefore,
+     "the previous snapshot is preserved, not replaced by an invented empty one");
+  ok(statusOf(env).shown, "the operator is told the response was unreadable");
+  ok(statusOf(env).text.indexOf("unreadable") !== -1, "and why");
+}
+
 console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");
 process.exit(failures === 0 ? 0 : 1);

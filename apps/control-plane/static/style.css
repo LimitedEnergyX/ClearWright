@@ -1196,7 +1196,9 @@ body.history-open .mission { display: none !important; }
   outline-offset: 2px;
   border-radius: 6px;
 }
-.q-open[aria-pressed="true"] .q-title { font-weight: 700; }
+/* The control uses aria-current, not a toggle state: activating it navigates
+   rather than switching something off again. */
+.q-open[aria-current="true"] .q-title { font-weight: 700; }
 
 /* .q-meta is a span (phrasing content, so it may sit inside the button) but
    still lays out as a row. */

@@ -1217,12 +1217,19 @@ function queueCard(it) {
     ? '<span class="q-opflag" title="operator action required">◉ operator</span>' : "";
   // Technical ids ride on data attributes only; the primary card stays readable.
   const title = esc((it.title || it.summary || it.work_item_id || "").slice(0, 140));
-  // Phase 1, item 7: a queue row is a real control -- role, tabindex and
-  // aria-pressed -- so it is reachable and activatable from the keyboard
-  // instead of being a plain div that only responds to a mouse click.
+  // The row is NOT the control. Keyboard reachability comes from the explicit
+  // .q-open button rendered below, which carries aria-current; this comment
+  // previously still described the superseded role/tabindex/aria-pressed row.
   const execLabel = executorStateLabel(it);
   const phaseLabel = lifecyclePhaseLabel(it);
   const wid = it.work_item_id || "";
+  // POLICY, stated because the reviewers asked. Two distinct cases:
+  //   * a record with NO usable key is EXCLUDED from reconciliation entirely
+  //     (renderQueue filters it), because several such rows would collapse onto
+  //     one empty key and reconciliation could move or focus the wrong tile;
+  //   * a record WITH a usable key but a non-canonical shape is DISPLAYED
+  //     read-only, because it is durable governed work the operator must see.
+  // Neither can ever become a sendable destination.
   // A non-canonical entry -- today only the packet projection
   // "in_progress:<packet-id>" -- is REAL work the operator must still see, so
   // it is not hidden. It is rendered READ-ONLY: no .q-open control, so it is
@@ -1792,11 +1799,25 @@ function truthfulExecutionState(it) {
 // CSS.escape is deliberately NOT used here: it escapes identifiers, and
 // its output does not round-trip inside a quoted string, so a value
 // containing a quote, a backslash or a space would fail to match the very
-// node it names. Within a CSS string only the backslash and the quote
-// character itself need escaping.
+// node it names. Within a CSS string the backslash and the quote must be
+// escaped, and so must newlines, NUL and other control characters, which
+// are not permitted raw in a string token.
 function cssAttrValue(value) {
   const v = String(value === null || value === undefined ? "" : value);
-  return v.replace(/[\\"]/g, (c) => "\\" + c);
+  let out = "";
+  for (const ch of v) {
+    const code = ch.codePointAt(0);
+    if (ch === '\\' || ch === '"') { out += '\\' + ch; continue; }
+    // A CSS string token may not contain a raw newline, NUL or other control
+    // character. The general escape is a hexadecimal sequence terminated by a
+    // space, which is well defined for every code point in that range.
+    if (code < 0x20 || code === 0x7f) {
+      out += '\\' + code.toString(16) + ' ';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }
 
 // --------------------------------------------------------------------------
@@ -2359,7 +2380,20 @@ async function refreshWorkItems() {
     // state: not the snapshot, not loaded/confirmed, not the status. An older
     // success arriving after a newer failure must not restore sendability.
     if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
-    lastWorkItems = data.work_items || [];
+    // A 200 with a malformed body is NOT authoritative. Treating a missing or
+    // non-array work_items as an empty queue would confirm a snapshot the
+    // server never actually described, and confirmed-empty is a load-bearing
+    // outcome: it makes stale destinations unsendable. So it is reported as a
+    // FAILURE, which preserves the previous snapshot and pauses sending.
+    if (!data || !Array.isArray(data.work_items)) {
+      queueConfirmed = false;
+      queueFailureReported = true;
+      showRestoreStatus("The work queue returned an unreadable response, so " +
+                        "destinations cannot be confirmed. Sending is paused " +
+                        "until it reloads.", true);
+      return REFRESH_FAILED;
+    }
+    lastWorkItems = data.work_items;
     workItemsLoaded = true;   // a SUCCESSFUL response, even when it is empty
     queueConfirmed = true;    // and it is CURRENT as of this response
     // Only a confirmed success clears a reported failure, because only this

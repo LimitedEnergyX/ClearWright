@@ -1144,6 +1144,16 @@ function actionsForState(pstate, canonical) {
   }
 }
 
+// Everything queueCard renders from, so an unchanged item produces an unchanged
+// signature and its node is never replaced.
+function queueCardSignature(it) {
+  return [it.work_item_id, it.thread_id, it.presentation_state, it.status,
+          it.runner_state, it.claimed_by, it.title || it.summary,
+          it.last_activity_at, it.last_activity_event,
+          it.work_item_id === selectedWorkItemId ? "sel" : "",
+          sharesThreadWithOtherWorkItems(it, lastWorkItems) ? "amb" : ""].join("\u0001");
+}
+
 function queueCard(it) {
   const ps = it.presentation_state || "waiting_on_claude";
   const selected = it.work_item_id && it.work_item_id === selectedWorkItemId;
@@ -1202,6 +1212,7 @@ function queueCard(it) {
   // semantics rather than a hand-rolled key handler.
   return '<div class="q-row q-card' + (selected ? " is-selected" : "") +
     (ambiguous ? " q-ambiguous" : "") + '"' +
+    ' data-sig="' + esc(queueCardSignature(it)) + '"' +
     ' data-thread="' + esc(it.thread_id || "") +
     '" data-work-item="' + esc(it.work_item_id || "") + '">' +
     '<button type="button" class="q-open" ' +
@@ -1270,6 +1281,83 @@ function attentionCounts(items) {
   return c;
 }
 
+// The rendered signature of the queue as last written to the DOM. Polling
+// re-runs renderQueue roughly every two seconds; when nothing material changed,
+// rewriting innerHTML destroyed every node -- including the focused control --
+// which made keyboard operation of the queue impossible. The signature lets an
+// unchanged poll become a no-op.
+let lastQueueSignature = null;
+
+// The canonical work-item key of the currently focused queue control, if any.
+function focusedQueueKey() {
+  const a = document.activeElement;
+  const btn = a && a.closest ? a.closest(".q-open") : null;
+  return btn ? btn.getAttribute("data-work-item") : null;
+}
+
+// Put focus back on the SAME durable identity after a reconciliation that had
+// to replace nodes. If that identity is legitimately gone, move predictably to
+// the first remaining tile, then to the container, rather than dropping focus
+// to the document body.
+function restoreQueueFocus(key, el) {
+  if (!key) return;
+  let btn = null;
+  try {
+    btn = el.querySelector('.q-open[data-work-item="' +
+      (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
+  } catch (e) { btn = null; }
+  if (btn) { btn.focus(); return; }
+  const first = el.querySelector(".q-open");
+  if (first) { first.focus(); return; }
+  if (el.setAttribute) el.setAttribute("tabindex", "-1");
+  if (el.focus) el.focus();
+}
+
+// Keyed reconciliation. Tiles are matched by canonical work-item id, and a tile
+// whose rendered markup is unchanged is LEFT ENTIRELY ALONE, so it keeps its
+// DOM identity, its focus and its scroll position. Only genuinely changed,
+// added or removed tiles touch the DOM.
+function reconcileQueue(el, desired) {
+  const existing = {};
+  Array.from(el.querySelectorAll(".q-row[data-work-item]")).forEach((node) => {
+    existing[node.getAttribute("data-work-item")] = node;
+  });
+  const keep = {};
+  desired.forEach((d) => { keep[d.key] = true; });
+
+  // Anything no longer in the queue goes, and only then.
+  Object.keys(existing).forEach((k) => {
+    if (!keep[k] && existing[k].parentNode) existing[k].parentNode.removeChild(existing[k]);
+  });
+
+  let groupEl = null, curGroup = null;
+  desired.forEach((d) => {
+    if (d.group !== curGroup) {
+      curGroup = d.group;
+      groupEl = el.querySelector('.q-group[data-group="' + d.group + '"]');
+      if (!groupEl) {
+        groupEl = document.createElement("div");
+        groupEl.className = "q-group";
+        groupEl.setAttribute("data-group", d.group);
+        groupEl.innerHTML = '<div class="q-group-head">' + esc(d.groupLabel) + "</div>";
+        el.appendChild(groupEl);
+      }
+    }
+    const prev = existing[d.key];
+    if (prev && prev.getAttribute("data-sig") === d.sig) {
+      // UNCHANGED: reuse the node as-is. This is the case that preserves focus.
+      if (prev.parentNode !== groupEl) groupEl.appendChild(prev);
+      return;
+    }
+    const next = document.createElement("div");
+    next.innerHTML = d.html;
+    const node = next.firstElementChild || next.children[0];
+    if (!node) return;
+    if (prev && prev.parentNode) prev.parentNode.replaceChild(node, prev);
+    else groupEl.appendChild(node);
+  });
+}
+
 function renderQueue() {
   const el = document.getElementById("queue-groups");
   if (!el) return;
@@ -1277,21 +1365,31 @@ function renderQueue() {
   const rows = filterSortQueue(lastWorkItems, queueFilterMode, queueSearch);
   syncFilterChips();
   if (!rows.length) {
+    const emptySig = "EMPTY";
+    if (lastQueueSignature === emptySig) return;
+    lastQueueSignature = emptySig;
     el.innerHTML = '<p class="muted queue-empty">Nothing here in this view. Try the History / All filter.</p>';
     return;
   }
-  let html = "", curState = null;
-  rows.forEach((it) => {
-    if (it.presentation_state !== curState) {
-      if (curState !== null) html += "</div>";
-      curState = it.presentation_state;
-      html += '<div class="q-group"><div class="q-group-head">' +
-        esc(PSTATE_LABEL[curState] || curState) + "</div>";
-    }
-    html += queueCard(it);
+  const desired = rows.map((it) => {
+    const html = queueCard(it);
+    return {
+      key: it.work_item_id || "",
+      group: it.presentation_state || "",
+      groupLabel: PSTATE_LABEL[it.presentation_state] || it.presentation_state || "",
+      sig: queueCardSignature(it),
+      html: html
+    };
   });
-  if (curState !== null) html += "</div>";
-  el.innerHTML = html;
+  // NO-CHANGE SHORT CIRCUIT. The dominant polling case is "nothing changed",
+  // and it must not touch the DOM at all.
+  const signature = desired.map((d) => d.group + "|" + d.key + "|" + d.sig).join("\n");
+  if (signature === lastQueueSignature) return;
+  lastQueueSignature = signature;
+
+  const focusKey = focusedQueueKey();
+  reconcileQueue(el, desired);
+  if (focusKey) restoreQueueFocus(focusKey, el);
 }
 
 function syncFilterChips() {
@@ -1484,15 +1582,14 @@ function applyComposerFocus() {
 
 // Keyboard activation for queue rows (Phase 1, item 7). Enter or Space opens
 // the row exactly as a click does; the existing click handler is untouched.
-// The primary control is a real <button>, so Enter and Space already activate
-// it and fire click. This listener remains only to keep Space from scrolling
-// the page while that button has focus; it never navigates on its own, which
-// avoids a second, divergent activation path.
-document.addEventListener("keydown", (e) => {
-  if (e.key !== " ") return;
-  const btn = e.target && e.target.closest && e.target.closest(".q-open");
-  if (btn) e.preventDefault();
-});
+// NO keyboard handler for queue tiles, deliberately. The primary control is a
+// real <button>, so the browser already activates it on Enter and on Space and
+// fires exactly one click, which the delegated queue listener turns into one
+// canonical navigation. An earlier version called preventDefault() on Space to
+// stop page scrolling; on a focused button Space's default action IS the
+// activation, so that suppressed the very keyboard path this control exists to
+// provide. Space does not scroll the page while a button holds focus, so there
+// is nothing to suppress and nothing to add.
 
 // --------------------------------------------------------------------------
 // TRUTHFUL EXECUTION STATE (Phase 1, item 6)

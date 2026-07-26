@@ -35,7 +35,7 @@ CSS = _read("style.css")
 
 
 
-RE_CARD = r"function queueCard[\s\S]{0,8000}?\n}"
+RE_CARD = r"function queueCard\([\s\S]{0,8000}?\n}"
 RE_PARSE = r"function parseWorkRoute[\s\S]{0,4000}?\n\}"
 
 
@@ -377,13 +377,16 @@ class UnifiedActivationTest(unittest.TestCase):
         self.assertIn('location.hash = "#work="', m.group(0))
 
     def test_keyboard_uses_native_button_semantics(self):
-        """A real <button> already activates on Enter and Space, so the
-        hand-rolled key handler is reduced to preventing Space-scroll and can
-        no longer become a second, divergent activation path."""
-        i = APP.index('document.addEventListener("keydown"')
-        handler = APP[i:i + 500]
-        self.assertNotIn("navigateToWorkItem", handler)
-        self.assertIn("q-open", handler)
+        """A real <button> activates on Enter and Space and fires exactly one
+        click, so there is NO queue key handler at all. An earlier version
+        called preventDefault() on Space, which suppressed the very activation
+        the control exists to provide."""
+        for m in re.finditer(r'addEventListener\("keydown"', APP):
+            window = APP[m.start():m.start() + 500]
+            self.assertNotIn("q-open", window,
+                             "no keydown handler may intercept the queue button")
+            self.assertNotIn("navigateToWorkItem", window,
+                             "no key handler may create a second activation path")
 
 
 class StrictRouteProofTest(unittest.TestCase):
@@ -408,6 +411,125 @@ class StrictRouteProofTest(unittest.TestCase):
     def test_the_check_no_longer_requires_a_non_malformed_route_to_apply(self):
         m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
         self.assertNotIn("!route.malformed && route.work_item_id", m.group(0))
+
+
+class QueueReconciliationTest(unittest.TestCase):
+    """Correction 1: polling must not destroy DOM identity or focus.
+
+    renderQueue rewrote innerHTML on every poll, roughly every two seconds,
+    which removed the focused control before a human could press a key. That
+    made keyboard operation of the queue impossible.
+    """
+
+    def test_a_no_change_poll_does_not_touch_the_dom(self):
+        self.assertIn("let lastQueueSignature = null;", APP)
+        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("if (signature === lastQueueSignature) return;", body)
+        # The populated path must reach its short circuit without touching the
+        # DOM. The empty-queue branch above it writes one message and is itself
+        # guarded by its own signature check, so it is excluded here.
+        empty_end = body.index("const desired = rows.map")
+        populated = body[empty_end:]
+        i = populated.index("if (signature === lastQueueSignature) return;")
+        self.assertNotIn("innerHTML", populated[:i],
+                         "the DOM must not be written before the no-change check")
+        # And the empty branch short-circuits too, rather than rewriting on
+        # every poll.
+        self.assertIn("if (lastQueueSignature === emptySig) return;", body)
+
+    def test_reconciliation_is_keyed_by_canonical_work_item_id(self):
+        self.assertIn("function reconcileQueue", APP)
+        m = re.search(r"function reconcileQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("data-work-item", body)
+        self.assertIn("data-sig", body)
+
+    def test_an_unchanged_tile_is_reused_not_replaced(self):
+        m = re.search(r"function reconcileQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn('prev.getAttribute("data-sig") === d.sig', body)
+        after = body.split('prev.getAttribute("data-sig") === d.sig')[1][:400]
+        self.assertIn("return;", after,
+                      "an unchanged tile must be left entirely alone")
+
+    def test_wholesale_replacement_is_gone_from_the_render_path(self):
+        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        # The only innerHTML write left is the genuinely empty-queue message.
+        self.assertEqual(body.count("el.innerHTML ="), 1)
+        self.assertIn("queue-empty", body)
+
+    def test_focus_is_captured_and_restored_around_reconciliation(self):
+        self.assertIn("function focusedQueueKey", APP)
+        self.assertIn("function restoreQueueFocus", APP)
+        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        i = body.index("const focusKey = focusedQueueKey();")
+        j = body.index("reconcileQueue(el, desired);")
+        k = body.index("restoreQueueFocus(focusKey, el);")
+        self.assertLess(i, j, "focus must be captured before reconciliation")
+        self.assertLess(j, k, "focus must be restored after reconciliation")
+
+    def test_lost_focus_moves_predictably_not_to_the_body(self):
+        m = re.search(r"function restoreQueueFocus[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn('el.querySelector(".q-open")', body)
+        self.assertIn("el.focus()", body)
+
+    def test_no_stale_item_is_retained_to_preserve_focus(self):
+        m = re.search(r"function reconcileQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("removeChild", body)
+        self.assertIn("if (!keep[k]", body)
+
+    def test_the_signature_covers_every_rendered_field(self):
+        m = re.search(r"function queueCardSignature[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        for field in ("work_item_id", "thread_id", "presentation_state", "status",
+                      "runner_state", "claimed_by", "last_activity_at"):
+            self.assertIn(field, body,
+                          field + " is rendered, so it must affect the signature")
+
+
+class WiredPathCoverageTest(unittest.TestCase):
+    """Correction 3: coverage must run the real wired paths."""
+
+    def test_a_wired_path_harness_exists(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        for name in ("wired_paths.mjs", "mini_dom.mjs"):
+            self.assertTrue(os.path.isfile(os.path.join(here, "dom", name)), name)
+
+    def test_it_installs_the_real_wire(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        src = open(os.path.join(here, "dom", "wired_paths.mjs"), encoding="utf-8").read()
+        self.assertIn("ctx.wire()", src)
+        self.assertIn("dispatchEvent", src)
+
+    def test_it_dispatches_real_clicks_and_keys(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        src = open(os.path.join(here, "dom", "wired_paths.mjs"), encoding="utf-8").read()
+        self.assertIn('pressKey(env.doc, key)', src)
+        self.assertIn('new MiniEvent("click"', src)
+
+    def test_it_proves_focus_survives_polling(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        src = open(os.path.join(here, "dom", "wired_paths.mjs"), encoding="utf-8").read()
+        self.assertIn("focus survives repeated unchanged polling", src)
+        self.assertIn("ctx.renderQueue()", src)
+
+    def test_it_drives_the_real_send_through_refusals(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        src = open(os.path.join(here, "dom", "wired_paths.mjs"), encoding="utf-8").read()
+        self.assertIn('convComposer.send()', src)
+        for branch in ("unresolved", "different work item", "no work route", "unreadable"):
+            self.assertIn(branch, src)
+
+    def test_the_mini_dom_states_its_limitation(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        src = open(os.path.join(here, "dom", "mini_dom.mjs"), encoding="utf-8").read()
+        self.assertIn("STATED LIMITATION", src)
+        self.assertIn("not a browser", src)
 
 
 class CanonicalIdentityTest(unittest.TestCase):
@@ -1172,18 +1294,27 @@ class AccessibilityTest(unittest.TestCase):
         self.assertIn("aria-pressed=", body)
         self.assertNotIn('role="button" tabindex="0"', body,
                          "the row must not claim button semantics itself")
+        self.assertIn("data-sig=", body,
+                      "the tile carries its signature so reconciliation can "
+                      "reuse an unchanged node instead of replacing it")
 
     def test_queue_rows_activate_via_a_native_button(self):
-        """Enter and Space now come from native <button> semantics rather than
-        a hand-rolled key handler, which also removes the second activation
-        path that could diverge from the mouse path."""
+        """Enter and Space come from native <button> semantics.
+
+        An earlier version called preventDefault() on Space to stop page
+        scrolling. On a focused button Space's default action IS the
+        activation, so that suppressed the very keyboard path the control
+        exists to provide. There is now NO queue key handler at all.
+        """
         m = re.search(RE_CARD, APP)
         self.assertIn('<button type="button" class="q-open"', m.group(0))
-        k = APP.index('document.addEventListener("keydown"')
-        handler = APP[k:k + 400]
-        # The listener only stops Space from scrolling; it must not navigate.
-        self.assertIn("q-open", handler)
-        self.assertNotIn("navigateToWorkItem", handler)
+        for k in re.finditer(r'addEventListener\("keydown"', APP):
+            window = APP[k.start():k.start() + 500]
+            self.assertNotIn("q-open", window,
+                             "no keydown handler may intercept the queue button")
+        # Space must not be suppressed anywhere for the queue control.
+        self.assertNotIn('e.key !== " "', APP,
+                         "the Space-suppressing handler must be gone entirely")
 
     def test_existing_send_shortcuts_are_preserved(self):
         """Ctrl+Enter sends; Shift+Enter still inserts a newline."""

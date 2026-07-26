@@ -1080,6 +1080,29 @@ let workItemsLoaded = false;
 // NOT keep authorising sends. Send authorization therefore requires a
 // currently-confirmed queue, not merely one that loaded successfully once.
 let queueConfirmed = false;
+// A refresh failure the operator can still see. It is NOT transient: no boot
+// continuation, route restoration, conversation restoration, polling cycle or
+// transient-status cleanup may erase it. Only a later CONFIRMED success clears
+// it, because only that re-establishes the truth it was reporting.
+let queueFailureReported = false;
+// Monotonically increasing refresh generation. Overlapping refreshes are
+// possible (the polling timer, the boot path and the Retry control can all be
+// in flight at once) and they can complete OUT OF ORDER, so a completion may
+// only touch shared state when it belongs to the newest started refresh.
+let queueRefreshGeneration = 0;
+
+// The four outcomes a refresh can have. They are deliberately distinct:
+// "confirmed empty" is a real, authoritative answer and must never be confused
+// with "not loaded" or "failed".
+const REFRESH_CONFIRMED = "confirmed";
+const REFRESH_CONFIRMED_EMPTY = "confirmed_empty";
+const REFRESH_FAILED = "failed";
+const REFRESH_SUPERSEDED = "superseded";
+
+// True only for an outcome that re-establishes authoritative queue truth.
+function refreshSucceeded(outcome) {
+  return outcome === REFRESH_CONFIRMED || outcome === REFRESH_CONFIRMED_EMPTY;
+}
 let lastQueueCouncils = [];
 let lastArchiveIndex = { archived: [], count: 0 };
 
@@ -2199,6 +2222,10 @@ let routeErrorReported = false;
 // explains something the operator's link did, and it stays until they navigate.
 function clearTransientRestoreStatus() {
   if (routeErrorReported) return;
+  // A reported refresh failure is NOT transient. Clearing it here is what
+  // previously made an initial-load failure invisible: the boot continuation
+  // erased the explanation the failure had just rendered.
+  if (queueFailureReported) return;
   showRestoreStatus("");
 }
 
@@ -2216,8 +2243,14 @@ function showRestoreStatus(text, retry) {
     btn.className = "btn btn-quiet";
     btn.textContent = "Retry";
     btn.addEventListener("click", () => {
-      showRestoreStatus("");
-      refreshWorkItems().then(restoreActiveSelection).catch(() => {
+      refreshWorkItems().then((outcome) => {
+        if (refreshSucceeded(outcome)) { restoreActiveSelection(); return; }
+        if (outcome === REFRESH_FAILED) {
+          showRestoreStatus("Still could not load the work queue. Sending " +
+                            "remains paused until it reloads.", true);
+        }
+        // A superseded retry is silent: a newer refresh owns the truth.
+      }).catch(() => {
         showRestoreStatus("Still could not load the work queue.", true);
       });
     });
@@ -2313,25 +2346,50 @@ function applyWorkHashRoute() {
   }
 }
 
+// Returns one of the four REFRESH_* outcomes so callers can distinguish a
+// confirmed load from a handled failure without relying on exceptions. It
+// deliberately does NOT throw: it is called from a polling timer where an
+// unhandled rejection would be noise, and it keeps the previous content on
+// screen rather than blanking the operator.
 async function refreshWorkItems() {
+  const gen = ++queueRefreshGeneration;
   try {
     const data = await getJSON("/api/work-items");
+    // A completion that is no longer the newest may not touch ANY shared
+    // state: not the snapshot, not loaded/confirmed, not the status. An older
+    // success arriving after a newer failure must not restore sendability.
+    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
     lastWorkItems = data.work_items || [];
     workItemsLoaded = true;   // a SUCCESSFUL response, even when it is empty
     queueConfirmed = true;    // and it is CURRENT as of this response
+    // Only a confirmed success clears a reported failure, because only this
+    // re-establishes the truth that failure was reporting.
+    if (queueFailureReported) {
+      queueFailureReported = false;
+      showRestoreStatus("");
+    }
     try {
       const cd = await getJSON("/api/review-councils");
-      lastQueueCouncils = cd.review_councils || [];
+      if (gen === queueRefreshGeneration) {
+        lastQueueCouncils = cd.review_councils || [];
+      }
     } catch (e2) { /* councils optional for queue hints */ }
+    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
     renderQueue();
+    return lastWorkItems.length ? REFRESH_CONFIRMED : REFRESH_CONFIRMED_EMPTY;
   } catch (e) {
+    // An older failure arriving after a newer success must not invalidate the
+    // confirmed current snapshot.
+    if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;
     // Leave the prior content on screen so the operator is not blanked out, but
     // withdraw its authority to authorise a send: an unrefreshed snapshot is
     // not evidence that the destination is still live.
     queueConfirmed = false;
+    queueFailureReported = true;
     showRestoreStatus("The work queue could not be refreshed, so destinations " +
                       "cannot be confirmed. Sending is paused until it reloads.",
                       true);
+    return REFRESH_FAILED;
   }
 }
 
@@ -4058,7 +4116,12 @@ function wire() {
   // selection or fall back to the highest-priority active item so a refresh
   // never strands the operator on an empty panel while active work exists.
   initJumpToLatest();
-  refreshWorkItems().then(() => {
+  refreshWorkItems().then((outcome) => {
+    // Only a CONFIRMED success may clear status or restore a selection. On a
+    // handled failure the explanation stays and nothing is restored, because
+    // restoring from an unconfirmed snapshot is exactly what the failure means
+    // we cannot do. A superseded completion is not ours to act on at all.
+    if (!refreshSucceeded(outcome)) return;
     clearTransientRestoreStatus();
     restoreActiveSelection();
   }).catch(() => {

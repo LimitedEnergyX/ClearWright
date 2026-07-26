@@ -723,6 +723,116 @@ class ReadOnlyProjectionTest(unittest.TestCase):
         self.assertNotIn('.q-row[role="button"]', CSS)
 
 
+class RefreshOutcomeTest(unittest.TestCase):
+    """Correction 1: refresh must distinguish four outcomes explicitly.
+
+    refreshWorkItems previously caught its own error and resolved normally, so
+    callers could not tell a handled failure from a successful load. The boot
+    continuation therefore cleared the status the failure had just rendered.
+    """
+
+    def test_the_four_outcomes_are_named_constants(self):
+        for c in ("REFRESH_CONFIRMED", "REFRESH_CONFIRMED_EMPTY",
+                  "REFRESH_FAILED", "REFRESH_SUPERSEDED"):
+            self.assertIn("const " + c + " =", APP)
+
+    def test_confirmed_empty_is_distinct_from_failed_and_unloaded(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("lastWorkItems.length ? REFRESH_CONFIRMED : REFRESH_CONFIRMED_EMPTY", body)
+        # An empty load is still loaded AND confirmed.
+        self.assertIn("workItemsLoaded = true;", body)
+        self.assertIn("queueConfirmed = true;", body)
+
+    def test_a_success_helper_gates_the_callers(self):
+        self.assertIn("function refreshSucceeded", APP)
+        m = re.search(r"function refreshSucceeded[" + BS + r"s" + BS + r"S]{0,1000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("REFRESH_CONFIRMED", body)
+        self.assertIn("REFRESH_CONFIRMED_EMPTY", body)
+        self.assertNotIn("REFRESH_FAILED", body)
+
+    def test_the_boot_path_acts_only_on_a_confirmed_success(self):
+        i = APP.index("function wire()")
+        j = APP.index("function handleOperatorAction")
+        boot = APP[i:j]
+        self.assertIn("refreshWorkItems().then((outcome) =>", boot)
+        self.assertIn("if (!refreshSucceeded(outcome)) return;", boot)
+
+    def test_the_retry_control_branches_the_same_way(self):
+        m = re.search(r"function showRestoreStatus[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("refreshSucceeded(outcome)", body)
+        self.assertIn("REFRESH_FAILED", body)
+
+    def test_refresh_does_not_signal_failure_by_throwing(self):
+        """It is called from a polling timer, where an unhandled rejection
+        would be noise, and it keeps prior content on screen."""
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertNotIn("throw", body)
+        self.assertIn("return REFRESH_FAILED;", body)
+
+
+class RefreshFailureVisibilityTest(unittest.TestCase):
+    """Correction 1: the explanation must survive every continuation."""
+
+    def test_a_reported_failure_is_tracked_separately(self):
+        self.assertIn("let queueFailureReported = false;", APP)
+
+    def test_transient_cleanup_cannot_erase_it(self):
+        m = re.search(r"function clearTransientRestoreStatus[" + BS + r"s" + BS + r"S]{0,1200}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("if (queueFailureReported) return;", body)
+
+    def test_only_a_confirmed_success_clears_it(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        success = body.split("catch (e)")[0]
+        self.assertIn("queueFailureReported = false;", success)
+        self.assertIn("queueFailureReported = true;", body.split("catch (e)")[1])
+
+    def test_the_failure_keeps_the_snapshot_visible(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        catch = m.group(0).split("catch (e)")[1]
+        self.assertNotIn("lastWorkItems = []", catch)
+        self.assertIn("queueConfirmed = false;", catch)
+        self.assertIn("showRestoreStatus(", catch)
+
+
+class RefreshSequencingTest(unittest.TestCase):
+    """Correction 2: only the newest generation may alter refresh truth."""
+
+    def test_a_monotonic_generation_exists(self):
+        self.assertIn("let queueRefreshGeneration = 0;", APP)
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        self.assertIn("const gen = ++queueRefreshGeneration;", m.group(0))
+
+    def test_both_completion_paths_are_guarded(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        success, failure = body.split("catch (e)")
+        self.assertIn("gen !== queueRefreshGeneration", success,
+                      "an older SUCCESS must not restore state")
+        self.assertIn("gen !== queueRefreshGeneration", failure,
+                      "an older FAILURE must not invalidate newer state")
+
+    def test_a_superseded_completion_touches_no_shared_state(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        i = body.index("if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;")
+        head = body[:i]
+        for mutation in ("lastWorkItems =", "queueConfirmed =", "workItemsLoaded ="):
+            self.assertNotIn(mutation, head,
+                             "no state may change before the generation check")
+
+    def test_the_guard_precedes_the_snapshot_write(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertLess(body.index("if (gen !== queueRefreshGeneration)"),
+                        body.index("lastWorkItems = data.work_items"))
+
+
 class CanonicalIdentityTest(unittest.TestCase):
     """Correction item 1.
 

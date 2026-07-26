@@ -885,5 +885,213 @@ async function attemptSend(ctx, env, text) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// 9. REFRESH OUTCOMES, SEQUENCING AND PERSISTENT FAILURE VISIBILITY.
+//    Everything below drives the REAL refreshWorkItems / wire() / send paths.
+//    A controllable transport lets a test decide, per request, whether a
+//    /api/work-items call succeeds, fails, or resolves LATE and out of order.
+// ---------------------------------------------------------------------------
+function queueEnv(opts) {
+  opts = opts || {};
+  const state = { mode: "ok", items: ITEMS, pending: [] };
+  const env = buildEnv({
+    hash: opts.hash || "",
+    responder: (url, method) => {
+      if (url.indexOf("message_id=") !== -1) return { found: true, message: { message: env.lastSent || "PROBE" } };
+      if (method === "POST") return { ok: true, message_id: "msg-new", thread_id: "thr-alpha" };
+      return { ok: true };
+    },
+  });
+  const realFetch = env.ctx.fetch;
+  env.queue = state;
+  env.ctx.fetch = function (url, init) {
+    const u = String(url);
+    const method = (init && init.method) || "GET";
+    if (u.indexOf("/api/work-items") === 0) {
+      env.posted.push({ url: u, method });   // recorded here; not delegated
+      if (state.mode === "fail") return Promise.reject(new Error("probe: queue down"));
+      if (state.mode === "defer") {
+        // Hand the test the resolver so it can complete this call LATER.
+        return new Promise((resolve, reject) => {
+          state.pending.push({
+            resolveWith: (items) => resolve({ ok: true, status: 200,
+              json: () => Promise.resolve({ work_items: items }) }),
+            rejectWith: (e) => reject(e || new Error("probe: deferred failure")),
+          });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200,
+        json: () => Promise.resolve({ work_items: state.items }) });
+    }
+    return realFetch(url, init);
+  };
+  return env;
+}
+
+const statusOf = (env) => {
+  const el = env.doc.getElementById("restore-status");
+  const text = String(el.textContent || "");
+  // A status counts as shown only when it is both un-hidden AND has content:
+  // the stub element starts without a hidden attribute, so emptiness is the
+  // reliable signal that nothing is being reported.
+  const shown = !el.hidden && text.trim().length > 0;
+  return { hidden: !shown, shown: shown, text: text };
+};
+
+// 9a. THE FOUR OUTCOMES ARE DISTINCT.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  eq(await ctx.refreshWorkItems(), "confirmed", "a populated load is CONFIRMED");
+  env.queue.items = [];
+  eq(await ctx.refreshWorkItems(), "confirmed_empty",
+     "an EMPTY load is confirmed_empty, not failed and not unloaded");
+  ok(ev(ctx, "workItemsLoaded") === true, "a confirmed empty load is still LOADED");
+  ok(ev(ctx, "queueConfirmed") === true, "a confirmed empty load is CONFIRMED");
+  eq(ev(ctx, "lastWorkItems.length"), 0, "and the snapshot is genuinely empty");
+  env.queue.mode = "fail";
+  eq(await ctx.refreshWorkItems(), "failed", "a rejected load is FAILED");
+  ok(ev(ctx, "queueConfirmed") === false, "a failure withdraws confirmation");
+  ok(ev(ctx, "workItemsLoaded") === true,
+     "a failure does not pretend the queue was never loaded");
+}
+
+// 9b. STALE COMPLETION, DIRECTION ONE: an OLDER SUCCESS after a NEWER FAILURE
+//     must not restore sending.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  await ctx.refreshWorkItems();
+  ok(ev(ctx, "queueConfirmed") === true, "confirmed to begin with");
+
+  env.queue.mode = "defer";
+  const older = ctx.refreshWorkItems();          // generation N, left in flight
+  env.queue.mode = "fail";
+  const newerOutcome = await ctx.refreshWorkItems();   // generation N+1, fails
+  eq(newerOutcome, "failed", "the newer refresh failed");
+  ok(ev(ctx, "queueConfirmed") === false, "confirmation is withdrawn");
+
+  env.queue.pending.shift().resolveWith(ITEMS);  // the OLDER one now succeeds
+  eq(await older, "superseded", "the older success reports SUPERSEDED");
+  ok(ev(ctx, "queueConfirmed") === false,
+     "an older success does NOT restore confirmation after a newer failure");
+  ok(ev(ctx, "queueFailureReported") === true, "the failure is still reported");
+}
+
+// 9c. STALE COMPLETION, DIRECTION TWO: an OLDER FAILURE after a NEWER SUCCESS
+//     must not invalidate the confirmed snapshot.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.mode = "defer";
+  const older = ctx.refreshWorkItems();          // generation N, in flight
+  env.queue.mode = "ok";
+  env.queue.items = ITEMS;
+  eq(await ctx.refreshWorkItems(), "confirmed", "the newer refresh confirmed");
+  ok(ev(ctx, "queueConfirmed") === true, "the queue is confirmed");
+
+  env.queue.pending.shift().rejectWith();        // the OLDER one now fails
+  eq(await older, "superseded", "the older failure reports SUPERSEDED");
+  ok(ev(ctx, "queueConfirmed") === true,
+     "an older failure does NOT invalidate a newer confirmed snapshot");
+  ok(ev(ctx, "queueFailureReported") === false, "no failure is reported");
+  eq(statusOf(env).hidden, true, "and no failure status is shown");
+}
+
+// 9d. INITIAL LOAD FAILURE THROUGH wire(): the explanation must SURVIVE every
+//     continuation. This is the regression the previous round introduced.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.mode = "fail";
+  ctx.wire();
+  for (let i = 0; i < 12; i++) await settle();   // let ALL continuations run
+
+  ok(ev(ctx, "queueConfirmed") === false, "boot failure leaves the queue unconfirmed");
+  ok(ev(ctx, "queueFailureReported") === true, "the failure is recorded");
+  const st = statusOf(env);
+  eq(st.hidden, false, "the explanation is STILL VISIBLE after boot settles");
+  ok(st.text.indexOf("Sending is paused") !== -1,
+     "the explanation is the plain-language sending-paused message");
+  ok(st.text.indexOf("could not be refreshed") !== -1, "it says what went wrong");
+  eq(ev(ctx, "selectedWorkItemId"), null,
+     "no selection is restored from an unconfirmed snapshot");
+
+  // Transient cleanup must not erase it either.
+  ctx.clearTransientRestoreStatus();
+  eq(statusOf(env).hidden, false,
+     "transient-status cleanup does NOT erase a refresh failure");
+
+  // Nor may a later polling cycle that also fails.
+  await ctx.refreshWorkItems();
+  eq(statusOf(env).hidden, false, "a further failed poll keeps the explanation");
+}
+
+// 9e. ZERO POSTS while unconfirmed, DRAFT PRESERVED, then RECOVERY.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  await ctx.refreshWorkItems();
+  ctx.wire();
+  ctx.renderQueue();
+  env.doc.getElementById("queue-groups")
+    .querySelector('.q-row[data-work-item="message:msg-alpha"] .q-open')
+    .dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha", "a live item is selected");
+
+  const baseline = await attemptSend(ctx, env, "BASELINE");
+  eq(baseline.posts, 1, "sending works while confirmed");
+
+  env.queue.mode = "fail";
+  eq(await ctx.refreshWorkItems(), "failed", "the refresh now fails");
+
+  const refused = await attemptSend(ctx, env, "MUST NOT SEND");
+  eq(refused.posts, 0, "ZERO POSTs while the queue is unconfirmed");
+  ok(refused.draft.length > 0, "the draft is preserved");
+  ok(refused.error.indexOf("not currently confirmed") !== -1,
+     "the refusal explains the unconfirmed queue");
+  eq(refused.settledLabel, "Send", "the button is restored");
+  eq(statusOf(env).hidden, false, "the sending-paused explanation is still visible");
+
+  // RECOVERY through a later CONFIRMED refresh.
+  env.queue.mode = "ok";
+  eq(await ctx.refreshWorkItems(), "confirmed", "a later refresh confirms");
+  ok(ev(ctx, "queueFailureReported") === false, "the failure record is cleared");
+  eq(statusOf(env).hidden, true, "and the explanation is cleared with it");
+  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
+  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
+  const recovered = await attemptSend(ctx, env, "NOW CONFIRMED");
+  eq(recovered.posts, 1, "sendability is restored only after a confirmed refresh");
+}
+
+// 9f. A CONFIRMED EMPTY result is authoritative: stale destinations are NOT
+//     sendable afterwards, and it is not treated as a failure.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  await ctx.refreshWorkItems();
+  ctx.wire();
+  ctx.renderQueue();
+  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
+  ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
+
+  env.queue.items = [];
+  eq(await ctx.refreshWorkItems(), "confirmed_empty", "the queue is confirmed EMPTY");
+  ok(ev(ctx, "queueConfirmed") === true, "confirmed empty is still confirmed");
+  eq(statusOf(env).hidden, true, "a confirmed empty result shows no failure status");
+
+  const t = ev(ctx, "convComposerTarget()");
+  ok(t.unresolved === true, "the stale destination is unresolved after an empty result");
+  const r = await attemptSend(ctx, env, "MUST NOT SEND");
+  eq(r.posts, 0, "a stale destination is NOT sendable after a confirmed empty result");
+  ok(r.draft.length > 0, "the draft is preserved");
+  ok(r.error.indexOf("no longer in the live queue") !== -1,
+     "the refusal names the live queue, not a refresh failure");
+}
+
 console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");
 process.exit(failures === 0 ? 0 : 1);

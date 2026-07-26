@@ -1,7 +1,7 @@
 VERIFICATION PACKET: Active Session Continuity and Message Identity UX, Phase 1
 
 BASE (merge-base with 34b05d0): 34b05d02f8dacd0d21621db5130382e1ffc1fb97
-HEAD (bytes under review):   b3feaa2a058d2e2bc33c159c8321ee26ebab40e1
+HEAD (bytes under review):   c1c72e042c532e2941aee3bfc3665f7d94669b00
 
 WHAT THIS CHANGE IS
 ----------------------------------------------------------------------
@@ -140,10 +140,10 @@ artifacts across 1380 ledger rows.
 
 TESTS (counts measured by running them, not typed)
 ----------------------------------------------------------------------
-  focused static   209 tests  (OK)
+  focused static   211 tests  (OK)
   runtime          109 checks (PASS)  tests/dom/session_ux_runtime.mjs
-  wired path       264 checks (PASS)  tests/dom/wired_paths.mjs
-  full suite       1416 tests  (OK, skipped=1)
+  wired path       279 checks (PASS)  tests/dom/wired_paths.mjs
+  full suite       1418 tests  (OK, skipped=1)
 
 The runtime and wired harnesses execute the real app.js in a Node vm.
 They add NO dependency: every import is a Node builtin or a local
@@ -158,16 +158,16 @@ rather than browser automation.
 
 FILE MANIFEST (sha256 of committed bytes)
 ----------------------------------------------------------------------
-  apps/control-plane/static/app.js                       189782  d7cfe97698916a272c0f153f679752368209eee4dbf22782bd6074c98b49f475
-  tests/dom/wired_paths.mjs                               59010  667bb00435a29883e72ec6dfa266839222c7d0f4f5589fa00b75f4181288cd35
-  tests/test_session_continuity_ux.py                     85457  8f843ea6a07f8ea062dbbf8ac709a22dbbe9886dd0aa5484d29dd72a5516289f
+  apps/control-plane/static/app.js                       190158  5d358f1517c24a7fde0c6407014061f192c17c080b9afd3c4e8c199f3e180116
+  tests/dom/wired_paths.mjs                               62183  0918fc5c122c869c78b4627790bcfa715078a1e91f60e67dcc7ca48321a7aa9b
+  tests/test_session_continuity_ux.py                     86620  c654316d6296edb9c4cccdabe52ab1a289fffecd9f36d4ceadf92d1da93b9093
 
 DIFFSTAT
 ----------------------------------------------------------------------
- apps/control-plane/static/app.js    |  41 ++++++++++
- tests/dom/wired_paths.mjs           | 149 +++++++++++++++++++++++++++++++++++-
- tests/test_session_continuity_ux.py |  92 ++++++++++++++++++----
- 3 files changed, 263 insertions(+), 19 deletions(-)
+ apps/control-plane/static/app.js    |  45 ++++++++
+ tests/dom/wired_paths.mjs           | 215 +++++++++++++++++++++++++++++++++++-
+ tests/test_session_continuity_ux.py | 111 ++++++++++++++++---
+ 3 files changed, 352 insertions(+), 19 deletions(-)
 
 SUPPORTING CONTRACT EVIDENCE (unchanged files, quoted read-only)
 ----------------------------------------------------------------------
@@ -301,19 +301,21 @@ full.
   added/changed test classes (1):
     BoundedRefreshControlTest
 
-  added/changed tests (7):
+  added/changed tests (9):
     test_in_flight_and_followup_state_exist
     test_a_coalesced_outcome_is_named
     test_a_poll_during_an_active_refresh_starts_no_request
     test_at_most_one_followup_and_no_backlog
     test_the_slot_is_released_even_on_failure
     test_the_request_keeps_the_generation_guard
+    test_the_bounded_entry_point_is_the_only_production_path
+    test_the_fire_and_forget_followup_cannot_go_unhandled
     test_a_coalesced_poll_is_not_a_success
 
 FULL DIFF (committed bytes)
 ----------------------------------------------------------------------
 diff --git a/apps/control-plane/static/app.js b/apps/control-plane/static/app.js
-index c0e22df..f98153d 100644
+index c0e22df..cb0c810 100644
 --- a/apps/control-plane/static/app.js
 +++ b/apps/control-plane/static/app.js
 @@ -1090,6 +1090,14 @@ let queueFailureReported = false;
@@ -346,7 +348,7 @@ index c0e22df..f98153d 100644
    return outcome === REFRESH_CONFIRMED || outcome === REFRESH_CONFIRMED_EMPTY;
  }
  let lastQueueCouncils = [];
-@@ -2372,7 +2385,35 @@ function applyWorkHashRoute() {
+@@ -2372,7 +2385,39 @@ function applyWorkHashRoute() {
  // deliberately does NOT throw: it is called from a polling timer where an
  // unhandled rejection would be noise, and it keeps the previous content on
  // screen rather than blanking the operator.
@@ -366,9 +368,13 @@ index c0e22df..f98153d 100644
 +    queueRefreshInFlight = false;
 +    if (queueRefreshFollowUp) {
 +      queueRefreshFollowUp = false;
-+      // Start the single coalesced follow-up. Deliberately not awaited: the
-+      // caller's outcome describes the refresh it actually performed.
-+      refreshWorkItems();
++      // Start the single coalesced follow-up. Deliberately NOT awaited: the
++      // caller's outcome describes the refresh it actually performed, not a
++      // later one. runWorkItemsRefresh converts every failure into
++      // REFRESH_FAILED and does not throw, but this is fire-and-forget, so the
++      // rejection handler is attached explicitly rather than relying on that
++      // contract holding forever. An unhandled rejection here would be silent.
++      refreshWorkItems().catch(() => { /* never surfaces as an unhandled rejection */ });
 +    }
 +  }
 +  return outcome;
@@ -383,7 +389,7 @@ index c0e22df..f98153d 100644
    try {
      const data = await getJSON("/api/work-items");
 diff --git a/tests/dom/wired_paths.mjs b/tests/dom/wired_paths.mjs
-index ba8549f..f3da5c0 100644
+index ba8549f..193212d 100644
 --- a/tests/dom/wired_paths.mjs
 +++ b/tests/dom/wired_paths.mjs
 @@ -967,9 +967,9 @@ const statusOf = (env) => {
@@ -430,7 +436,7 @@ index ba8549f..f3da5c0 100644
    eq(await ctx.refreshWorkItems(), "confirmed_empty", "the queue is confirmed EMPTY");
    ok(ev(ctx, "queueConfirmed") === true, "confirmed empty is still confirmed");
    eq(statusOf(env).hidden, true, "a confirmed empty result shows no failure status");
-@@ -1153,5 +1160,139 @@ for (const bad of [{}, { work_items: null }, { work_items: "nope" }, { work_item
+@@ -1153,5 +1160,205 @@ for (const bad of [{}, { work_items: null }, { work_items: "nope" }, { work_item
    ok(statusOf(env).text.indexOf("unreadable") !== -1, "and why");
  }
  
@@ -566,6 +572,72 @@ index ba8549f..f3da5c0 100644
 +  if (env.queue.pending.length) env.queue.pending.shift().resolveWith(ITEMS);
 +  eq(env.posted.filter((p) => p.method === "POST").length, 0,
 +     "no durable write is produced by refreshing");
++}
++
++// 11g. MULTI-CALLER LIFECYCLE: wire()/boot refresh, polling, and an explicit
++//      operator refresh all share ONE bounded slot. This is exactly the
++//      interaction the controller exists to make safe.
++{
++  const env = queueEnv({});
++  const ctx = loadApp(env);
++  env.queue.items = ITEMS;
++  env.queue.mode = "defer";
++
++  ctx.wire();                                   // boot refresh takes the slot
++  ok(ev(ctx, "queueRefreshInFlight") === true, "the boot refresh owns the slot");
++  eq(env.queue.pending.length, 1, "boot started exactly one request");
++
++  // Polling ticks and an explicit operator refresh arrive during boot.
++  eq(await ctx.refreshWorkItems(), "coalesced", "a polling tick coalesces behind boot");
++  eq(await ctx.refreshWorkItems(), "coalesced", "a second tick adds no request");
++  eq(await ctx.refreshWorkItems(), "coalesced", "an explicit operator refresh coalesces too");
++  eq(env.queue.pending.length, 1, "still exactly ONE request in flight");
++
++  // Boot settles and applies; exactly one follow-up runs for all three callers.
++  env.queue.pending.shift().resolveWith(ITEMS);
++  for (let i = 0; i < 8; i++) await settle();
++  ok(ev(ctx, "queueConfirmed") === true, "boot confirmed despite concurrent callers");
++  eq(env.queue.pending.length, 1, "ONE coalesced follow-up for all three callers");
++  env.queue.pending.shift().resolveWith(ITEMS);
++  for (let i = 0; i < 8; i++) await settle();
++  ok(ev(ctx, "queueRefreshInFlight") === false, "the slot is free once everything settles");
++  eq(env.queue.pending.length, 0, "no residual backlog");
++}
++
++// 11h. The fire-and-forget follow-up can never surface an unhandled rejection,
++//      even if the inner request throws outside its expected failure contract.
++{
++  const env = queueEnv({});
++  const ctx = loadApp(env);
++  let unhandled = 0;
++  const onUnhandled = () => { unhandled += 1; };
++  process.on("unhandledRejection", onUnhandled);
++
++  env.queue.items = ITEMS;
++  env.queue.mode = "defer";
++  const active = ctx.refreshWorkItems();
++  await ctx.refreshWorkItems();                 // request the follow-up
++  // Make the FOLLOW-UP throw from the transport itself, not a handled failure.
++  env.queue.pending.shift().resolveWith(ITEMS);
++  env.ctx.fetch = () => { throw new Error("probe: transport threw"); };
++  await active;
++  for (let i = 0; i < 10; i++) await settle();
++
++  eq(unhandled, 0, "a throwing follow-up produces NO unhandled rejection");
++  ok(ev(ctx, "queueRefreshInFlight") === false, "and the slot is still released");
++  process.removeListener("unhandledRejection", onUnhandled);
++}
++
++// 11i. The bounded entry point is the ONLY production path; the inner request
++//      is not called directly outside the controller.
++{
++  const src = fs.readFileSync(APP, "utf8");
++  const calls = src.split("runWorkItemsRefresh").length - 1;
++  const decl = (src.match(/async function runWorkItemsRefresh\(\)/g) || []).length;
++  const inController = (src.match(/await runWorkItemsRefresh\(\)/g) || []).length;
++  eq(decl, 1, "the inner request is declared once");
++  eq(inController, 1, "it is awaited exactly once, inside the controller");
++  ok(calls <= 3, "no production call site bypasses the bounded entry point");
 +}
 +
  console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");

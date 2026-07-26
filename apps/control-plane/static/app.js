@@ -776,10 +776,19 @@ function createComposer(opts) {
     if (target.work_item_id !== selectedWorkItemId) {
       return "The composer destination and the selected work item disagree.";
     }
-    const known = (lastWorkItems || []).find(
-      (i) => i.work_item_id === selectedWorkItemId);
-    if (known && known.thread_id && target.thread_id &&
-        known.thread_id !== target.thread_id) {
+    // A LIVE canonical record is required. Guarding this on `known &&` meant
+    // the check was skipped exactly when the item had disappeared, which is the
+    // case it most needed to catch.
+    if (!isCanonicalMessageWorkItem(target.work_item_id)) {
+      return "That destination is not a message-scoped work item, so it cannot " +
+             "receive a message.";
+    }
+    const known = liveQueueRecord(target.work_item_id);
+    if (!known) {
+      return "That work item is no longer in the live queue, so the destination " +
+             "cannot be confirmed. Reselect an active work item.";
+    }
+    if (!known.thread_id || known.thread_id !== target.thread_id) {
       return "The composer thread does not match the selected work item's thread.";
     }
     // STRICT. A work-item-bound send requires a canonical route that PROVES the
@@ -1305,8 +1314,7 @@ function restoreQueueFocus(key, el) {
   if (!key) return;
   let btn = null;
   try {
-    btn = el.querySelector('.q-open[data-work-item="' +
-      (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
+    btn = el.querySelector('.q-open[data-work-item="' + cssEscape(key) + '"]');
   } catch (e) { btn = null; }
   if (btn) { btn.focus(); return; }
   const first = el.querySelector(".q-open");
@@ -1344,7 +1352,7 @@ function reconcileQueue(el, desired) {
   order.forEach((first) => {
     const g = first.group;
     seen[g] = true;
-    let groupEl = el.querySelector('.q-group[data-group="' + g + '"]');
+    let groupEl = el.querySelector('.q-group[data-group="' + cssEscape(g) + '"]');
     if (!groupEl) {
       groupEl = document.createElement("div");
       groupEl.className = "q-group";
@@ -1407,10 +1415,15 @@ function renderQueue() {
     }
     return;
   }
-  const desired = rows.map((it) => {
+  // A record with no canonical work-item id cannot be keyed, so it is skipped
+  // rather than reconciled under an empty key where several such rows would
+  // collapse together and reconciliation could drop, move or focus the wrong
+  // tile. The derivation guarantees a canonical id, so this is fail-closed
+  // handling of data that should not exist, not an expected path.
+  const desired = rows.filter((it) => it && it.work_item_id).map((it) => {
     const html = queueCard(it);
     return {
-      key: it.work_item_id || "",
+      key: it.work_item_id,
       group: it.presentation_state || "",
       groupLabel: PSTATE_LABEL[it.presentation_state] || it.presentation_state || "",
       sig: queueCardSignature(it),
@@ -1715,6 +1728,49 @@ function truthfulExecutionState(it) {
 // as a work item. Collapsing them would HIDE durable governed work, so the tiles
 // are disambiguated and the shared-thread condition is surfaced as an integrity
 // warning instead.
+
+// ONE escaping mechanism for every dynamic selector value. CSS.escape is not
+// universally available, and an identifier carrying a quote, backslash, bracket
+// or space would otherwise break the selector or silently change its meaning --
+// which in a focus or reconciliation contract degrades exactly when it matters.
+function cssEscape(value) {
+  const v = String(value === null || value === undefined ? "" : value);
+  if (typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function") {
+    return CSS.escape(v);
+  }
+  // Conservative fallback: escape everything outside the identifier-safe set
+  // rather than guessing which characters this engine treats as significant.
+  return v.replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
+}
+
+// --------------------------------------------------------------------------
+// CANONICAL SENDABLE DESTINATIONS (operator correction 1 and 4)
+// --------------------------------------------------------------------------
+// A destination may only be a MESSAGE-SCOPED work item that is present in the
+// live queue and carries a durable thread. Two shapes are excluded on purpose:
+//
+//   * packet projections such as "in_progress:<packet-id>", which are the queue
+//     presentation of a clearance packet rather than a conversation, and have
+//     no thread to post into;
+//   * any record without a canonical message-scoped id, including a malformed
+//     or future entry, which must never resolve to a destination.
+//
+// The canonical id of a message work item is literally "message:" + its origin
+// message id, so this is a shape the derivation guarantees rather than a
+// convention.
+function isCanonicalMessageWorkItem(id) {
+  return typeof id === "string" && /^message:msg-[0-9A-Za-z]+$/.test(id);
+}
+
+// The LIVE queue record for a work item, or null. Returning null is the
+// fail-closed answer: it is used to refuse, never to fall back to remembered
+// state. A selection whose item polling has removed therefore stops being
+// sendable the moment the queue no longer lists it.
+function liveQueueRecord(workItemId) {
+  if (!isCanonicalMessageWorkItem(workItemId)) return null;
+  return (lastWorkItems || []).find(
+    (i) => i && i.work_item_id === workItemId) || null;
+}
 
 // thread_id -> [work_item_id, ...] for every item the queue can see.
 function threadWorkItemIndex(items) {
@@ -2177,8 +2233,7 @@ function jumpToLatestMessage() {
 
 function highlightMessage(messageId) {
   try {
-    const sel = '[data-message-id="' +
-      (window.CSS && CSS.escape ? CSS.escape(messageId) : messageId) + '"]';
+    const sel = '[data-message-id="' + cssEscape(messageId) + '"]';
     const node = document.querySelector(sel);
     if (node) {
       node.classList.add("msg-highlight");
@@ -3061,8 +3116,12 @@ function convComposerTarget() {
   // a thread/work-item pair that is not genuinely bound) rather than relying on
   // presentation alone.
   if (selectedWorkItemId) {
-    const it = (lastWorkItems || []).find((i) => i.work_item_id === selectedWorkItemId);
-    const thread = selectedConvThread || (it && it.thread_id) || null;
+    // The thread comes ONLY from the live queue record. Reading
+    // selectedConvThread here was the stale-state path: when polling removed
+    // the selected item, the remembered thread kept the target sendable even
+    // though nothing in the live queue backed it.
+    const live = liveQueueRecord(selectedWorkItemId);
+    const thread = (live && live.thread_id) || null;
     if (thread) return { work_item_id: selectedWorkItemId, thread_id: thread };
     // FAIL CLOSED. A work_item_id WITHOUT a thread_id is the one shape the
     // server's target-integrity check cannot validate, because that check

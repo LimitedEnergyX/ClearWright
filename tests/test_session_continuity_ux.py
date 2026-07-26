@@ -240,9 +240,11 @@ class ComposerBindingTest(unittest.TestCase):
         """The server refuses an unbound thread/work-item pair; never invent one."""
         m = re.search(r"function convComposerTarget[\s\S]{0,4000}?\n\}", APP)
         body = m.group(0)
-        self.assertNotIn("convComposerNewThreadId", body.split("selectedConvThread ||")[0])
-        # The bare-work-item shape is now an explicit fail-closed marker rather
-        # than a sendable target.
+        # The thread now comes ONLY from the live queue record, so a
+        # remembered thread can no longer keep a removed item sendable.
+        self.assertIn("liveQueueRecord(selectedWorkItemId)", body)
+        self.assertIn("(live && live.thread_id) || null", body)
+        # The bare-work-item shape is an explicit fail-closed marker.
         self.assertIn("if (thread) return {", body)
         self.assertIn("unresolved: true", body)
 
@@ -429,7 +431,7 @@ class QueueReconciliationTest(unittest.TestCase):
         # The populated path must reach its short circuit without touching the
         # DOM. The empty-queue branch above it writes one message and is itself
         # guarded by its own signature check, so it is excluded here.
-        empty_end = body.index("const desired = rows.map")
+        empty_end = body.index("const desired = rows")
         populated = body[empty_end:]
         i = populated.index("if (signature === lastQueueSignature) return;")
         self.assertNotIn("innerHTML", populated[:i],
@@ -530,6 +532,102 @@ class WiredPathCoverageTest(unittest.TestCase):
         src = open(os.path.join(here, "dom", "mini_dom.mjs"), encoding="utf-8").read()
         self.assertIn("STATED LIMITATION", src)
         self.assertIn("not a browser", src)
+
+
+class LiveRecordRequiredTest(unittest.TestCase):
+    """Correction 1: a send requires a LIVE canonical record.
+
+    The prior gap: destinationDisagreement guarded its thread comparison with
+    `known &&`, so when polling removed the selected item the check was skipped
+    exactly when it mattered, while convComposerTarget kept the target sendable
+    by reading the remembered selectedConvThread.
+    """
+
+    def test_a_live_record_helper_exists(self):
+        self.assertIn("function liveQueueRecord", APP)
+        m = re.search(r"function liveQueueRecord[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("isCanonicalMessageWorkItem", body)
+        self.assertIn("lastWorkItems", body)
+        self.assertIn("|| null", body)
+
+    def test_the_target_thread_comes_only_from_the_live_record(self):
+        m = re.search(r"function convComposerTarget[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("liveQueueRecord(selectedWorkItemId)", body)
+        self.assertNotIn("selectedConvThread || ", body,
+                         "the remembered thread was the stale-state path")
+
+    def test_the_destination_check_requires_a_live_record(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        body = m.group(0)
+        self.assertIn("liveQueueRecord(target.work_item_id)", body)
+        self.assertIn("if (!known)", body)
+        self.assertIn("no longer in the live queue", body)
+
+    def test_the_thread_comparison_is_no_longer_optional(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        body = m.group(0)
+        self.assertNotIn("known && known.thread_id", body,
+                         "guarding on existence skipped the check exactly when "
+                         "the record was missing")
+        self.assertIn("!known.thread_id || known.thread_id !== target.thread_id", body)
+
+
+class CanonicalDestinationTest(unittest.TestCase):
+    """Correction 4: only a message-scoped work item may receive a message."""
+
+    def test_a_canonical_shape_test_exists(self):
+        self.assertIn("function isCanonicalMessageWorkItem", APP)
+        m = re.search(r"function isCanonicalMessageWorkItem[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        self.assertIn("message:msg-", m.group(0))
+
+    def test_packet_projections_are_excluded_by_shape(self):
+        m = re.search(r"function isCanonicalMessageWorkItem[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        self.assertIn("^message:msg-", m.group(0),
+                      "the pattern must be anchored so in_progress: ids cannot match")
+
+    def test_the_destination_check_rejects_non_canonical_ids(self):
+        m = re.search(r"function destinationDisagreement[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n  }", APP)
+        body = m.group(0)
+        self.assertIn("isCanonicalMessageWorkItem(target.work_item_id)", body)
+        self.assertIn("not a message-scoped work item", body)
+
+    def test_reconciliation_skips_records_without_a_canonical_id(self):
+        m = re.search(r"function renderQueue[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("rows.filter((it) => it && it.work_item_id)", body)
+        self.assertNotIn('key: it.work_item_id || ""', body,
+                         "an empty key collapsed several rows together")
+
+
+class SelectorEscapingTest(unittest.TestCase):
+    """Correction 3: one escaping mechanism, applied everywhere."""
+
+    def test_a_single_escaper_exists(self):
+        self.assertIn("function cssEscape", APP)
+        m = re.search(r"function cssEscape[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("CSS.escape", body)
+        self.assertIn("replace(", body, "a fallback is required where CSS.escape is absent")
+
+    def test_no_inline_conditional_escaping_remains(self):
+        self.assertNotIn("CSS.escape ? CSS.escape(", APP,
+                         "every dynamic value must go through cssEscape")
+
+    def test_every_dynamic_selector_is_escaped(self):
+        for probe in ('.q-open[data-work-item="', '[data-message-id="',
+                      '.q-group[data-group="'):
+            i = APP.index(probe)
+            window = APP[i:i + 160]
+            self.assertIn("cssEscape(", window,
+                          "unescaped interpolation into selector " + probe)
+
+    def test_the_fallback_is_conservative(self):
+        m = re.search(r"function cssEscape[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        self.assertIn("a-zA-Z0-9_-", m.group(0),
+                      "the fallback should escape everything outside the "
+                      "identifier-safe set rather than guess")
 
 
 class CanonicalIdentityTest(unittest.TestCase):

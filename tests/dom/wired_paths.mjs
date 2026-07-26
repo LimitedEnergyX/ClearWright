@@ -59,6 +59,9 @@ function buildEnv(opts) {
     doc.body.appendChild(el);
   });
   // A couple of elements app.js expects to be specific tags.
+  const sendBtn = doc.getElementById("conv-send");
+  if (sendBtn) sendBtn.textContent = "Send";
+
   const ta = doc.createElement("textarea");
   ta.setAttribute("id", "conv-input");
   const old = doc.getElementById("conv-input");
@@ -140,8 +143,10 @@ const ITEMS = [
     claimed_by: "claude", last_activity_at: "2026-07-25T09:00:00Z", last_activity_event: "council" },
 ];
 
-function seed(ctx, items) {
+function seed(ctx, items, env) {
   ev(ctx, "workItemsLoaded = true; lastWorkItems = " + JSON.stringify(items || ITEMS) + ";");
+  // Keep the served payload in step, or the next poll reverts the seeded state.
+  if (env) env.servedItems = items || ITEMS;
 }
 
 // ---------------------------------------------------------------------------
@@ -452,15 +457,26 @@ for (const key of ["Enter", " "]) {
 // 5. THE REAL send() PATH refuses through every destination-integrity branch.
 // ---------------------------------------------------------------------------
 function sendEnv(hash) {
+  // The responder must answer /api/work-items with a WORK-ITEMS shape. Returning
+  // a generic payload made refreshWorkItems set lastWorkItems to [] during the
+  // flush, which silently emptied the queue the test had just seeded and made a
+  // legitimate retry refuse for the wrong reason.
   const env = buildEnv({
     hash,
-    responder: (url) => {
-      if (url.indexOf("/api/messages?") === 0 || url.indexOf("message_id=") !== -1) {
-        return { found: true, message: { message: "PROBE" } };
+    responder: (url, method) => {
+      if (url.indexOf("/api/work-items") === 0) {
+        return { work_items: env && env.servedItems ? env.servedItems : ITEMS };
       }
-      return { ok: true, message_id: "msg-new", thread_id: "thr-alpha" };
+      if (url.indexOf("message_id=") !== -1) {
+        return { found: true, message: { message: env.lastSent || "PROBE" } };
+      }
+      if (method === "POST") {
+        return { ok: true, message_id: "msg-new", thread_id: "thr-alpha" };
+      }
+      return { ok: true };
     },
   });
+  env.servedItems = ITEMS;
   const ctx = loadApp(env);
   seed(ctx);
   ctx.wire();
@@ -468,13 +484,43 @@ function sendEnv(hash) {
   return { env, ctx };
 }
 
-function attemptSend(ctx, env, text) {
+// send() is async: it awaits the POST and then a durable re-read. The helper
+// must let those continuations run, or the composer stays in flight and the
+// `sending` guard silently blocks every later attempt.
+const settle = () => new Promise((r) => setImmediate(r));
+
+async function attemptSend(ctx, env, text) {
   const ta = env.doc.getElementById("conv-input");
+  const err = env.doc.getElementById("conv-error");
+  const btn = env.doc.getElementById("conv-send");
   ta.value = text || "PROBE";
+  env.lastSent = ta.value;
   const before = env.posted.filter((p) => p.method === "POST").length;
   ev(ctx, "convComposer.send()");
+
+  // Every destination-integrity refusal happens SYNCHRONOUSLY, before the first
+  // await, so the refusal state is captured here. It cannot be read after the
+  // flush below, because unrelated render chains resolving in the meantime call
+  // restoreDraft() and clear the textarea -- which would look like a cleared
+  // draft even though the send was refused.
+  const refusal = {
+    draft: ta.value,
+    error: String(err.textContent || ""),
+    label: String(btn.textContent || ""),
+    disabled: !!btn.disabled,
+  };
+
+  for (let i = 0; i < 8; i++) await settle();   // let the POST chain complete
   const after = env.posted.filter((p) => p.method === "POST").length;
-  return { posts: after - before, draft: ta.value };
+  return {
+    posts: after - before,
+    draft: refusal.draft,
+    error: refusal.error,
+    inFlightLabel: refusal.label,
+    inFlightDisabled: refusal.disabled,
+    settledLabel: String(btn.textContent || ""),
+    settledDisabled: !!btn.disabled,
+  };
 }
 
 // 5a. Unresolved destination: selected item has no durable thread.
@@ -483,31 +529,29 @@ function attemptSend(ctx, env, text) {
   ev(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-nothread",' +
           ' thread_id: null, presentation_state: "needs_operator" }];' +
           'selectedWorkItemId = "message:msg-nothread"; selectedConvThread = null;');
-  const r = attemptSend(ctx, env);
+  const r = await attemptSend(ctx, env);
   eq(r.posts, 0, "unresolved destination emits NO request");
   ok(r.draft.length > 0, "unresolved destination preserves the draft");
-  const err = env.doc.getElementById("conv-error");
-  ok(String(err.textContent).length > 0, "unresolved destination explains itself");
+  ok(r.error.length > 0, "unresolved destination explains itself");
 }
 
 // 5b. Route names a DIFFERENT work item than the selection.
 {
   const { env, ctx } = sendEnv("#work=message%3Amsg-beta");
   ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
-  const r = attemptSend(ctx, env);
+  const r = await attemptSend(ctx, env);
   eq(r.posts, 0, "route/selection disagreement emits NO request");
   ok(r.draft.length > 0, "disagreement preserves the draft");
-  ok(String(env.doc.getElementById("conv-error").textContent).indexOf("different work item") !== -1,
-     "disagreement names the mismatch");
+  ok(r.error.indexOf("different work item") !== -1, "disagreement names the mismatch");
 }
 
 // 5c. ABSENT route: nothing proves the URL agrees.
 {
   const { env, ctx } = sendEnv("");
   ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
-  const r = attemptSend(ctx, env);
+  const r = await attemptSend(ctx, env);
   eq(r.posts, 0, "an absent route emits NO request");
-  ok(String(env.doc.getElementById("conv-error").textContent).indexOf("no work route") !== -1,
+  ok(r.error.indexOf("no work route") !== -1,
      "an absent route says the URL cannot confirm the destination");
 }
 
@@ -519,27 +563,26 @@ function attemptSend(ctx, env, text) {
   // would let applyWorkHashRoute clear it first, so the send would then be
   // refused for an ABSENT route and this branch would never be exercised.
   ctx.location.hash = "#work=%";
-  const r = attemptSend(ctx, env);
+  const r = await attemptSend(ctx, env);
   eq(r.posts, 0, "a malformed route emits NO request");
-  ok(String(env.doc.getElementById("conv-error").textContent).indexOf("unreadable") !== -1,
-     "a malformed route says the URL is unreadable");
+  ok(r.error.indexOf("unreadable") !== -1, "a malformed route says the URL is unreadable");
 }
 
 // 5e. VALID RETRY after a refusal succeeds, and the button state is restored.
 {
   const { env, ctx } = sendEnv("");
   ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
-  const btn = env.doc.getElementById("conv-send");
-  const idle = btn.textContent;
-
-  const refused = attemptSend(ctx, env);
+  const refused = await attemptSend(ctx, env);
   eq(refused.posts, 0, "the first attempt is refused");
-  eq(btn.textContent, idle, "the button label is unchanged by a refusal");
-  ok(!btn.disabled, "the button is re-enabled after a refusal");
+  eq(refused.settledLabel, "Send", "the button label is unchanged by a refusal");
+  ok(!refused.settledDisabled, "the button is re-enabled after a refusal");
 
-  // Correct the route and retry: the same draft must now be sendable.
+  // Correct the route and retry. The selection is re-established explicitly,
+  // because unrelated render chains resolving during the flush can clear it and
+  // this case is about the ROUTE being corrected, not about selection drift.
   ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
-  const retry = attemptSend(ctx, env);
+  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
+  const retry = await attemptSend(ctx, env);
   eq(retry.posts, 1, "a valid retry after a refusal DOES send");
 }
 
@@ -574,6 +617,136 @@ function attemptSend(ctx, env, text) {
   ta.dispatchEvent(new MiniEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
   const after = env.posted.filter((p) => p.method === "POST").length;
   eq(after - before, 1, "repeated Ctrl+Enter in flight produces EXACTLY ONE POST");
+}
+
+// ---------------------------------------------------------------------------
+// 6. STALE SELECTION AFTER POLLING. The reported gap: once polling removed the
+//    selected item, a retained thread plus a matching stale hash let a request
+//    be built for a destination the live queue no longer backed.
+// ---------------------------------------------------------------------------
+{
+  const { env, ctx } = sendEnv("");
+  ctx.wire();
+  ctx.renderQueue();
+
+  // Select a VALID live item through the real wired path.
+  const groups = env.doc.getElementById("queue-groups");
+  groups.querySelector('.q-row[data-work-item="message:msg-alpha"] .q-open')
+    .dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), "message:msg-alpha", "a live item is selected");
+  eq(ev(ctx, "selectedConvThread"), "thr-alpha", "its durable thread is bound");
+  const routeAfterSelect = ctx.location.hash;
+  ok(routeAfterSelect.indexOf("msg-alpha") !== -1, "the canonical route is written");
+
+  // A send here is legitimate, proving the refusal below is not incidental.
+  const okAttempt = await attemptSend(ctx, env, "BASELINE");
+  eq(okAttempt.posts, 1, "a valid live selection DOES send");
+
+  // Now polling removes that item while thread, hash and composer state remain.
+  // env is passed so the SERVED payload drops it too: otherwise the next poll
+  // would restore it and the test could pass without exercising the gap.
+  seed(ctx, [ITEMS[1]], env);
+  ctx.renderQueue();
+  ctx.location.hash = routeAfterSelect;          // stale but MATCHING route
+  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
+
+  eq(ev(ctx, "selectedConvThread"), "thr-alpha", "the stale thread is still remembered");
+  ok(ctx.location.hash.indexOf("msg-alpha") !== -1, "the stale route still matches");
+
+  const refused = await attemptSend(ctx, env, "MUST NOT SEND");
+  eq(refused.posts, 0,
+     "a selection removed by polling emits NO request, despite stale thread and matching route");
+  ok(refused.draft.length > 0, "the draft is preserved through the refusal");
+  ok(refused.error.indexOf("no longer in the live queue") !== -1,
+     "the refusal explains that the item left the live queue");
+  eq(refused.settledLabel, "Send", "the button returns from Sending... to Send");
+  ok(!refused.settledDisabled, "the button is re-enabled after the refusal");
+
+  // The target itself must report unresolved rather than a sendable pair.
+  const stale = ev(ctx, "convComposerTarget()");
+  ok(stale.unresolved === true, "the stale target reports unresolved");
+  ok(!stale.thread_id, "the stale target carries no thread");
+
+  // Retry succeeds ONLY after selecting a valid live item.
+  groups.querySelector('.q-row[data-work-item="message:msg-beta"] .q-open')
+    .dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), "message:msg-beta", "a live item is reselected");
+  const retry = await attemptSend(ctx, env, "NOW VALID");
+  eq(retry.posts, 1, "the retry sends only after a valid live item is selected");
+}
+
+// 6b. THREAD REMOVED from the live record, item still present.
+{
+  const { env, ctx } = sendEnv("#work=message%3Amsg-alpha");
+  ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
+  ev(ctx, 'workItemsLoaded = true; lastWorkItems = [{ work_item_id: "message:msg-alpha",' +
+          ' thread_id: null, presentation_state: "needs_operator" }];');
+  const r = await attemptSend(ctx, env, "MUST NOT SEND");
+  eq(r.posts, 0, "an item whose live record lost its thread emits NO request");
+  ok(r.draft.length > 0, "the draft is preserved");
+}
+
+// 6c. A PACKET PROJECTION can never be a message destination.
+{
+  const { env, ctx } = sendEnv("#work=in_progress%3Asession-ux-cta-20260725");
+  ev(ctx, 'workItemsLoaded = true; lastWorkItems = [{' +
+          ' work_item_id: "in_progress:session-ux-cta-20260725", thread_id: null,' +
+          ' presentation_state: "waiting_on_claude" }];' +
+          'selectedWorkItemId = "in_progress:session-ux-cta-20260725";' +
+          'selectedConvThread = "thr-anything";');
+  ok(ev(ctx, 'isCanonicalMessageWorkItem("in_progress:session-ux-cta-20260725")') === false,
+     "a packet projection is not a canonical message work item");
+  const t = ev(ctx, "convComposerTarget()");
+  ok(t.unresolved === true, "a packet projection resolves to an unresolved target");
+  const r = await attemptSend(ctx, env, "MUST NOT SEND");
+  eq(r.posts, 0, "a packet projection emits NO request even with a remembered thread");
+}
+
+// 6d. A MALFORMED record can never become a destination or a reconciled tile.
+{
+  const { env, ctx } = sendEnv("");
+  ctx.wire();
+  ev(ctx, 'workItemsLoaded = true; lastWorkItems = [' +
+          '{ work_item_id: "message:msg-good", thread_id: "thr-good", title: "Good",' +
+          '  presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council" },' +
+          '{ work_item_id: null, thread_id: "thr-orphan", title: "No canonical id",' +
+          '  presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council" },' +
+          '{ thread_id: "thr-orphan2", title: "Missing entirely",' +
+          '  presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council" }];');
+  ctx.renderQueue();
+  const groups = env.doc.getElementById("queue-groups");
+  eq(groups.querySelectorAll(".q-row[data-work-item]").length, 1,
+     "only the canonical record is reconciled into a tile");
+  eq(groups.querySelectorAll('.q-row[data-work-item=""]').length, 0,
+     "no tile is keyed on an empty work-item id");
+
+  for (const bad of [null, "", "thr-20260725T142257787771", "in_progress:x", "message:", "msg-1"]) {
+    ok(ev(ctx, "isCanonicalMessageWorkItem(" + JSON.stringify(bad) + ")") === false,
+       JSON.stringify(bad) + " is not a canonical message work item");
+  }
+  ok(ev(ctx, 'isCanonicalMessageWorkItem("message:msg-20260725T142257787771")') === true,
+     "a real canonical id is accepted");
+}
+
+// 6e. SELECTOR-SIGNIFICANT characters in identifiers must not break escaping.
+{
+  const env = buildEnv({});
+  const ctx = loadApp(env);
+  const hostile = ['a"b', "a\\b", "a]b", "a b", "a.b", "a#b", "a:b"];
+  hostile.forEach((v) => {
+    const out = ev(ctx, "cssEscape(" + JSON.stringify(v) + ")");
+    ok(typeof out === "string" && out.length >= v.length,
+       "cssEscape returns an escaped string for " + JSON.stringify(v));
+    // The escaped value must be usable in a selector without throwing.
+    let threw = null;
+    try { env.doc.body.querySelector('[data-x="' + out + '"]'); }
+    catch (e) { threw = String(e); }
+    ok(threw === null, "an escaped value is selector-safe for " + JSON.stringify(v));
+  });
+  // Escaping must be applied, not merely available.
+  const src = fs.readFileSync(APP, "utf8");
+  ok(src.indexOf("CSS.escape ? CSS.escape(") === -1,
+     "no inline conditional escaping remains; all values go through cssEscape");
 }
 
 console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");

@@ -967,9 +967,9 @@ const statusOf = (env) => {
   ok(ev(ctx, "queueConfirmed") === true, "confirmed to begin with");
 
   env.queue.mode = "defer";
-  const older = ctx.refreshWorkItems();          // generation N, left in flight
+  const older = ctx.runWorkItemsRefresh();       // generation N, left in flight
   env.queue.mode = "fail";
-  const newerOutcome = await ctx.refreshWorkItems();   // generation N+1, fails
+  const newerOutcome = await ctx.runWorkItemsRefresh();   // generation N+1, fails
   eq(newerOutcome, "failed", "the newer refresh failed");
   ok(ev(ctx, "queueConfirmed") === false, "confirmation is withdrawn");
 
@@ -986,10 +986,10 @@ const statusOf = (env) => {
   const env = queueEnv({});
   const ctx = loadApp(env);
   env.queue.mode = "defer";
-  const older = ctx.refreshWorkItems();          // generation N, in flight
+  const older = ctx.runWorkItemsRefresh();       // generation N, in flight
   env.queue.mode = "ok";
   env.queue.items = ITEMS;
-  eq(await ctx.refreshWorkItems(), "confirmed", "the newer refresh confirmed");
+  eq(await ctx.runWorkItemsRefresh(), "confirmed", "the newer refresh confirmed");
   ok(ev(ctx, "queueConfirmed") === true, "the queue is confirmed");
 
   env.queue.pending.shift().rejectWith();        // the OLDER one now fails
@@ -1075,11 +1075,18 @@ const statusOf = (env) => {
   env.queue.items = ITEMS;
   await ctx.refreshWorkItems();
   ctx.wire();
+  // wire() starts a boot refresh that owns the polling slot. Let it settle
+  // before the deterministic empty-outcome assertion below, or that call would
+  // coalesce instead of performing a request. Coalescing is covered in 11.
+  for (let i = 0; i < 10; i++) await settle();
   ctx.renderQueue();
   ev(ctx, 'selectedWorkItemId = "message:msg-alpha"; selectedConvThread = "thr-alpha";');
   ctx.location.hash = "#work=" + encodeURIComponent("message:msg-alpha");
 
   env.queue.items = [];
+  // wire() above owns the polling slot, so a coalescing call would return
+  // "coalesced". This case is about the EMPTY OUTCOME, so drive the request
+  // directly; the coalescing contract is covered in section 11.
   eq(await ctx.refreshWorkItems(), "confirmed_empty", "the queue is confirmed EMPTY");
   ok(ev(ctx, "queueConfirmed") === true, "confirmed empty is still confirmed");
   eq(statusOf(env).hidden, true, "a confirmed empty result shows no failure status");
@@ -1151,6 +1158,206 @@ for (const bad of [{}, { work_items: null }, { work_items: "nope" }, { work_item
      "the previous snapshot is preserved, not replaced by an invented empty one");
   ok(statusOf(env).shown, "the operator is told the response was unreadable");
   ok(statusOf(env).text.indexOf("unreadable") !== -1, "and why");
+}
+
+// ---------------------------------------------------------------------------
+// 11. OVERLAPPING-POLL STARVATION. This is the production regression: the
+//     endpoint was slower than the poll interval, so every request was
+//     superseded by the next before it could apply and the queue never
+//     confirmed. These drive the REAL refreshWorkItems entry point.
+// ---------------------------------------------------------------------------
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  env.queue.mode = "defer";                 // response outlives the poll tick
+
+  // Poll while a request is active, repeatedly, exactly as setInterval does.
+  const active = ctx.refreshWorkItems();
+  const p1 = await ctx.refreshWorkItems();
+  const p2 = await ctx.refreshWorkItems();
+  const p3 = await ctx.refreshWorkItems();
+  eq([p1, p2, p3], ["coalesced", "coalesced", "coalesced"],
+     "polls arriving during an active refresh COALESCE, they do not start requests");
+  eq(env.queue.pending.length, 1,
+     "AT MOST ONE request is active no matter how many polls arrive");
+  ok(ev(ctx, "queueRefreshInFlight") === true, "the active refresh still owns the slot");
+
+  // The active request is NOT invalidated by those polls: it settles and applies.
+  env.queue.pending.shift().resolveWith(ITEMS);
+  eq(await active, "confirmed", "the active refresh CONFIRMS rather than being superseded");
+  ok(ev(ctx, "queueConfirmed") === true, "the queue is confirmed");
+  ok(ev(ctx, "workItemsLoaded") === true, "the queue is loaded");
+  eq(ev(ctx, "lastWorkItems.length"), ITEMS.length, "the snapshot is applied");
+
+  // Exactly one coalesced follow-up was started, not three.
+  eq(env.queue.pending.length, 1, "exactly ONE coalesced follow-up runs, no backlog");
+  env.queue.pending.shift().resolveWith(ITEMS);
+}
+
+// 11b. SUSTAINED slow endpoint with continuous polling still CONFIRMS and
+//      renders, and the generation does not climb without bound.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  // No wire() here: this case is exactly about the polling slot, so nothing
+  // else may own it.
+
+  // Ten polling ticks while every response is slow.
+  env.queue.mode = "defer";
+  const first = ctx.refreshWorkItems();
+  for (let i = 0; i < 10; i++) await ctx.refreshWorkItems();
+  eq(env.queue.pending.length, 1, "ten polls produce ONE active request");
+  const genDuringPolls = ev(ctx, "queueRefreshGeneration");
+
+  env.queue.pending.shift().resolveWith(ITEMS);
+  eq(await first, "confirmed", "the request confirms despite continuous polling");
+  // Drain the single follow-up.
+  if (env.queue.pending.length) env.queue.pending.shift().resolveWith(ITEMS);
+  for (let i = 0; i < 6; i++) await settle();
+
+  ok(ev(ctx, "queueConfirmed") === true, "queue confirmation is REACHED, not starved");
+  ctx.renderQueue();
+  const tiles = env.doc.getElementById("queue-groups").querySelectorAll(".q-row[data-work-item]");
+  eq(tiles.length, ITEMS.length, "the expected work items RENDER");
+  const genAfter = ev(ctx, "queueRefreshGeneration");
+  ok(genAfter - genDuringPolls <= 2,
+     "the generation does not increase without bound while polls coalesce");
+}
+
+// 11c. An explicit operator refresh during an active one uses the same bounded
+//      follow-up rather than piling on.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  env.queue.mode = "defer";
+  const active = ctx.refreshWorkItems();
+  eq(await ctx.refreshWorkItems(), "coalesced", "an explicit refresh coalesces too");
+  eq(await ctx.refreshWorkItems(), "coalesced", "and a second one does not queue a backlog");
+  eq(env.queue.pending.length, 1, "still exactly one active request");
+  env.queue.pending.shift().resolveWith(ITEMS);
+  await active;
+  eq(env.queue.pending.length, 1, "exactly one follow-up, not two");
+  env.queue.pending.shift().resolveWith(ITEMS);
+}
+
+// 11d. A coalesced poll is NOT a success: it must not clear status or restore.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  ok(ev(ctx, 'refreshSucceeded("coalesced")') === false,
+     "a coalesced poll is not treated as a confirmed refresh");
+  ok(ev(ctx, 'refreshSucceeded("confirmed")') === true, "confirmed is a success");
+  ok(ev(ctx, 'refreshSucceeded("confirmed_empty")') === true, "confirmed_empty is a success");
+  ok(ev(ctx, 'refreshSucceeded("failed")') === false, "failed is not a success");
+  ok(ev(ctx, 'refreshSucceeded("superseded")') === false, "superseded is not a success");
+}
+
+// 11e. The slot is released even when the active refresh FAILS, so a later poll
+//      can still recover. A stuck flag would be a permanent outage.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.mode = "fail";
+  eq(await ctx.refreshWorkItems(), "failed", "the refresh fails");
+  ok(ev(ctx, "queueRefreshInFlight") === false, "the in-flight slot is released on failure");
+  ok(ev(ctx, "queueConfirmed") === false, "confirmation is withdrawn");
+  ok(ev(ctx, "lastWorkItems.length") >= 0, "the snapshot is retained, not cleared");
+
+  env.queue.mode = "ok";
+  env.queue.items = ITEMS;
+  eq(await ctx.refreshWorkItems(), "confirmed", "a later poll recovers");
+  ok(ev(ctx, "queueConfirmed") === true, "sendability is restored");
+  ok(ev(ctx, "queueFailureReported") === false, "the failure record is cleared");
+}
+
+// 11f. No duplicate, phantom or synthetic durable record is created by any of
+//      this: coalescing must not emit extra requests.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  env.queue.mode = "defer";
+  const before = env.posted.filter((p) => p.url.indexOf("/api/work-items") === 0).length;
+  const active = ctx.refreshWorkItems();
+  for (let i = 0; i < 5; i++) await ctx.refreshWorkItems();
+  const during = env.posted.filter((p) => p.url.indexOf("/api/work-items") === 0).length;
+  eq(during - before, 1, "five extra polls emit ZERO extra requests");
+  env.queue.pending.shift().resolveWith(ITEMS);
+  await active;
+  const after = env.posted.filter((p) => p.url.indexOf("/api/work-items") === 0).length;
+  eq(after - before, 2, "exactly the active request plus ONE follow-up");
+  if (env.queue.pending.length) env.queue.pending.shift().resolveWith(ITEMS);
+  eq(env.posted.filter((p) => p.method === "POST").length, 0,
+     "no durable write is produced by refreshing");
+}
+
+// 11g. MULTI-CALLER LIFECYCLE: wire()/boot refresh, polling, and an explicit
+//      operator refresh all share ONE bounded slot. This is exactly the
+//      interaction the controller exists to make safe.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  env.queue.items = ITEMS;
+  env.queue.mode = "defer";
+
+  ctx.wire();                                   // boot refresh takes the slot
+  ok(ev(ctx, "queueRefreshInFlight") === true, "the boot refresh owns the slot");
+  eq(env.queue.pending.length, 1, "boot started exactly one request");
+
+  // Polling ticks and an explicit operator refresh arrive during boot.
+  eq(await ctx.refreshWorkItems(), "coalesced", "a polling tick coalesces behind boot");
+  eq(await ctx.refreshWorkItems(), "coalesced", "a second tick adds no request");
+  eq(await ctx.refreshWorkItems(), "coalesced", "an explicit operator refresh coalesces too");
+  eq(env.queue.pending.length, 1, "still exactly ONE request in flight");
+
+  // Boot settles and applies; exactly one follow-up runs for all three callers.
+  env.queue.pending.shift().resolveWith(ITEMS);
+  for (let i = 0; i < 8; i++) await settle();
+  ok(ev(ctx, "queueConfirmed") === true, "boot confirmed despite concurrent callers");
+  eq(env.queue.pending.length, 1, "ONE coalesced follow-up for all three callers");
+  env.queue.pending.shift().resolveWith(ITEMS);
+  for (let i = 0; i < 8; i++) await settle();
+  ok(ev(ctx, "queueRefreshInFlight") === false, "the slot is free once everything settles");
+  eq(env.queue.pending.length, 0, "no residual backlog");
+}
+
+// 11h. The fire-and-forget follow-up can never surface an unhandled rejection,
+//      even if the inner request throws outside its expected failure contract.
+{
+  const env = queueEnv({});
+  const ctx = loadApp(env);
+  let unhandled = 0;
+  const onUnhandled = () => { unhandled += 1; };
+  process.on("unhandledRejection", onUnhandled);
+
+  env.queue.items = ITEMS;
+  env.queue.mode = "defer";
+  const active = ctx.refreshWorkItems();
+  await ctx.refreshWorkItems();                 // request the follow-up
+  // Make the FOLLOW-UP throw from the transport itself, not a handled failure.
+  env.queue.pending.shift().resolveWith(ITEMS);
+  env.ctx.fetch = () => { throw new Error("probe: transport threw"); };
+  await active;
+  for (let i = 0; i < 10; i++) await settle();
+
+  eq(unhandled, 0, "a throwing follow-up produces NO unhandled rejection");
+  ok(ev(ctx, "queueRefreshInFlight") === false, "and the slot is still released");
+  process.removeListener("unhandledRejection", onUnhandled);
+}
+
+// 11i. The bounded entry point is the ONLY production path; the inner request
+//      is not called directly outside the controller.
+{
+  const src = fs.readFileSync(APP, "utf8");
+  const calls = src.split("runWorkItemsRefresh").length - 1;
+  const decl = (src.match(/async function runWorkItemsRefresh\(\)/g) || []).length;
+  const inController = (src.match(/await runWorkItemsRefresh\(\)/g) || []).length;
+  eq(decl, 1, "the inner request is declared once");
+  eq(inController, 1, "it is awaited exactly once, inside the controller");
+  ok(calls <= 3, "no production call site bypasses the bounded entry point");
 }
 
 console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");

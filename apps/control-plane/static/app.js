@@ -1090,6 +1090,14 @@ let queueFailureReported = false;
 // in flight at once) and they can complete OUT OF ORDER, so a completion may
 // only touch shared state when it belongs to the newest started refresh.
 let queueRefreshGeneration = 0;
+// Bounded request control. Exactly one work-item refresh may be in flight. A
+// poll arriving while one is active does NOT start a second request and does
+// NOT invalidate the active one; it requests at most ONE follow-up, which runs
+// after the active refresh settles. Without this the generation guard starves:
+// when the endpoint is slower than the poll interval every request is
+// superseded by the next before it can apply, so the queue never confirms.
+let queueRefreshInFlight = false;
+let queueRefreshFollowUp = false;
 
 // The four outcomes a refresh can have. They are deliberately distinct:
 // "confirmed empty" is a real, authoritative answer and must never be confused
@@ -1098,9 +1106,14 @@ const REFRESH_CONFIRMED = "confirmed";
 const REFRESH_CONFIRMED_EMPTY = "confirmed_empty";
 const REFRESH_FAILED = "failed";
 const REFRESH_SUPERSEDED = "superseded";
+// A poll that arrived while a refresh was already active. It started no request
+// and changed no state; it only requested the single bounded follow-up.
+const REFRESH_COALESCED = "coalesced";
 
 // True only for an outcome that re-establishes authoritative queue truth.
 function refreshSucceeded(outcome) {
+  // Only an outcome that re-established authoritative queue truth. A coalesced
+  // poll performed no request, so it must not clear status or restore state.
   return outcome === REFRESH_CONFIRMED || outcome === REFRESH_CONFIRMED_EMPTY;
 }
 let lastQueueCouncils = [];
@@ -2372,7 +2385,35 @@ function applyWorkHashRoute() {
 // deliberately does NOT throw: it is called from a polling timer where an
 // unhandled rejection would be noise, and it keeps the previous content on
 // screen rather than blanking the operator.
+// The bounded entry point. Everything that polls, boots or retries calls THIS.
 async function refreshWorkItems() {
+  if (queueRefreshInFlight) {
+    // Coalesce: at most one follow-up, no backlog, and the active request is
+    // left alone to finish and apply.
+    queueRefreshFollowUp = true;
+    return REFRESH_COALESCED;
+  }
+  queueRefreshInFlight = true;
+  let outcome;
+  try {
+    outcome = await runWorkItemsRefresh();
+  } finally {
+    queueRefreshInFlight = false;
+    if (queueRefreshFollowUp) {
+      queueRefreshFollowUp = false;
+      // Start the single coalesced follow-up. Deliberately not awaited: the
+      // caller's outcome describes the refresh it actually performed.
+      refreshWorkItems();
+    }
+  }
+  return outcome;
+}
+
+// The actual request. It keeps the monotonic generation guard so that if two
+// requests ever DO overlap -- a future caller bypassing the controller, or a
+// legitimately concurrent path -- a stale completion still cannot overwrite
+// newer truth in either direction.
+async function runWorkItemsRefresh() {
   const gen = ++queueRefreshGeneration;
   try {
     const data = await getJSON("/api/work-items");

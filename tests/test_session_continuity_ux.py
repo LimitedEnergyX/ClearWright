@@ -653,12 +653,12 @@ class QueueFreshnessTest(unittest.TestCase):
         self.assertIn("let workItemsLoaded = false;", APP)
 
     def test_a_successful_refresh_confirms_the_queue(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
         body = m.group(0)
         self.assertIn("queueConfirmed = true;", body)
 
     def test_a_failed_refresh_withdraws_confirmation(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
         body = m.group(0)
         catch = body.split("} catch (e) {")[1]
         self.assertIn("queueConfirmed = false;", catch)
@@ -679,7 +679,7 @@ class QueueFreshnessTest(unittest.TestCase):
                         "an unconfirmed queue must refuse before any lookup")
 
     def test_the_previous_content_is_not_blanked(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
         catch = m.group(0).split("} catch (e) {")[1]
         self.assertNotIn("lastWorkItems = []", catch,
                          "the operator should not be blanked out on a "
@@ -739,7 +739,7 @@ class RefreshOutcomeTest(unittest.TestCase):
             self.assertIn("const " + c + " =", APP)
 
     def test_confirmed_empty_is_distinct_from_failed_and_unloaded(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         body = m.group(0)
         self.assertIn("lastWorkItems.length ? REFRESH_CONFIRMED : REFRESH_CONFIRMED_EMPTY", body)
         # An empty load is still loaded AND confirmed.
@@ -770,7 +770,7 @@ class RefreshOutcomeTest(unittest.TestCase):
     def test_refresh_does_not_signal_failure_by_throwing(self):
         """It is called from a polling timer, where an unhandled rejection
         would be noise, and it keeps prior content on screen."""
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         body = m.group(0)
         self.assertNotIn("throw", body)
         self.assertIn("return REFRESH_FAILED;", body)
@@ -788,14 +788,14 @@ class RefreshFailureVisibilityTest(unittest.TestCase):
         self.assertIn("if (queueFailureReported) return;", body)
 
     def test_only_a_confirmed_success_clears_it(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         body = m.group(0)
         success = body.split("catch (e)")[0]
         self.assertIn("queueFailureReported = false;", success)
         self.assertIn("queueFailureReported = true;", body.split("catch (e)")[1])
 
     def test_the_failure_keeps_the_snapshot_visible(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         catch = m.group(0).split("catch (e)")[1]
         self.assertNotIn("lastWorkItems = []", catch)
         self.assertIn("queueConfirmed = false;", catch)
@@ -807,11 +807,11 @@ class RefreshSequencingTest(unittest.TestCase):
 
     def test_a_monotonic_generation_exists(self):
         self.assertIn("let queueRefreshGeneration = 0;", APP)
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         self.assertIn("const gen = ++queueRefreshGeneration;", m.group(0))
 
     def test_both_completion_paths_are_guarded(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         body = m.group(0)
         success, failure = body.split("catch (e)")
         self.assertIn("gen !== queueRefreshGeneration", success,
@@ -820,7 +820,7 @@ class RefreshSequencingTest(unittest.TestCase):
                       "an older FAILURE must not invalidate newer state")
 
     def test_a_superseded_completion_touches_no_shared_state(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         body = m.group(0)
         i = body.index("if (gen !== queueRefreshGeneration) return REFRESH_SUPERSEDED;")
         head = body[:i]
@@ -829,7 +829,7 @@ class RefreshSequencingTest(unittest.TestCase):
                              "no state may change before the generation check")
 
     def test_the_guard_precedes_the_snapshot_write(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         body = m.group(0)
         self.assertLess(body.index("if (gen !== queueRefreshGeneration)"),
                         body.index("lastWorkItems = data.work_items"))
@@ -864,13 +864,13 @@ class RefreshPayloadValidationTest(unittest.TestCase):
     it makes stale destinations unsendable."""
 
     def test_the_payload_shape_is_validated(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         body = m.group(0)
         self.assertIn("Array.isArray(data.work_items)", body)
         self.assertNotIn("data.work_items || []", body)
 
     def test_a_malformed_payload_is_a_failure(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         body = m.group(0)
         branch = body.split("Array.isArray(data.work_items)")[1][:600]
         self.assertIn("queueConfirmed = false;", branch)
@@ -878,7 +878,7 @@ class RefreshPayloadValidationTest(unittest.TestCase):
         self.assertIn("unreadable", branch)
 
     def test_the_previous_snapshot_survives_a_malformed_payload(self):
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
         body = m.group(0)
         after = body.split("Array.isArray(data.work_items)")[1]
         branch = after[:after.index("    }")]      # the guard block only
@@ -898,6 +898,68 @@ class RecordPolicyDocumentationTest(unittest.TestCase):
         self.assertIn("no usable key", low)
         self.assertIn("excluded from reconciliation", low)
         self.assertIn("read-only", low)
+
+
+class BoundedRefreshControlTest(unittest.TestCase):
+    """Phase 1: the monotonic guard alone STARVED under real latency.
+
+    /api/work-items takes 2.6-3.1s while polling fires every 2s, so every
+    request was superseded by the next before it could apply and the queue never
+    confirmed. Bounded request control fixes that: one active refresh, at most
+    one coalesced follow-up, and the active request is never invalidated by a
+    poll.
+    """
+
+    def test_in_flight_and_followup_state_exist(self):
+        self.assertIn("let queueRefreshInFlight = false;", APP)
+        self.assertIn("let queueRefreshFollowUp = false;", APP)
+
+    def test_a_coalesced_outcome_is_named(self):
+        self.assertIn('const REFRESH_COALESCED = "coalesced";', APP)
+
+    def test_a_poll_during_an_active_refresh_starts_no_request(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,3000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("if (queueRefreshInFlight)", body)
+        self.assertIn("queueRefreshFollowUp = true;", body)
+        self.assertIn("return REFRESH_COALESCED;", body)
+        # It must not touch the generation or issue a request.
+        head = body.split("queueRefreshInFlight = true;")[0]
+        self.assertNotIn("queueRefreshGeneration", head)
+        self.assertNotIn("getJSON", head)
+
+    def test_at_most_one_followup_and_no_backlog(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,3000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        # The flag is cleared before the follow-up starts, so repeats collapse.
+        i = body.index("if (queueRefreshFollowUp)")
+        tail = body[i:i+300]
+        self.assertIn("queueRefreshFollowUp = false;", tail)
+        self.assertIn("refreshWorkItems();", tail)
+
+    def test_the_slot_is_released_even_on_failure(self):
+        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,3000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("} finally {", body)
+        after = body.split("} finally {")[1]
+        self.assertIn("queueRefreshInFlight = false;", after)
+
+    def test_the_request_keeps_the_generation_guard(self):
+        """Out-of-order protection is retained where overlap is legitimately
+        possible; it is simply no longer the only control."""
+        self.assertIn("async function runWorkItemsRefresh()", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,6000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertIn("const gen = ++queueRefreshGeneration;", body)
+        success, failure = body.split("catch (e)")
+        self.assertIn("gen !== queueRefreshGeneration", success)
+        self.assertIn("gen !== queueRefreshGeneration", failure)
+
+    def test_a_coalesced_poll_is_not_a_success(self):
+        m = re.search(r"function refreshSucceeded[" + BS + r"s" + BS + r"S]{0,1000}?" + BS + r"n}", APP)
+        body = m.group(0)
+        self.assertNotIn("REFRESH_COALESCED", body)
+        self.assertIn("REFRESH_CONFIRMED", body)
 
 
 class CanonicalIdentityTest(unittest.TestCase):
@@ -1070,7 +1132,7 @@ class LoadedEmptyQueueTest(unittest.TestCase):
 
     def test_a_loaded_flag_exists_and_is_set_on_success(self):
         self.assertIn("let workItemsLoaded = false;", APP)
-        m = re.search(r"async function refreshWorkItems[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
+        m = re.search(r"async function runWorkItemsRefresh[" + BS + r"s" + BS + r"S]{0,4000}?" + BS + r"n}", APP)
         self.assertIn("workItemsLoaded = true;", m.group(0))
 
     def test_validation_no_longer_infers_from_length(self):

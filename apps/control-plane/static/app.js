@@ -61,6 +61,78 @@ async function postJSON(url, body) {
   return res.json();
 }
 
+// --------------------------------------------------------------------------- //
+// Bounded polling.
+//
+// Every recurring poller below runs on a fixed interval, so when the server is
+// slower than that interval an UNGUARDED poller starts a new request before the
+// previous one finishes and the outstanding requests accumulate without bound.
+// That is what saturates a serialized server: measured on this console over a
+// 195 s window, the unguarded pollers issued 249 requests while the bounded
+// work-item poller issued 11, and per-endpoint latency reached 20-35 s.
+//
+// boundedPoll gives ONE endpoint its OWN slot: at most one active request, and
+// at most one coalesced follow-up if ticks arrived while that request was
+// running. Endpoints are never globally serialized -- each keeps a separate
+// slot -- so unrelated endpoints still run in parallel. There is no retry loop
+// anywhere in here: the endpoint's existing interval remains the only thing
+// that re-drives it, so a failing endpoint cannot become a tight retry storm.
+// --------------------------------------------------------------------------- //
+
+// The request ran to completion. It says nothing about success or failure: each
+// wrapped poller keeps its OWN truthful failure contract internally.
+const POLL_RAN = "ran";
+// A tick arrived while a request was already active. It started no request and
+// changed no state; it only requested the single bounded follow-up.
+const POLL_COALESCED = "coalesced";
+
+// name -> {active, followUp, ran, coalesced}. Diagnostic visibility that is read
+// on demand and never logged, so it adds no console noise.
+const pollControllers = new Map();
+
+function pollDiagnostics() {
+  const out = {};
+  pollControllers.forEach((st, name) => {
+    out[name] = { active: st.active, followUp: st.followUp,
+                  ran: st.ran, coalesced: st.coalesced };
+  });
+  return out;
+}
+
+function boundedPoll(name, run) {
+  const state = { active: false, followUp: false, ran: 0, coalesced: 0 };
+  pollControllers.set(name, state);
+  async function polled() {
+    if (state.active) {
+      // Coalesce: at most one follow-up, no backlog, and the active request is
+      // left alone to finish and apply its result.
+      state.followUp = true;
+      state.coalesced += 1;
+      return POLL_COALESCED;
+    }
+    state.active = true;
+    state.ran += 1;
+    try {
+      await run();
+    } catch (e) {
+      // A poller must never throw to its interval. Each wrapped function
+      // already handles its own failures; this is the last line of defence so
+      // an unexpected throw cannot become an invisible unhandled rejection.
+    } finally {
+      state.active = false;
+      if (state.followUp) {
+        state.followUp = false;
+        // The single coalesced follow-up. Deliberately not awaited, and given
+        // an explicit handler even though polled() cannot reject, because an
+        // unhandled rejection on a fire-and-forget call would be silent.
+        polled().catch(() => { /* never surfaces as an unhandled rejection */ });
+      }
+    }
+    return POLL_RAN;
+  }
+  return polled;
+}
+
 function setActivity(text) {
   document.getElementById("activity-log").textContent = text;
 }
@@ -280,7 +352,7 @@ function renderPulseInspector(pulse) {
 // The selected-task poll: header, stepper, operator panel, and the Work tabs
 // all bind to this ONE state object, so a current-task mismatch between the
 // queue, header, phase display, conversation, and operator panel cannot occur.
-async function refreshTaskState() {
+async function refreshTaskStateRequest() {
   try {
     // work_item_id is the primary selector; a bare thread selection is still
     // honored (the server resolves it, erroring only on a multi-item thread).
@@ -306,6 +378,7 @@ async function refreshTaskState() {
   renderOperatorPanel(lastTaskState);
   if (currentView === "command") renderCommandOverview(lastTaskState);
 }
+const refreshTaskState = boundedPoll("task-state", refreshTaskStateRequest);
 
 // The right-hand operator panel: the next required action, the authority
 // state (gate / clearance / verification), and the contextual operator
@@ -574,7 +647,7 @@ function renderRealEventsInner(el, events) {
 
 let lastEvents = [];
 
-async function refreshAgentEvents() {
+async function refreshAgentEventsRequest() {
   try {
     const data = await getJSON("/api/agent-events");
     lastEvents = data.events || [];
@@ -583,6 +656,7 @@ async function refreshAgentEvents() {
     // Leave the prior content in place on a transient fetch error.
   }
 }
+const refreshAgentEvents = boundedPoll("agent-events", refreshAgentEventsRequest);
 
 // --------------------------------------------------------------------------- //
 // Local communications (real, durable, packet-linked)
@@ -694,7 +768,7 @@ function renderMessagesInner(el, messages) {
 
 let lastMessages = [];
 
-async function refreshMessages() {
+async function refreshMessagesRequest() {
   try {
     const data = await getJSON("/api/messages");
     lastMessages = data.messages || [];
@@ -703,6 +777,7 @@ async function refreshMessages() {
     // Leave the prior content in place on a transient fetch error.
   }
 }
+const refreshMessages = boundedPoll("messages", refreshMessagesRequest);
 
 // --------------------------------------------------------------------------- //
 // Composer payload integrity: ONE canonical content contract, ONE documented
@@ -2472,7 +2547,7 @@ async function runWorkItemsRefresh() {
   }
 }
 
-async function refreshArchiveIndex() {
+async function refreshArchiveIndexRequest() {
   try {
     lastArchiveIndex = await getJSON("/api/archive-index");
     renderQueue();
@@ -2480,6 +2555,7 @@ async function refreshArchiveIndex() {
     // Archive index is optional; the group simply stays empty.
   }
 }
+const refreshArchiveIndex = boundedPoll("archive-index", refreshArchiveIndexRequest);
 
 // --------------------------------------------------------------------------- //
 // History: ONE unified, read-only ledger across every durable source (packets,
@@ -2750,7 +2826,7 @@ function renderHealthDetails(h) {
   el.innerHTML = html;
 }
 
-async function refreshHealth() {
+async function refreshHealthRequest() {
   try {
     const h = await getJSON("/api/health");
     lastHealth = h;
@@ -2769,6 +2845,7 @@ async function refreshHealth() {
     // Leave the prior chip state on a transient fetch error.
   }
 }
+const refreshHealth = boundedPoll("health", refreshHealthRequest);
 
 // --------------------------------------------------------------------------- //
 // Popover management: System Health and any peer popover registered here
@@ -3246,7 +3323,7 @@ function conversationEntryTag(m) {
   return null;
 }
 
-async function loadConversations() {
+async function loadConversationsRequest() {
   try {
     const data = await getJSON("/api/conversations");
     lastConversations = data.conversations || [];
@@ -3272,6 +3349,11 @@ async function loadConversations() {
     // Leave prior content on a transient fetch error.
   }
 }
+// A single call fans out to /api/conversations, then /api/active-run,
+// /api/review-councils and up to four /api/review-council detail calls, so an
+// unguarded 2 s tick multiplied into dozens of outstanding requests. Bounding
+// the OUTER call is what stops that; the inner sequence is left exactly as-is.
+const loadConversations = boundedPoll("conversations", loadConversationsRequest);
 
 // Composer modes keep chat and work separate: Message is normal chat (intent
 // "chat", never a work item), Ask agent and Create work item are actionable
@@ -3943,10 +4025,17 @@ function renderState(state) {
   if (currentMode !== "operator") feedStart(state);
 }
 
-async function refresh() {
-  const state = await getJSON("/api/state");
-  renderState(state);
+async function refreshStateRequest() {
+  try {
+    const state = await getJSON("/api/state");
+    renderState(state);
+  } catch (e) {
+    // Previously this function had no handler at all, so every failed poll
+    // became an invisible unhandled rejection. Keep the prior rendered state,
+    // exactly like the other pollers do on a transient fetch error.
+  }
 }
+const refresh = boundedPoll("state", refreshStateRequest);
 
 // Developer surface: the Tool Log footer is hidden by default and toggled by
 // Ctrl+Shift+L or the small gear control in the corner.

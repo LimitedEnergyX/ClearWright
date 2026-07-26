@@ -1360,5 +1360,400 @@ for (const bad of [{}, { work_items: null }, { work_items: "nope" }, { work_item
   ok(calls <= 3, "no production call site bypasses the bounded entry point");
 }
 
+// ---------------------------------------------------------------------------
+// 12. BOUNDED POLLING for the recurring console pollers.
+//
+//     Every poller runs on a fixed interval, so when an endpoint is slower than
+//     that interval an UNGUARDED poller starts a new request before the last
+//     one finishes and the outstanding requests accumulate without bound. These
+//     drive the REAL exported poller functions, not the inner request bodies.
+// ---------------------------------------------------------------------------
+
+// A transport that can defer or fail ANY endpoint independently, so one slow
+// endpoint never masks another and per-endpoint request counts are exact.
+function pollEnv(opts) {
+  opts = opts || {};
+  const state = { modes: {}, pending: {}, counts: {} };
+  const env = buildEnv({ responder: () => ({ ok: true }) });
+  const realFetch = env.ctx.fetch;
+  env.poll = state;
+  env.epOf = (u) => {
+    const m = /\/api\/([a-z-]+)/.exec(String(u));
+    return m ? m[1] : "other";
+  };
+  env.ctx.fetch = function (url, init) {
+    const u = String(url), k = env.epOf(u);
+    state.counts[k] = (state.counts[k] || 0) + 1;
+    const mode = state.modes[k] || "ok";
+    if (mode === "fail") return Promise.reject(new Error("probe: " + k + " down"));
+    if (mode === "defer") {
+      return new Promise((resolve, reject) => {
+        (state.pending[k] = state.pending[k] || []).push({
+          resolveWith: (payload) => resolve({ ok: true, status: 200,
+            json: () => Promise.resolve(payload || { ok: true }) }),
+          rejectWith: (e) => reject(e || new Error("probe: deferred " + k)),
+        });
+      });
+    }
+    return realFetch(url, init);
+  };
+  return env;
+}
+
+// settle() is already defined above by the queue-refresh coverage.
+const diag = (ctx, name) => ev(ctx, "pollDiagnostics()")[name];
+// Top-level `const` lands in the context's global LEXICAL environment rather
+// than on the sandbox object, so the pollers are called the same way app.js
+// itself resolves them: by name, in scope.
+const call = (ctx, fn) => ev(ctx, fn + "()");
+
+// Every converted poller: the exported function, its controller name, and the
+// endpoint its FIRST request hits.
+const POLLERS = [
+  { fn: "refresh",             name: "state",         ep: "state" },
+  { fn: "refreshAgentEvents",  name: "agent-events",  ep: "agent-events" },
+  { fn: "refreshMessages",     name: "messages",      ep: "messages" },
+  { fn: "refreshHealth",       name: "health",        ep: "health" },
+  { fn: "refreshTaskState",    name: "task-state",    ep: "task-state" },
+  { fn: "refreshArchiveIndex", name: "archive-index", ep: "archive-index" },
+  { fn: "loadConversations",   name: "conversations", ep: "conversations" },
+];
+
+// 12a. CONCURRENCY CONTROL. Hold the response open past several polling ticks
+//      and prove exactly one request is active with no backlog.
+for (const p of POLLERS) {
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  env.poll.modes[p.ep] = "defer";
+
+  const active = call(ctx, p.fn);             // owns the slot
+  const ticks = [];
+  for (let i = 0; i < 4; i++) ticks.push(await call(ctx, p.fn));
+  eq(ticks, ["coalesced", "coalesced", "coalesced", "coalesced"],
+     p.fn + ": ticks during an active request COALESCE, they start nothing");
+  eq(env.poll.counts[p.ep], 1,
+     p.fn + ": AT MOST ONE request is active no matter how many ticks arrive");
+  eq(env.poll.pending[p.ep].length, 1, p.fn + ": exactly one outstanding request");
+  ok(diag(ctx, p.name).active === true, p.fn + ": the active request owns the slot");
+
+  // The active request is NOT invalidated by those ticks: it settles normally.
+  env.poll.pending[p.ep].shift().resolveWith({ ok: true });
+  eq(await active, "ran", p.fn + ": the active request RUNS rather than being discarded");
+
+  // Exactly ONE coalesced follow-up was started, not four.
+  eq(env.poll.counts[p.ep], 2, p.fn + ": exactly ONE coalesced follow-up, no backlog");
+  eq(diag(ctx, p.name).coalesced, 4, p.fn + ": all four ticks were counted as coalesced");
+  if (env.poll.pending[p.ep].length) env.poll.pending[p.ep].shift().resolveWith({ ok: true });
+  for (let i = 0; i < 4; i++) await settle();
+  eq(env.poll.counts[p.ep], 2, p.fn + ": the follow-up does not chain into a storm");
+}
+
+// 12b. SUSTAINED slow endpoint with continuous ticking still makes progress and
+//      never accumulates a backlog.
+for (const p of POLLERS) {
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  env.poll.modes[p.ep] = "defer";
+  const first = call(ctx, p.fn);
+  for (let i = 0; i < 12; i++) await call(ctx, p.fn);  // twelve ticks
+  eq(env.poll.counts[p.ep], 1, p.fn + ": twelve ticks produce ONE request");
+  env.poll.pending[p.ep].shift().resolveWith({ ok: true });
+  eq(await first, "ran", p.fn + ": the request completes despite continuous ticking");
+  eq(env.poll.counts[p.ep], 2, p.fn + ": twelve ticks collapse into ONE follow-up");
+  if (env.poll.pending[p.ep].length) env.poll.pending[p.ep].shift().resolveWith({ ok: true });
+}
+
+// 12c. FAILURE releases the slot, and a later tick recovers. A stuck flag would
+//      be a permanent outage for that endpoint.
+for (const p of POLLERS) {
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  env.poll.modes[p.ep] = "fail";
+  eq(await call(ctx, p.fn), "ran", p.fn + ": a failing poll still returns, it does not throw");
+  ok(diag(ctx, p.name).active === false, p.fn + ": the slot is RELEASED on failure");
+  ok(diag(ctx, p.name).followUp === false, p.fn + ": no phantom follow-up is left pending");
+  const afterFail = env.poll.counts[p.ep];
+  for (let i = 0; i < 5; i++) await settle();
+  eq(env.poll.counts[p.ep], afterFail,
+     p.fn + ": a failure does NOT trigger a retry storm");
+
+  env.poll.modes[p.ep] = "ok";
+  eq(await call(ctx, p.fn), "ran", p.fn + ": a later tick recovers normally");
+  ok(diag(ctx, p.name).active === false, p.fn + ": the slot is released after recovery");
+}
+
+// 12d. A FAILING poller does not wedge an UNRELATED endpoint. Endpoints are not
+//      globally serialised; each keeps its own slot.
+{
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  env.poll.modes["messages"] = "defer";
+  const held = call(ctx, "refreshMessages");          // messages held open
+  eq(await call(ctx, "refreshMessages"), "coalesced", "messages coalesces while held");
+
+  // A different endpoint must still run to completion, concurrently.
+  eq(await call(ctx, "refreshAgentEvents"), "ran",
+     "an UNRELATED endpoint runs while another is held open");
+  eq(await call(ctx, "refreshHealth"), "ran", "and another one does too");
+  ok(diag(ctx, "messages").active === true, "the held endpoint still owns its own slot");
+  ok(diag(ctx, "agent-events").active === false, "the unrelated endpoint released its slot");
+  env.poll.pending["messages"].shift().resolveWith({ ok: true });
+  await held;
+  if (env.poll.pending["messages"] && env.poll.pending["messages"].length) {
+    env.poll.pending["messages"].shift().resolveWith({ ok: true });
+  }
+}
+
+// 12e. loadConversations is the worst case: ONE call fans out to several
+//      sequential requests, so bounding the OUTER call is what stops the
+//      multiplication.
+{
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  ev(ctx, 'selectedConvThread = "thr-alpha";');
+  env.poll.modes["conversations"] = "defer";
+  const held = call(ctx, "loadConversations");
+  for (let i = 0; i < 6; i++) await call(ctx, "loadConversations");
+  eq(env.poll.counts["conversations"], 1,
+     "six ticks during a fan-out produce ONE outer request");
+  ok(!env.poll.counts["active-run"],
+     "the inner fan-out has not started while the outer call is still pending");
+  env.poll.pending["conversations"].shift().resolveWith({ conversations: [] });
+  await held;
+  for (let i = 0; i < 6; i++) await settle();
+  eq(env.poll.counts["conversations"], 2,
+     "six ticks collapse into exactly ONE follow-up, not six fan-outs");
+}
+
+// 12f. The work-item poller is UNTOUCHED and keeps its own distinct contract.
+{
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  ok(ev(ctx, "typeof queueRefreshInFlight") === "boolean",
+     "refreshWorkItems keeps its own in-flight flag, not the generic controller");
+  ok(ev(ctx, "typeof runWorkItemsRefresh") === "function",
+     "refreshWorkItems keeps its own inner request function");
+  ok(ev(ctx, "typeof queueRefreshGeneration") === "number",
+     "refreshWorkItems keeps its monotonic generation guard");
+  ok(ev(ctx, 'pollDiagnostics()["work-items"] === undefined'),
+     "work-items is NOT registered in the generic controller");
+  // Its four semantic outcomes are unchanged, and distinct from POLL_RAN.
+  ok(ev(ctx, 'refreshSucceeded("confirmed")') === true, "confirmed is still a success");
+  ok(ev(ctx, 'refreshSucceeded("coalesced")') === false, "coalesced is still not a success");
+  ok(ev(ctx, "POLL_RAN") === "ran", "the generic outcome is distinct from the queue outcomes");
+}
+
+// 12g. LIFECYCLE. Repeated wire() must not multiply controllers, intervals or
+//      listeners, and boot must register exactly the intended pollers.
+{
+  const env = pollEnv({});
+  const intervals = [];
+  env.ctx.setInterval = function (fn, ms) { intervals.push(ms); return intervals.length; };
+  const ctx = loadApp(env);
+
+  eq(ev(ctx, "pollControllers.size"), 7,
+     "exactly SEVEN pollers are registered with the bounded controller");
+  const names = ev(ctx, "Array.from(pollControllers.keys()).sort()");
+  eq(names, ["agent-events", "archive-index", "conversations", "health",
+             "messages", "state", "task-state"],
+     "the registered controllers are exactly the intended endpoints");
+
+  ctx.wire();
+  const afterFirst = intervals.length;
+  const listenersAfterFirst = Object.keys(ctx._winListeners)
+    .reduce((n, k) => n + ctx._winListeners[k].length, 0);
+  ok(afterFirst > 0, "wire() installs the recurring intervals");
+
+  ctx.wire();
+  ctx.wire();
+  eq(ev(ctx, "pollControllers.size"), 7,
+     "repeated wire() does NOT multiply the bounded controllers");
+  eq(intervals.length, afterFirst * 3,
+     "each wire() installs its own intervals (unchanged pre-existing behaviour)");
+  // The controllers are what bound the traffic, so even with extra intervals
+  // installed, concurrent ticks still collapse to one request per endpoint.
+  const env2 = pollEnv({});
+  const ctx2 = loadApp(env2);
+  env2.poll.modes["health"] = "defer";
+  const a = call(ctx2, "refreshHealth");
+  await Promise.all([call(ctx2, "refreshHealth"), call(ctx2, "refreshHealth"),
+                     call(ctx2, "refreshHealth")]);
+  eq(env2.poll.counts["health"], 1,
+     "even with several tickers, one endpoint keeps ONE active request");
+  env2.poll.pending["health"].shift().resolveWith({ ok: true });
+  await a;
+  if (env2.poll.pending["health"] && env2.poll.pending["health"].length) {
+    env2.poll.pending["health"].shift().resolveWith({ ok: true });
+  }
+}
+
+// 12h. NO DURABLE WRITE is produced by any amount of polling.
+{
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  for (const p of POLLERS) { await call(ctx, p.fn); await call(ctx, p.fn); }
+  for (let i = 0; i < 4; i++) await settle();
+  eq(env.posted.filter((x) => x.method === "POST").length, 0,
+     "no amount of polling emits a durable write");
+}
+
+// 12i. The previously UNHANDLED rejection path: /api/state had no catch at all,
+//      so every failed poll was a silent unhandled rejection.
+{
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  const unhandled = [];
+  const onUnhandled = (e) => unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+
+  env.poll.modes["state"] = "fail";
+  eq(await call(ctx, "refresh"), "ran", "a failing /api/state poll returns instead of throwing");
+  for (let i = 0; i < 6; i++) await settle();
+  eq(unhandled.length, 0, "a failing /api/state poll produces ZERO unhandled rejections");
+  ok(diag(ctx, "state").active === false, "and the slot is still released");
+
+  // The FOLLOW-UP itself must be the thing that fails. The earlier version of
+  // this case rejected the HELD request, whose finally then started a second
+  // request that was simply left pending, so the follow-up path was never
+  // exercised at all.
+  env.poll.modes["state"] = "defer";
+  const before = env.poll.counts["state"];       // this block already polled once
+  const held = call(ctx, "refresh");
+  await call(ctx, "refresh");                           // requests the follow-up
+  eq(env.poll.counts["state"] - before, 1, "the tick started NO second request");
+  eq(env.poll.pending["state"].length, 1, "only the held request is outstanding");
+  env.poll.pending["state"].shift().resolveWith({ ok: true });   // held SUCCEEDS
+  await held;
+  for (let i = 0; i < 6; i++) await settle();
+  eq(env.poll.counts["state"] - before, 2, "the coalesced follow-up actually started");
+  eq(env.poll.pending["state"].length, 1, "and the FOLLOW-UP is what is now in flight");
+  env.poll.pending["state"].shift().rejectWith(new Error("probe: follow-up down"));
+  for (let i = 0; i < 6; i++) await settle();
+  eq(unhandled.length, 0,
+     "a FAILING coalesced follow-up produces zero unhandled rejections");
+  ok(diag(ctx, "state").active === false, "and the slot is released after it");
+  process.removeListener("unhandledRejection", onUnhandled);
+}
+
+// 12i-2. The controller's OWN catch: a run() that genuinely THROWS, both as the
+//        active request and as the coalesced follow-up. The wrapped pollers all
+//        handle their own transport errors internally, so this drives
+//        boundedPoll directly to exercise the defensive invariant itself.
+{
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  const unhandled = [];
+  const onUnhandled = (e) => unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+
+  // (a) the ACTIVE request throws.
+  ev(ctx, 'globalThis.__t1 = boundedPoll("probe-throw", async () => { throw new Error("boom"); });');
+  eq(await ev(ctx, "__t1()"), "ran", "boundedPoll RETURNS even when run() throws");
+  ok(diag(ctx, "probe-throw").active === false, "the slot is released after a throwing run");
+  for (let i = 0; i < 6; i++) await settle();
+  eq(unhandled.length, 0, "a throwing run() produces zero unhandled rejections");
+
+  // (b) the coalesced FOLLOW-UP throws. Call 1 is held open until the test
+  //     releases it; call 2 -- the follow-up started from finally and never
+  //     awaited -- throws outright.
+  ev(ctx, `
+    globalThis.__n = 0;
+    globalThis.__gate = null;
+    globalThis.__t2 = boundedPoll("probe-follow", async () => {
+      globalThis.__n += 1;
+      if (globalThis.__n === 1) { await new Promise((r) => { globalThis.__gate = r; }); return; }
+      throw new Error("follow-up boom");
+    });
+  `);
+  const held2 = ev(ctx, "__t2()");
+  eq(await ev(ctx, "__t2()"), "coalesced", "a tick during the held call coalesces");
+  ev(ctx, "__gate();");
+  eq(await held2, "ran", "the held call completes");
+  for (let i = 0; i < 8; i++) await settle();
+  eq(ev(ctx, "__n"), 2, "the coalesced follow-up RAN and it is the one that threw");
+  eq(unhandled.length, 0,
+     "a THROWING coalesced follow-up produces zero unhandled rejections");
+  ok(diag(ctx, "probe-follow").active === false,
+     "the slot is released even when the follow-up throws");
+  ok(diag(ctx, "probe-follow").followUp === false, "no phantom follow-up remains");
+  process.removeListener("unhandledRejection", onUnhandled);
+}
+
+// 12j. BOUNDARY: no recurring poller may bypass its controller. Every wrapped
+//      name must resolve to the controller wrapper, not the raw request body.
+{
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  for (const p of POLLERS) {
+    const src = ev(ctx, p.fn + ".toString()");
+    ok(src.indexOf("state.active") !== -1,
+       p.fn + " resolves to the bounded controller wrapper, not the raw request");
+  }
+  // Every raw body must appear EXACTLY twice in the source: its own declaration
+  // and the boundedPoll() argument. A third occurrence would be a production
+  // call site that bypasses the controller, which is the regression this
+  // assertion exists to catch. toString() checks alone cannot detect that.
+  const appSrc = fs.readFileSync(APP, "utf8");
+  for (const raw of ["refreshStateRequest", "refreshAgentEventsRequest",
+                     "refreshMessagesRequest", "refreshHealthRequest",
+                     "refreshTaskStateRequest", "refreshArchiveIndexRequest",
+                     "loadConversationsRequest"]) {
+    ok(ev(ctx, "typeof " + raw) === "function",
+       raw + " exists as the inner request body");
+    const hits = appSrc.split(raw).length - 1;
+    eq(hits, 2, raw + " appears exactly twice: its declaration and the boundedPoll argument");
+    ok(appSrc.indexOf("async function " + raw + "(") !== -1,
+       raw + " occurrence 1 is its declaration");
+    ok(appSrc.indexOf(", " + raw + ");") !== -1,
+       raw + " occurrence 2 is the boundedPoll argument, not a call");
+    const declHits = appSrc.split("async function " + raw + "(").length - 1;
+    const argHits = appSrc.split(", " + raw + ");").length - 1;
+    eq(declHits, 1, raw + " is declared exactly once");
+    eq(argHits, 1, raw + " is passed to boundedPoll exactly once");
+    eq(hits, declHits + argHits,
+       raw + " has NO occurrence beyond its declaration and the boundedPoll " +
+       "argument, so no production path invokes it directly");
+  }
+}
+
+// 12k. GLOBAL SURFACE. Converting `function name()` to `const name = ...` removes
+//      the window property. That is safe ONLY if nothing resolves these names
+//      through the global object. Proven here rather than asserted.
+{
+  const html = fs.readFileSync(HTML, "utf8");
+  const appSrc = fs.readFileSync(APP, "utf8");
+  const converted = ["refresh", "refreshAgentEvents", "refreshMessages", "refreshHealth",
+                     "refreshTaskState", "refreshArchiveIndex", "loadConversations"];
+
+  // No inline event attribute anywhere in the shipped markup.
+  ok(!/\son[a-z]+\s*=\s*["']/i.test(html),
+     "index.html contains NO inline event handler attributes at all");
+  // index.html is the only markup app.js is served with, and it must not name
+  // any converted poller.
+  for (const name of converted) {
+    ok(html.indexOf(name) === -1, "index.html never references " + name);
+  }
+  // No global-object access to a converted poller from the script itself.
+  for (const name of converted) {
+    for (const pattern of ["window." + name, "globalThis." + name,
+                           'window["' + name + '"]', "window['" + name + "']"]) {
+      ok(appSrc.indexOf(pattern) === -1, "app.js never accesses " + pattern);
+    }
+  }
+  // app.js is the ONLY script the page loads, so there is no second script that
+  // could hold a stale global reference.
+  const scripts = html.match(/<script[^>]*src=["']([^"']+)["']/g) || [];
+  eq(scripts.length, 1, "the page loads exactly one script");
+  ok(scripts[0].indexOf("app.js") !== -1, "and that script is app.js");
+
+  // The wrapped bindings still resolve lexically, which is how every call site
+  // inside app.js (including the setInterval registrations) reaches them.
+  const env = pollEnv({});
+  const ctx = loadApp(env);
+  for (const name of converted) {
+    eq(ev(ctx, "typeof " + name), "function", name + " still resolves lexically");
+  }
+}
+
 console.log((failures === 0 ? "PASS" : "FAIL") + ": " + (checks - failures) + "/" + checks + " wired-path checks");
 process.exit(failures === 0 ? 0 : 1);

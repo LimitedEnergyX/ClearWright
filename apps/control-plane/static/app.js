@@ -1221,7 +1221,9 @@ function queueCard(it) {
     (execLabel ? " (executor " + esc(execLabel) + ")" : "") + '"' +
     ' data-work-item="' + esc(it.work_item_id || "") + '">' +
     '<span class="q-title">' + title + "</span>" +
-    '<div class="q-meta">' + bits.join("") + opFlag +
+    // A button's content model is phrasing content, so the meta strip is a
+    // span laid out as a block rather than a div inside interactive markup.
+    '<span class="q-meta">' + bits.join("") + opFlag +
     // Item 10: phase and executor state are DIFFERENT facts and are labelled
     // separately, so "PHASE: VERIFICATION / EXECUTOR: IN COUNCIL" can never be
     // misread as a single contradictory status.
@@ -1229,7 +1231,7 @@ function queueCard(it) {
       esc(phaseLabel) + "</span>" : "") +
     (execLabel ? '<span class="q-exec mono" title="executor state, derived from ' +
       'runner_state only">Executor ' + esc(execLabel) + "</span>" : "") +
-    "</div></button>" + ids + warn +
+    "</span></button>" + ids + warn +
     "</div>";
 }
 
@@ -1330,31 +1332,57 @@ function reconcileQueue(el, desired) {
     if (!keep[k] && existing[k].parentNode) existing[k].parentNode.removeChild(existing[k]);
   });
 
-  let groupEl = null, curGroup = null;
+  // Group the desired list, preserving its computed order.
+  const order = [];
+  const byGroup = {};
   desired.forEach((d) => {
-    if (d.group !== curGroup) {
-      curGroup = d.group;
-      groupEl = el.querySelector('.q-group[data-group="' + d.group + '"]');
-      if (!groupEl) {
-        groupEl = document.createElement("div");
-        groupEl.className = "q-group";
-        groupEl.setAttribute("data-group", d.group);
-        groupEl.innerHTML = '<div class="q-group-head">' + esc(d.groupLabel) + "</div>";
-        el.appendChild(groupEl);
+    if (!byGroup[d.group]) { byGroup[d.group] = []; order.push(d); }
+    byGroup[d.group].push(d);
+  });
+
+  const seen = {};
+  order.forEach((first) => {
+    const g = first.group;
+    seen[g] = true;
+    let groupEl = el.querySelector('.q-group[data-group="' + g + '"]');
+    if (!groupEl) {
+      groupEl = document.createElement("div");
+      groupEl.className = "q-group";
+      groupEl.setAttribute("data-group", g);
+      groupEl.innerHTML = '<div class="q-group-head">' + esc(first.groupLabel) + "</div>";
+    }
+    // Appending an already-attached node MOVES it, so this also fixes the
+    // order of the groups themselves.
+    el.appendChild(groupEl);
+
+    byGroup[g].forEach((d, i) => {
+      const prev = existing[d.key];
+      let node;
+      if (prev && prev.getAttribute("data-sig") === d.sig) {
+        node = prev;              // UNCHANGED: identity, focus and scroll kept
+      } else {
+        const tmp = document.createElement("div");
+        tmp.innerHTML = d.html;
+        node = tmp.firstElementChild || tmp.children[0];
+        if (!node) return;
+        // A changed row may also have changed GROUP, so detach it from
+        // wherever it was rather than replacing it in its old parent.
+        if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
       }
+      // Place it at its desired index, counting past the group heading. Only
+      // move when it is genuinely out of position, so an unchanged and
+      // correctly ordered tile is never touched.
+      const want = groupEl.children[i + 1];
+      if (want !== node) groupEl.insertBefore(node, want || null);
+    });
+  });
+
+  // Groups that no longer have any desired item must not linger as empty
+  // headings.
+  Array.from(el.querySelectorAll(".q-group")).forEach((g) => {
+    if (!seen[g.getAttribute("data-group")] && g.parentNode) {
+      g.parentNode.removeChild(g);
     }
-    const prev = existing[d.key];
-    if (prev && prev.getAttribute("data-sig") === d.sig) {
-      // UNCHANGED: reuse the node as-is. This is the case that preserves focus.
-      if (prev.parentNode !== groupEl) groupEl.appendChild(prev);
-      return;
-    }
-    const next = document.createElement("div");
-    next.innerHTML = d.html;
-    const node = next.firstElementChild || next.children[0];
-    if (!node) return;
-    if (prev && prev.parentNode) prev.parentNode.replaceChild(node, prev);
-    else groupEl.appendChild(node);
   });
 }
 
@@ -1368,7 +1396,15 @@ function renderQueue() {
     const emptySig = "EMPTY";
     if (lastQueueSignature === emptySig) return;
     lastQueueSignature = emptySig;
+    // The empty transition destroys every tile, including a focused one, so it
+    // owes the same focus contract as a normal reconciliation: never silently
+    // drop focus to the document body.
+    const hadFocus = !!focusedQueueKey();
     el.innerHTML = '<p class="muted queue-empty">Nothing here in this view. Try the History / All filter.</p>';
+    if (hadFocus) {
+      el.setAttribute("tabindex", "-1");
+      if (el.focus) el.focus();
+    }
     return;
   }
   const desired = rows.map((it) => {
@@ -3781,16 +3817,17 @@ function wire() {
   // Work queue: clicking a row selects that task everywhere.
   document.getElementById("queue-groups").addEventListener("click", (e) => {
     if (eventTargetsInnerControl(e)) return;   // Copy is not "open this item"
-    const row = e.target.closest(".q-row");
-    if (!row) return;
-    const workItem = row.getAttribute("data-work-item");
+    // Activation is scoped to the EXPLICIT primary control. Treating any pixel
+    // of the row as an activation target contradicted the button model and made
+    // the identifier rows and the integrity warning navigate unexpectedly, so
+    // selecting or copying that text is now safe.
+    const btn = e.target.closest(".q-open");
+    if (!btn) return;
+    const workItem = btn.getAttribute("data-work-item") ||
+      (btn.closest(".q-row") && btn.closest(".q-row").getAttribute("data-work-item"));
     // Mouse activation goes through the SAME navigation as the keyboard so the
-    // canonical #work= route is always written. Calling selectTask() directly
-    // here left the previous route in the URL, which is precisely the stale-hash
-    // symptom this correction exists to remove.
-    if (workItem) { navigateToWorkItem(workItem); return; }
-    const thread = row.getAttribute("data-thread");
-    if (thread) selectTask(thread, null);
+    // canonical #work= route is always written.
+    if (workItem) navigateToWorkItem(workItem);
   });
 
   // Context-aware task actions are READ-ONLY navigation only: they switch view

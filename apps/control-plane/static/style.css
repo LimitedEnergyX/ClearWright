@@ -1197,3 +1197,7 @@ body.history-open .mission { display: none !important; }
   border-radius: 6px;
 }
 .q-open[aria-pressed="true"] .q-title { font-weight: 700; }
+
+/* .q-meta is a span (phrasing content, so it may sit inside the button) but
+   still lays out as a row. */
+.q-open .q-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }

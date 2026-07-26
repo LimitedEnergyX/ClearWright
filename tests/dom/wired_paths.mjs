@@ -310,6 +310,145 @@ for (const key of ["Enter", " "]) {
 }
 
 // ---------------------------------------------------------------------------
+// 4d. GROUP TRANSITION. An item whose presentation_state changes must move into
+//     its new group, not be replaced inside its old one.
+// ---------------------------------------------------------------------------
+{
+  const env = buildEnv({});
+  const ctx = loadApp(env);
+  seed(ctx);
+  ctx.wire();
+  ctx.renderQueue();
+  const groups = env.doc.getElementById("queue-groups");
+
+  const moved = JSON.parse(JSON.stringify(ITEMS));
+  moved[1].presentation_state = "needs_operator";   // beta joins alpha's group
+  seed(ctx, moved);
+  ctx.renderQueue();
+
+  const betaRow = groups.querySelector('.q-row[data-work-item="message:msg-beta"]');
+  ok(!!betaRow, "the moved item is still rendered");
+  const parentGroup = betaRow.closest(".q-group");
+  eq(parentGroup.getAttribute("data-group"), "needs_operator",
+     "a changed item lands in its DESIRED group, not its previous one");
+  eq(groups.querySelectorAll('.q-group[data-group="blocked"] .q-row').length, 0,
+     "no tile is left behind in the old group");
+}
+
+// 4e. STALE GROUP REMOVAL. A group with no remaining items must not linger as
+//     an empty heading.
+{
+  const env = buildEnv({});
+  const ctx = loadApp(env);
+  seed(ctx);
+  ctx.wire();
+  ctx.renderQueue();
+  const groups = env.doc.getElementById("queue-groups");
+  eq(groups.querySelectorAll(".q-group").length, 2, "two groups initially");
+
+  seed(ctx, [ITEMS[0]]);            // the blocked group empties out
+  ctx.renderQueue();
+
+  eq(groups.querySelectorAll('.q-group[data-group="blocked"]').length, 0,
+     "an emptied group is removed, not left as a stale heading");
+  eq(groups.querySelectorAll(".q-group").length, 1, "only the populated group remains");
+}
+
+// 4f. REORDER-ONLY. When the sort order changes but nothing else does, the
+//     rendered order must follow.
+{
+  const env = buildEnv({});
+  const c = loadApp(env);
+  const pair = [
+    { work_item_id: "message:msg-one", thread_id: "thr-one", title: "One",
+      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council",
+      claimed_by: "claude", last_activity_at: "2026-07-25T10:00:00Z" },
+    { work_item_id: "message:msg-two", thread_id: "thr-two", title: "Two",
+      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council",
+      claimed_by: "claude", last_activity_at: "2026-07-25T09:00:00Z" },
+  ];
+  seed(c, pair);
+  c.wire();
+  c.renderQueue();
+  const groups = env.doc.getElementById("queue-groups");
+  const first = () => groups.querySelectorAll(".q-row[data-work-item]")[0]
+    .getAttribute("data-work-item");
+  const initial = first();
+
+  // Flip which one is most recent; ranking sorts by last_activity_at desc.
+  const flipped = JSON.parse(JSON.stringify(pair));
+  flipped[0].last_activity_at = "2026-07-25T08:00:00Z";
+  flipped[1].last_activity_at = "2026-07-25T11:00:00Z";
+  seed(c, flipped);
+  c.renderQueue();
+
+  ok(first() !== initial || true, "reorder path executed");
+  eq(first(), "message:msg-two",
+     "a reorder-only update is reflected in the rendered order");
+  eq(groups.querySelectorAll(".q-row[data-work-item]").length, 2,
+     "reordering does not duplicate or drop tiles");
+}
+
+// 4g. THE LAST ITEM DISAPPEARS. The empty transition owes the same focus
+//     contract: focus must not fall to the document body.
+{
+  const env = buildEnv({});
+  const ctx = loadApp(env);
+  seed(ctx, [ITEMS[0]]);
+  ctx.wire();
+  ctx.renderQueue();
+  const groups = env.doc.getElementById("queue-groups");
+  const btn = groups.querySelector(".q-open");
+  btn.focus();
+  same(env.doc.activeElement, btn, "focus starts on the only tile");
+
+  seed(ctx, []);                    // the queue empties entirely
+  ctx.renderQueue();
+
+  ok(env.doc.activeElement !== env.doc.body,
+     "focus does not fall to the document body when the last tile goes");
+  same(env.doc.activeElement, groups,
+     "focus moves to the queue container when no tile remains");
+}
+
+// 4h. Identifier text and the integrity warning are NOT activation targets.
+{
+  const env = buildEnv({});
+  const ctx = loadApp(env);
+  const shared = [
+    { work_item_id: "message:msg-s1", thread_id: "thr-shared", title: "S1",
+      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council",
+      claimed_by: "claude", last_activity_at: "2026-07-25T10:00:00Z" },
+    { work_item_id: "message:msg-s2", thread_id: "thr-shared", title: "S2",
+      presentation_state: "blocked", status: "planning", runner_state: "waiting_on_council",
+      claimed_by: "claude", last_activity_at: "2026-07-25T09:00:00Z" },
+  ];
+  seed(ctx, shared);
+  ctx.wire();
+  ctx.renderQueue();
+  const groups = env.doc.getElementById("queue-groups");
+
+  const warn = groups.querySelector(".q-integrity");
+  ok(!!warn, "a shared thread raises the integrity warning");
+  ev(ctx, 'selectedWorkItemId = null;');
+  warn.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), null,
+     "clicking the integrity warning does not navigate");
+
+  const idv = groups.querySelector(".q-idv");
+  ok(!!idv, "identifier values are rendered");
+  idv.dispatchEvent(new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), null,
+     "clicking identifier text does not navigate; it can be selected and copied");
+
+  // The explicit control still activates.
+  groups.querySelector(".q-open").dispatchEvent(
+    new MiniEvent("click", { bubbles: true, isTrusted: true }));
+  eq(ev(ctx, "selectedWorkItemId"), "message:msg-s1",
+     "the explicit primary control still activates");
+}
+
+// ---------------------------------------------------------------------------
 // 5. THE REAL send() PATH refuses through every destination-integrity branch.
 // ---------------------------------------------------------------------------
 function sendEnv(hash) {

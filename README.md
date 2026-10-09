@@ -17,9 +17,11 @@ The specification is the **ClearWright Protocol**: Request to Act (RTA), Clear t
 Act (CTA), Denied to Act (DTA), Request for Information (RFI), and durable
 **clearance packets** that move through a four-state **clearance queue**.
 
-> **Status: early local alpha.** ClearWright is a local reference implementation
-> of the ClearWright Protocol, human-commanded and operator-controlled, and under
-> active development. It is in daily governed use by its operator - including
+> **Status: paused indefinitely.** ClearWright is an early local alpha reference
+> implementation of the ClearWright Protocol, human-commanded and
+> operator-controlled. Development is paused indefinitely; the code and documents
+> remain public for reference and review, and issues may not receive responses.
+> It is in daily governed use by its operator - including
 > governing this repository's own development through an automated real GPT +
 > Codex Review Council that dispatches over a fail-closed egress guard. It is
 > single-operator and local: not multi-user, not publicly deployable, and not
